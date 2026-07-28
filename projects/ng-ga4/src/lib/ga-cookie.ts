@@ -68,3 +68,24 @@ export function parseGaCookie(value: string): string | null {
     // is not exactly two numeric fields still returns null.
     return /^\d+\.\d+$/.test(trimmed) ? trimmed : null;
 }
+
+/**
+ * Mint a client ID in gtag's `<random>.<firstSeenSeconds>` shape.
+ *
+ * Randomness arrives as a parameter — an integer in `[1, 2^31 - 1]`, which the
+ * caller draws from `crypto.getRandomValues` — so this stays pure and the format
+ * is testable against fixed inputs. That range is what gives gtag's IDs their
+ * familiar ten-digit first field.
+ */
+export function mintGtagClientId(nowMs: number, random: number): string {
+    return `${random}.${Math.floor(nowMs / 1000)}`;
+}
+
+/**
+ * Build a `_ga` cookie value. `domainComponents` is the number of dot-separated
+ * labels in the cookie's domain (`example.com` → 2), which is what gtag puts in
+ * the second field.
+ */
+export function formatGaCookie(clientId: string, domainComponents: number): string {
+    return `GA1.${domainComponents}.${clientId}`;
+}

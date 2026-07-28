@@ -1,4 +1,4 @@
-import { parseGaCookie, readCookieValue } from './ga-cookie';
+import { formatGaCookie, mintGtagClientId, parseGaCookie, readCookieValue } from './ga-cookie';
 
 describe('readCookieValue', () => {
     it('reads a cookie by exact name', () => {
@@ -89,5 +89,26 @@ describe('parseGaCookie', () => {
 
     it('rejects a prefixed value whose remainder is whitespace-only', () => {
         expect(parseGaCookie('GA1.1.   ')).toBeNull();
+    });
+});
+
+describe('mintGtagClientId', () => {
+    it('joins the random field and whole seconds, as gtag does', () => {
+        expect(mintGtagClientId(1700000000000, 1234567890)).toBe('1234567890.1700000000');
+    });
+
+    it('truncates sub-second precision rather than rounding', () => {
+        expect(mintGtagClientId(1700000000999, 42)).toBe('42.1700000000');
+    });
+});
+
+describe('formatGaCookie', () => {
+    it('prefixes with GA1 and the domain-component count', () => {
+        expect(formatGaCookie('1234567890.1700000000', 2)).toBe('GA1.2.1234567890.1700000000');
+    });
+
+    it('round-trips through parseGaCookie', () => {
+        const clientId = '12345678-1234-1234-1234-123456789abc';
+        expect(parseGaCookie(formatGaCookie(clientId, 3))).toBe(clientId);
     });
 });
