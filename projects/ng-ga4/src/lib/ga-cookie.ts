@@ -63,5 +63,8 @@ export function parseGaCookie(value: string): string | null {
         const clientId = prefixed[1].trim();
         return clientId || null;
     }
+    // Defensive interop: server-side and custom `_ga` writers do not all emit gtag's prefix.
+    // The strict `^\d+\.\d+$` test ensures this branch cannot swallow junk: anything that
+    // is not exactly two numeric fields still returns null.
     return /^\d+\.\d+$/.test(trimmed) ? trimmed : null;
 }

@@ -34,6 +34,10 @@ describe('readCookieValue', () => {
         expect(readCookieValue('_ga=GA1.1.111.222%20', '_ga')).toBe('GA1.1.111.222 ');
     });
 
+    it('falls back to raw value when percent-encoding is invalid', () => {
+        expect(readCookieValue('_ga=abc%zzdef', '_ga')).toBe('abc%zzdef');
+    });
+
     it('returns null for an absent cookie, an empty jar, and a non-string jar', () => {
         expect(readCookieValue('other=1', '_ga')).toBeNull();
         expect(readCookieValue('', '_ga')).toBeNull();
@@ -81,5 +85,9 @@ describe('parseGaCookie', () => {
         expect(parseGaCookie('')).toBeNull();
         expect(parseGaCookie('   ')).toBeNull();
         expect(parseGaCookie(null as any)).toBeNull();
+    });
+
+    it('rejects a prefixed value whose remainder is whitespace-only', () => {
+        expect(parseGaCookie('GA1.1.   ')).toBeNull();
     });
 });
