@@ -72,10 +72,9 @@ export function parseGaCookie(value: string): string | null {
 /**
  * Mint a client ID in gtag's `<random>.<firstSeenSeconds>` shape.
  *
- * Randomness arrives as a parameter — an integer in `[1, 2^31 - 1]`, which the
- * caller draws from `crypto.getRandomValues` — so this stays pure and the format
- * is testable against fixed inputs. That range is what gives gtag's IDs their
- * familiar ten-digit first field.
+ * Expects `random` to be an integer in `[1, 2^31 - 1]` — a range the caller
+ * enforces when drawing from `crypto.getRandomValues`. That range is what gives
+ * gtag's IDs their familiar ten-digit first field.
  */
 export function mintGtagClientId(nowMs: number, random: number): string {
     return `${random}.${Math.floor(nowMs / 1000)}`;
