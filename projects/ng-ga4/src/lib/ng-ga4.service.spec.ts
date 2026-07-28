@@ -689,8 +689,14 @@ describe('NgGa4Service', () => {
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
-        it('keeps low-entropy device fields when high-entropy hints are blocked', async () => {
-            spyOn<any>(service, 'getUserAgentData').and.returnValue(fakeUaData({ reject: true }));
+        const SAFARI_MACOS = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15';
+        const CHROME_WINDOWS = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+        it('falls back to the user-agent string when userAgentData is unavailable', async () => {
+            // Safari and Firefox never implement userAgentData, so this is the path
+            // most non-Chromium traffic actually takes.
+            spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
+            spyOn<any>(service, 'getUserAgentString').and.returnValue(SAFARI_MACOS);
 
             await service.init();
             service.trackEvent('x');
@@ -698,8 +704,43 @@ describe('NgGa4Service', () => {
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             const device = req.request.body.device;
             expect(device.category).toBe('desktop');
-            expect('operating_system' in device).toBe(false);
-            expect('browser' in device).toBe(false);
+            expect(device.operating_system).toBe('macOS');
+            expect(device.operating_system_version).toBe('10.15.7');
+            expect(device.browser).toBe('Safari');
+            expect(device.browser_version).toBe('17.4.1');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('fills the gaps from the user-agent string when high-entropy hints are blocked', async () => {
+            spyOn<any>(service, 'getUserAgentData').and.returnValue(fakeUaData({ reject: true }));
+            spyOn<any>(service, 'getUserAgentString').and.returnValue(CHROME_WINDOWS);
+
+            await service.init();
+            service.trackEvent('x');
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const device = req.request.body.device;
+            expect(device.category).toBe('desktop');
+            expect(device.operating_system).toBe('Windows');
+            expect(device.browser).toBe('Chrome');
+            expect(device.browser_version).toBe('120.0.0.0');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('prefers userAgentData over the user-agent string when both are present', async () => {
+            // Client Hints are authoritative; the UA string is only ever a gap-filler.
+            spyOn<any>(service, 'getUserAgentData').and.returnValue(fakeUaData());
+            spyOn<any>(service, 'getUserAgentString').and.returnValue(SAFARI_MACOS);
+
+            await service.init();
+            service.trackEvent('x');
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const device = req.request.body.device;
+            expect(device.operating_system).toBe('Windows');
+            expect(device.operating_system_version).toBe('15.0.0');
+            expect(device.browser).toBe('Chrome');
+            expect(device.browser_version).toBe('120.0.1.2');
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
