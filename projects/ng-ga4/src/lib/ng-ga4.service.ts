@@ -5,6 +5,7 @@ import { NavigationEnd, Router } from '@angular/router';
 import { filter, Subscription } from 'rxjs';
 import { NG_GA4_CONFIG, NgGa4Config } from './ng-ga4.config';
 import { countryFromTimeZone } from './tz-country';
+import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 
 interface Ga4Device {
     language?: string;
@@ -337,11 +338,30 @@ export class NgGa4Service implements OnDestroy {
                     device.browser_version = browser.version;
                 }
             } catch {
-                // High-entropy hints unavailable (e.g. non-Chromium / blocked) — keep low-entropy fields.
+                // High-entropy hints unavailable (blocked, or a permissions policy denies
+                // them) — the UA-string fallback below fills what we did not get.
             }
         }
 
+        // Client Hints are authoritative where present; the UA string only fills gaps.
+        // That covers both browsers with no userAgentData at all (Safari, Firefox) and
+        // Chromium whose high-entropy hints were refused above.
+        this.fillDeviceGapsFromUserAgent(device);
+
         return Object.keys(device).length ? device : null;
+    }
+
+    private fillDeviceGapsFromUserAgent(device: Ga4Device): void {
+        const ua = this.getUserAgentString();
+        if (!ua) {
+            return;
+        }
+        const parsed = deviceFromUserAgent(ua, navigator.maxTouchPoints ?? 0);
+        for (const key of Object.keys(parsed) as Array<keyof UaDeviceInfo>) {
+            if (device[key] === undefined && parsed[key] !== undefined) {
+                device[key] = parsed[key];
+            }
+        }
     }
 
     private pickBrowser(list: Array<{ brand: string; version: string }> | undefined): { brand: string; version: string } | null {
@@ -367,6 +387,10 @@ export class NgGa4Service implements OnDestroy {
 
     private getUserAgentData(): any {
         return typeof navigator !== 'undefined' ? (navigator as any).userAgentData : undefined;
+    }
+
+    private getUserAgentString(): string | undefined {
+        return typeof navigator !== 'undefined' ? navigator.userAgent : undefined;
     }
 
     private ensureSession(): void {
