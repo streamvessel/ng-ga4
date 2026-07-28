@@ -6,7 +6,7 @@ import { filter, Subscription } from 'rxjs';
 import { NG_GA4_CONFIG, NgGa4Config } from './ng-ga4.config';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
-import { parseGaCookie, readCookieValue } from './ga-cookie';
+import { formatGaCookie, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 
 interface Ga4Device {
     language?: string;
@@ -34,6 +34,8 @@ export class NgGa4Service implements OnDestroy {
     private userLocation: Ga4UserLocation | null = null;
     private pendingCalls: Array<() => void> = [];
     private readonly SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+    // gtag.js's own default _ga lifetime.
+    private readonly GA_COOKIE_MAX_AGE_SECONDS = 63072000;
     private readonly GA4_ENDPOINT = 'https://www.google-analytics.com/mp/collect';
     private readonly GA4_DEBUG_ENDPOINT = 'https://www.google-analytics.com/debug/mp/collect';
 
@@ -550,7 +552,66 @@ export class NgGa4Service implements OnDestroy {
             }
         }
 
-        return this.loadOrCreateClientIdFromLocalStorage();
+        // 'cookie' means the cookie is authoritative, so with none present we mint in
+        // gtag's own shape rather than adopting a legacy UUID. That re-identifies an
+        // existing user exactly once, which is why it is opt-in and not the default.
+        if (source === 'cookie') {
+            const minted = mintGtagClientId(Date.now(), this.randomClientIdSeed());
+            this.storeClientId(minted);
+            this.persistGaCookie(minted);
+            return minted;
+        }
+
+        const stored = this.loadOrCreateClientIdFromLocalStorage();
+        // The source check is load-bearing: 'storage' means "never touch the cookie",
+        // so it has to override writeGaCookie rather than combining with it.
+        if (source !== 'storage' && this.config.writeGaCookie) {
+            // Write the ID we already have rather than minting: re-identifying users
+            // is the harm this whole feature exists to avoid. The cost is a _ga whose
+            // payload may be a UUID instead of gtag's numeric pair — GA4 accepts any
+            // client_id string, and if gtag later rejects the shape it rewrites the
+            // cookie, which our next read adopts. One flip, then convergence.
+            this.persistGaCookie(stored);
+        }
+        return stored;
+    }
+
+    private randomClientIdSeed(): number {
+        const buffer = new Uint32Array(1);
+        crypto.getRandomValues(buffer);
+        // [1, 2^31 - 1], matching the ten-digit first field gtag emits.
+        return (buffer[0] % 2147483647) + 1;
+    }
+
+    // Named `persistGaCookie`, not `writeGaCookie`, so it is never confused at a
+    // glance with the `config.writeGaCookie` flag that gates it.
+    private persistGaCookie(clientId: string): void {
+        const domain = this.discoverCookieDomain();
+        const components = domain ? domain.split('.').length : 1;
+        const attributes = [
+            `path=/`,
+            `max-age=${this.GA_COOKIE_MAX_AGE_SECONDS}`,
+            `SameSite=Lax`,
+            ...(domain ? [`domain=.${domain}`] : [])
+        ];
+        this.setCookie(`_ga=${formatGaCookie(clientId, components)}; ${attributes.join('; ')}`);
+    }
+
+    // There is no public suffix list in the browser, so the registrable domain has to
+    // be discovered: trial-set a throwaway cookie at each candidate shortest-first and
+    // keep the first that sticks. Browsers refuse cookies scoped to a public suffix,
+    // which makes that refusal the oracle. Returns null when no domain attribute is
+    // wanted at all (single-label hosts, IP literals).
+    private discoverCookieDomain(): string | null {
+        const probe = '_ng_ga4_domain_probe';
+        for (const candidate of registrableDomainCandidates(this.getHostname())) {
+            this.setCookie(`${probe}=1; path=/; domain=.${candidate}`);
+            if (readCookieValue(this.getCookieJar(), probe) !== null) {
+                this.setCookie(`${probe}=; path=/; domain=.${candidate}; max-age=0`);
+                return candidate;
+            }
+        }
+        return null;
     }
 
     private readGaCookieClientId(): string | null {
