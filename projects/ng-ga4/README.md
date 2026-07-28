@@ -75,7 +75,7 @@ bootstrapApplication(AppComponent, {
 | `enabled` | `boolean` | Yes | Enable/disable analytics (no-ops when `false`) |
 | `isExtension` | `boolean` | Yes | Set `true` for Chrome extensions — uses `chrome.storage` instead of `localStorage` |
 | `siteUrl` | `string` | No | Base URL for `page_location` parameter. Required for extensions since `document.location.href` points to `chrome-extension://` |
-| `debug` | `boolean` | No | Send events to the GA4 debug endpoint and log validation responses to the console |
+| `debug` | `boolean` | No | Tag events with `debug_mode` so they appear in GA4 DebugView, and log validation problems to the console. Events are still recorded. |
 
 ## Usage
 
@@ -158,7 +158,11 @@ NgGa4Module.forRoot({
 
 ## Debug Mode
 
-Set `debug: true` to send events to the [GA4 debug endpoint](https://developers.google.com/analytics/devguides/collection/protocol/ga4/validating-events). Validation responses are logged to the browser console.
+Set `debug: true` to tag every event with `debug_mode`, which makes it show up in [DebugView](https://support.google.com/analytics/answer/7201382) in the GA4 UI.
+
+**Events are still recorded normally.** Debug mode changes what GA4 shows you, not whether the data counts — hits go to the production endpoint over your configured transport, so debug traffic exercises the same delivery path production will.
+
+Alongside each hit, the same payload is posted to the [validation endpoint](https://developers.google.com/analytics/devguides/collection/protocol/ga4/validating-events), and anything it objects to is logged with `console.warn`. A clean payload logs nothing. The validation endpoint is only ever a side channel: events sent there are never recorded, which is why the real hit goes out separately.
 
 ```typescript
 NgGa4Module.forRoot({

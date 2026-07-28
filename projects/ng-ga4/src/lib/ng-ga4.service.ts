@@ -142,8 +142,7 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private sendToGA4(events: Array<{ name: string; params?: Record<string, any> }>): void {
-        const endpoint = this.config.debug ? this.GA4_DEBUG_ENDPOINT : this.GA4_ENDPOINT;
-        const url = `${endpoint}?measurement_id=${this.config.measurementId}&api_secret=${this.config.apiSecret}`;
+        const url = this.collectUrl(this.GA4_ENDPOINT);
 
         const body: {
             client_id: string;
@@ -152,7 +151,11 @@ export class NgGa4Service implements OnDestroy {
             user_location?: Ga4UserLocation;
         } = {
             client_id: this.clientId,
-            events
+            // debug_mode has to ride on every event in the batch — DebugView only
+            // surfaces the individual events that carry it, not the request.
+            events: this.config.debug
+                ? events.map(event => ({ ...event, params: { ...event.params, debug_mode: 1 } }))
+                : events
         };
         // `device` and `user_location` are request-level fields (siblings of
         // `client_id`/`events`), not per-event params. /mp/collect does not infer
@@ -164,13 +167,12 @@ export class NgGa4Service implements OnDestroy {
             body.user_location = this.userLocation;
         }
 
+        // The validation endpoint records nothing — "events sent to the validation
+        // server don't show up in reports" — so it can only ever be a side channel.
+        // The real hit below still goes to production, over the configured transport,
+        // so debug traffic exercises the same path production will.
         if (this.config.debug) {
-            // Debug always uses XHR so we can read and log the validation response.
-            this.http.post(url, body).subscribe({
-                next: (response) => console.log('[GA4 Debug]', response),
-                error: (err) => this.logHttpError(err)
-            });
-            return;
+            this.sendForValidation(body);
         }
 
         if (this.config.transport === 'xhr') {
@@ -189,6 +191,25 @@ export class NgGa4Service implements OnDestroy {
             return;
         }
         this.sendViaXhr(url, body);
+    }
+
+    private collectUrl(endpoint: string): string {
+        return `${endpoint}?measurement_id=${this.config.measurementId}&api_secret=${this.config.apiSecret}`;
+    }
+
+    private sendForValidation(body: object): void {
+        this.http.post<{ validationMessages?: unknown[] }>(this.collectUrl(this.GA4_DEBUG_ENDPOINT), body).subscribe({
+            next: (response) => {
+                // Only speak up when something is actually wrong. Logging the whole
+                // envelope either way made a clean payload and a rejected one look
+                // alike, which defeated the point of running validation at all.
+                const messages = response?.validationMessages ?? [];
+                if (messages.length) {
+                    console.warn('[ng-ga4] GA4 rejected this payload:', messages);
+                }
+            },
+            error: (err) => this.logHttpError(err)
+        });
     }
 
     private sendViaXhr(url: string, body: object): void {

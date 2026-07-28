@@ -1,6 +1,6 @@
 import { PLATFORM_ID } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { HttpClientTestingModule, HttpTestingController } from '@angular/common/http/testing';
+import { HttpClientTestingModule, HttpTestingController, TestRequest } from '@angular/common/http/testing';
 import { Router, NavigationEnd, NavigationStart } from '@angular/router';
 import { Subject } from 'rxjs';
 import { NgGa4Service } from './ng-ga4.service';
@@ -453,38 +453,92 @@ describe('NgGa4Service', () => {
     // --- debug mode ---
 
     describe('debug mode', () => {
-        it('should send to debug endpoint when debug is true', async () => {
+        // The validation endpoint does not record anything ("events sent to the
+        // validation server don't show up in reports"), so debug mode must still
+        // send the real hit to production and use validation only as a side channel.
+        function expectDebugPair(): { real: TestRequest; validation: TestRequest } {
+            const all = httpMock.match((r) => r.url.includes('mp/collect'));
+            const real = all.find((r) => !r.request.url.includes('debug/mp/collect'))!;
+            const validation = all.find((r) => r.request.url.includes('debug/mp/collect'))!;
+            return { real, validation };
+        }
+
+        it('should still send the real hit to the production endpoint when debug is true', async () => {
             reconfigureTestBed({ debug: true });
 
             await service.init();
             service.trackPageView('/test');
 
-            const req = httpMock.expectOne((r) => r.url.includes('debug/mp/collect'));
-            expect(req.request.url).toContain('debug/mp/collect');
-            req.flush({ validationMessages: [] });
+            const { real, validation } = expectDebugPair();
+            expect(real).toBeDefined();
+            expect(real.request.url).not.toContain('debug/mp/collect');
+            real.flush('', { status: 204, statusText: 'No Content' });
+            validation.flush({ validationMessages: [] });
         });
 
-        it('should send to production endpoint when debug is false', async () => {
+        it('should tag every event with debug_mode so it surfaces in DebugView', async () => {
+            reconfigureTestBed({ debug: true });
+
+            await service.init();
+            service.trackEvent('custom_event', { foo: 'bar' });
+
+            const { real, validation } = expectDebugPair();
+            expect(real.request.body.events[0].params.debug_mode).toBe(1);
+            expect(real.request.body.events[0].params.foo).toBe('bar');
+            real.flush('', { status: 204, statusText: 'No Content' });
+            validation.flush({ validationMessages: [] });
+        });
+
+        it('should also post the payload to the validation endpoint', async () => {
+            reconfigureTestBed({ debug: true });
+
+            await service.init();
+            service.trackPageView('/test');
+
+            const { real, validation } = expectDebugPair();
+            expect(validation).toBeDefined();
+            expect(validation.request.body.events[0].name).toBe('page_view');
+            real.flush('', { status: 204, statusText: 'No Content' });
+            validation.flush({ validationMessages: [] });
+        });
+
+        it('should warn with the messages when validation reports a problem', async () => {
+            reconfigureTestBed({ debug: true });
+
+            spyOn(console, 'warn');
+            await service.init();
+            service.trackPageView('/test');
+
+            const { real, validation } = expectDebugPair();
+            const messages = [{ fieldPath: 'events', description: 'bad event name' }];
+            real.flush('', { status: 204, statusText: 'No Content' });
+            validation.flush({ validationMessages: messages });
+
+            expect(console.warn).toHaveBeenCalledWith('[ng-ga4] GA4 rejected this payload:', messages);
+        });
+
+        it('should not warn when validation comes back clean', async () => {
+            reconfigureTestBed({ debug: true });
+
+            spyOn(console, 'warn');
+            await service.init();
+            service.trackPageView('/test');
+
+            const { real, validation } = expectDebugPair();
+            real.flush('', { status: 204, statusText: 'No Content' });
+            validation.flush({ validationMessages: [] });
+
+            expect(console.warn).not.toHaveBeenCalled();
+        });
+
+        it('should send to production endpoint and omit debug_mode when debug is false', async () => {
             await service.init();
             service.trackPageView('/test');
 
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.url).not.toContain('debug/mp/collect');
+            expect(req.request.body.events[0].params.debug_mode).toBeUndefined();
             req.flush('', { status: 204, statusText: 'No Content' });
-        });
-
-        it('should log debug response', async () => {
-            reconfigureTestBed({ debug: true });
-
-            spyOn(console, 'log');
-            await service.init();
-            service.trackPageView('/test');
-
-            const req = httpMock.expectOne((r) => r.url.includes('debug/mp/collect'));
-            const mockResponse = { validationMessages: [] };
-            req.flush(mockResponse);
-
-            expect(console.log).toHaveBeenCalledWith('[GA4 Debug]', mockResponse);
         });
     });
 
@@ -989,14 +1043,21 @@ describe('NgGa4Service', () => {
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
-        it('always uses XHR in debug mode so the validation response can be read', async () => {
+        it('still sends the real hit over the beacon in debug mode, validating alongside it', async () => {
             reconfigureTestBed({ transport: 'beacon', debug: true });
             installBeacon();
 
             await service.init();
             service.trackEvent('x');
 
-            expect(beaconSpy).not.toHaveBeenCalled();
+            // The recorded hit goes out on the configured transport, so debug mode
+            // exercises the same delivery path production will.
+            expect(beaconCalls.length).toBe(1);
+            expect(beaconCalls[0].url).not.toContain('debug/mp/collect');
+            const body = await beaconBody();
+            expect(body.events[0].params.debug_mode).toBe(1);
+
+            // Validation is a separate XHR side channel, not a replacement.
             const req = httpMock.expectOne((r) => r.url.includes('debug/mp/collect'));
             req.flush({ validationMessages: [] });
         });
