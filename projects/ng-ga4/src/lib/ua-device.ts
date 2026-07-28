@@ -24,8 +24,13 @@ interface Detected {
 }
 
 // Windows reports a kernel version; GA4 users expect the marketing name.
+//
+// "10.0" is deliberately absent. Windows 11 reports `Windows NT 10.0` exactly like
+// Windows 10 — Microsoft never bumped the token — so the legacy UA cannot separate them.
+// Chromium disambiguates via Client Hints `platformVersion`; here the honest answer is
+// no version at all. An unrecognised token maps to undefined for the same reason: a raw
+// kernel number means nothing in a GA4 report.
 const WINDOWS_NT_VERSIONS: Record<string, string> = {
-    '10.0': '10',
     '6.3': '8.1',
     '6.2': '8',
     '6.1': '7',
@@ -33,12 +38,18 @@ const WINDOWS_NT_VERSIONS: Record<string, string> = {
     '5.1': 'XP'
 };
 
+// Safari froze the macOS token at 10_15_7 from Big Sur onward, and Firefox caps it at
+// 10.15. On exactly the browsers this fallback exists for, these values mean "unknown",
+// not "Catalina" — emitting them would report every modern Mac as 10.15.7. Genuinely
+// older versions (10.14.6 and friends) are unambiguous and still reported.
+const FROZEN_MACOS_VERSIONS = new Set(['10.15', '10.15.7']);
+
 export function deviceFromUserAgent(ua: string, maxTouchPoints = 0): UaDeviceInfo {
     if (typeof ua !== 'string' || !ua) {
         return {};
     }
 
-    const os = detectOs(ua);
+    let os = detectOs(ua);
     const browser = detectBrowser(ua);
 
     // Recognising neither means this is not a UA we understand. Returning {} keeps the
@@ -46,6 +57,18 @@ export function deviceFromUserAgent(ua: string, maxTouchPoints = 0): UaDeviceInf
     // for anything unfamiliar.
     if (!os && !browser) {
         return {};
+    }
+
+    // Derived while the OS still reads macOS, because that is what the touch-point rule
+    // for desktop-mode iPads keys on.
+    const category = detectCategory(ua, os?.name, maxTouchPoints);
+
+    // If maxTouchPoints was trusted enough to call this a tablet, it has to correct the
+    // OS too. Otherwise the payload claims a tablet running macOS — an OS that has never
+    // shipped on one — and every desktop-mode iPad is filed under macOS. The real iPadOS
+    // version is not recoverable from a spoofed Mac UA, so none is reported.
+    if (os?.name === 'macOS' && category === 'tablet') {
+        os = { name: 'iOS' };
     }
 
     const info: UaDeviceInfo = {};
@@ -61,7 +84,7 @@ export function deviceFromUserAgent(ua: string, maxTouchPoints = 0): UaDeviceInf
             info.browser_version = browser.version;
         }
     }
-    info.category = detectCategory(ua, os?.name, maxTouchPoints);
+    info.category = category;
     return info;
 }
 
@@ -82,11 +105,12 @@ function detectOs(ua: string): Detected | null {
     }
     const windows = /Windows NT ([\d.]+)/.exec(ua);
     if (windows) {
-        return { name: 'Windows', version: WINDOWS_NT_VERSIONS[windows[1]] ?? windows[1] };
+        return { name: 'Windows', version: WINDOWS_NT_VERSIONS[windows[1]] };
     }
     if (/Mac OS X|Macintosh/.test(ua)) {
         const m = /Mac OS X (\d+)[._](\d+)(?:[._](\d+))?/.exec(ua);
-        return { name: 'macOS', version: m ? [m[1], m[2], m[3]].filter(Boolean).join('.') : undefined };
+        const version = m ? [m[1], m[2], m[3]].filter(Boolean).join('.') : undefined;
+        return { name: 'macOS', version: version && !FROZEN_MACOS_VERSIONS.has(version) ? version : undefined };
     }
     if (/Linux|X11/.test(ua)) {
         return { name: 'Linux' };

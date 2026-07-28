@@ -705,7 +705,8 @@ describe('NgGa4Service', () => {
             const device = req.request.body.device;
             expect(device.category).toBe('desktop');
             expect(device.operating_system).toBe('macOS');
-            expect(device.operating_system_version).toBe('10.15.7');
+            // Frozen UA token — deliberately not reported. See ua-device.spec.ts.
+            expect('operating_system_version' in device).toBe(false);
             expect(device.browser).toBe('Safari');
             expect(device.browser_version).toBe('17.4.1');
             req.flush('', { status: 204, statusText: 'No Content' });
