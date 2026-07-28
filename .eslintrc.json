@@ -1,0 +1,22 @@
+{
+  "root": true,
+  "overrides": [
+    {
+      "files": [
+        "*.ts"
+      ],
+      "parserOptions": {
+        "project": [
+          "projects/ng-ga4/tsconfig.lib.json",
+          "projects/ng-ga4/tsconfig.spec.json"
+        ],
+        "createDefaultProgram": false
+      },
+      "extends": [
+        "plugin:@angular-eslint/recommended",
+        "plugin:@angular-eslint/template/process-inline-templates"
+      ],
+      "rules": {}
+    }
+  ]
+}
