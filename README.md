@@ -4,7 +4,7 @@
 [![CI](https://github.com/streamvessel/ng-ga4/actions/workflows/ci.yml/badge.svg)](https://github.com/streamvessel/ng-ga4/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-Google Analytics 4 for Angular, over the [Measurement Protocol](https://developers.google.com/analytics/devguides/collection/protocol/ga4) instead of `gtag.js`. Because it never loads a remote script, it works where the usual GA4 snippet cannot: under a strict Content Security Policy, and inside Chrome extensions (Manifest V3), where remotely-hosted code is forbidden outright. It handles the parts you would otherwise write yourself — a persistent client ID, session tracking with a 30-minute timeout, and automatic page views from the Angular Router — and stores its state in `chrome.storage` when running as an extension, `localStorage` otherwise.
+Google Analytics 4 for Angular, over the [Measurement Protocol](https://developers.google.com/analytics/devguides/collection/protocol/ga4) instead of `gtag.js`. Because it never loads a remote script, it works where the usual GA4 snippet cannot: under a strict Content Security Policy, and inside Chrome extensions (Manifest V3), where remotely-hosted code is forbidden outright. It handles the parts you would otherwise write yourself — a persistent client ID, session tracking with a 30-minute timeout, and automatic page views from the Angular Router — and stores its state in `chrome.storage` when running as an extension, or in `localStorage` on the web, adopting an existing `_ga` cookie for the client ID where one is present.
 
 Extracted from the [Stream Vessel](https://streamvessel.com) frontend, where it runs in production.
 

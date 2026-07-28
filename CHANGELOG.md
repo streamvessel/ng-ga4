@@ -14,12 +14,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   origin-scoped `localStorage`, so a site running both gtag.js and this
   library counted one human as two users, and `www.`/`app.` subdomains
   diverged where gtag's cookie never did. `'auto'` now reads `_ga` when it is
-  present and well-formed and mirrors it into `localStorage`, so adopting the
-  cookie doesn't cause a second re-identification later. `'storage'` restores
-  the previous behaviour exactly. A new `writeGaCookie` option (default
-  `false`) opts into writing `_ga` when absent, in gtag's format on the
-  registrable domain, which also gives your own subdomains a shared identity
-  with no gtag.js involved at all; `clientIdSource: 'cookie'` implies it.
+  present and well-formed and mirrors it into `localStorage`. On a site
+  running both gtag.js and this library, every returning ng-ga4 user is
+  re-identified once as a result, merging onto the gtag identity — a
+  real, one-time shift in your user counts, worth timing deliberately.
+  `'storage'` keeps the previous storage-only mechanism and ignores `_ga`,
+  but it is not an undo: once `'auto'` has adopted a cookie ID,
+  `localStorage` has already been overwritten. A new `writeGaCookie` option
+  (default `false`) opts into writing `_ga` when it is absent — only the
+  envelope (cookie name, domain, gtag's two-year expiry) is gtag's format,
+  since an existing stored ID is written as-is rather than replaced, and
+  only a newly minted ID uses gtag's numeric shape — which also gives your
+  own subdomains a shared identity with no gtag.js involved at all.
+  `clientIdSource: 'cookie'` implies `writeGaCookie` and deliberately
+  ignores any existing stored ID, re-identifying that user once more.
   Extensions are unaffected — there is no `_ga` cookie on a
   `chrome-extension://` origin. ([#13](https://github.com/streamvessel/ng-ga4/issues/13))
 

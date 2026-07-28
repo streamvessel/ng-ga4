@@ -78,8 +78,8 @@ bootstrapApplication(AppComponent, {
 | `isExtension` | `boolean` | Yes | Set `true` for Chrome extensions — uses `chrome.storage` instead of `localStorage` |
 | `siteUrl` | `string` | No | Base URL for `page_location` parameter. Required for extensions since `document.location.href` points to `chrome-extension://` |
 | `debug` | `boolean` | No | Tag events with `debug_mode` so they appear in GA4 DebugView, and log validation problems to the console. Events are still recorded. |
-| `clientIdSource` | `'auto' \| 'cookie' \| 'storage'` | No | Where the client ID comes from on web. `'auto'` (default) reads the gtag.js `_ga` cookie when present, else `localStorage`. `'cookie'` treats `_ga` as authoritative and mints one if absent. `'storage'` is the previous behaviour. Ignored for extensions. |
-| `writeGaCookie` | `boolean` | No | Write `_ga` when absent, in gtag's format on the registrable domain. Off by default. Implied by `clientIdSource: 'cookie'`. |
+| `clientIdSource` | `'auto' \| 'cookie' \| 'storage'` | No | Where the client ID comes from on web. `'auto'` (default) reads the `_ga` cookie when present and well-formed, else `localStorage`. `'cookie'` treats `_ga` as authoritative and mints one if absent. `'storage'` is the previous behaviour. Ignored for extensions. |
+| `writeGaCookie` | `boolean` | No | Write `_ga` when absent, using the client ID already on hand — gtag's numeric format applies only to a newly minted ID — on the registrable domain. Off by default. Implied by `clientIdSource: 'cookie'`; ignored for `'storage'` and extensions. |
 
 ### Interop with gtag.js
 
@@ -90,18 +90,48 @@ scoped to the origin. `www.` and `app.` subdomains diverged from each other
 too, which gtag's cookie never did.
 
 `clientIdSource: 'auto'` (the default) fixes this by reading `_ga` when it is
-present and well-formed, and mirroring it into `localStorage` so a site that
-later removes gtag does not re-identify its users a second time. Where no
-`_ga` cookie exists, behaviour is unchanged. `clientIdSource: 'storage'`
-restores the previous behaviour exactly, ignoring any `_ga` cookie.
+present and well-formed — any well-formed `_ga`, not only one gtag.js wrote;
+server-side GA4 tagging and other tools that write the cookie are adopted
+the same way — and mirroring it into `localStorage` so a site that later
+removes gtag does not re-identify its users a second time. Where no `_ga`
+cookie exists, behaviour is unchanged.
+
+`clientIdSource: 'cookie'` goes further: `_ga` is authoritative, and a
+missing cookie is minted rather than adopting whatever ID is already in
+`localStorage`. That deliberately ignores an existing stored ID, which
+re-identifies that user once — a second, opt-in shift in your user counts,
+on top of the migration below.
+
+`clientIdSource: 'storage'` keeps the previous storage-only mechanism,
+ignoring any `_ga` cookie. That restores the previous *behaviour*, but it is
+not an undo: once `'auto'` has adopted a cookie ID it has already overwritten
+`localStorage`, so switching to `'storage'` afterwards does not restore the
+pre-upgrade identity.
 
 This library does not set `_ga` unless you ask it to. `writeGaCookie: true`
-writes it when absent, in gtag's format, on the registrable domain, so your
-subdomains share an identity even on pages with no gtag.js at all.
+writes it when absent, on the registrable domain, with gtag's two-year
+expiry — but only that envelope (cookie name, domain, expiry) is gtag's
+format. The value written is whatever client ID the library already has: for
+an existing user upgrading, that's this library's own `crypto.randomUUID()`,
+not gtag's numeric `<random>.<seconds>` pair. That's deliberate — reusing the
+existing ID is what avoids re-identifying the user, which is the harm this
+feature exists to prevent in the first place. Only a genuinely new install,
+with no stored ID yet, mints a value in gtag's numeric shape. One
+consequence follows from that: if `gtag.js` later loads on the same page and
+rejects the non-numeric payload, it rewrites the cookie with its own value,
+and the next read here adopts that — one further identity flip, then
+convergence.
+
+Discovering the registrable domain to write to trial-sets a short-lived
+cookie named `_ng_ga4_probe_<random>`, deleted as soon as a candidate domain
+sticks. It is written only when cookie writing is enabled (`writeGaCookie:
+true` or `clientIdSource: 'cookie'`) — worth knowing if you maintain a
+cookie declaration for a consent management platform.
 
 [Consent Mode](https://github.com/streamvessel/ng-ga4/issues/20) is not
 implemented yet, so if you need consent before setting analytics cookies,
-gate `writeGaCookie` behind your own consent state.
+gate `writeGaCookie` (and `clientIdSource: 'cookie'`, which implies it)
+behind your own consent state.
 
 **Migration:** upgrading with both gtag.js and this library present will
 re-identify each returning ng-ga4 user once, merging them onto the gtag
@@ -183,7 +213,7 @@ NgGa4Module.forRoot({
 
 | Data | Web | Extension |
 |------|-----|-----------|
-| Client ID | `localStorage` | `chrome.storage.local` |
+| Client ID | `_ga` cookie when present and well-formed (default), else `localStorage`; writing to the cookie is opt-in (see "Interop with gtag.js" above) | `chrome.storage.local` |
 | Session number | `localStorage` | `chrome.storage.local` |
 | Session ID + activity | `localStorage` | `chrome.storage.session` |
 
