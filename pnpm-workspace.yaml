@@ -1,0 +1,21 @@
+# pnpm 10+ reads pnpm-specific settings from this file, NOT from .npmrc.
+
+# --- peer dependencies ---
+autoInstallPeers: true
+strictPeerDependencies: false
+
+# --- lockfile ---
+preferFrozenLockfile: true
+
+# --- build-script approval ---
+# pnpm 10+ requires explicit approval before running install/postinstall scripts
+# for native / build-step packages, and fails the install (exit 1) in CI when an
+# unapproved one is encountered. These are all part of the Angular build/test
+# pipeline. nice-napi is a Linux-only optional native dep — it does not install
+# on Windows, so an omission here only surfaces on ubuntu CI.
+allowBuilds:
+  core-js: true
+  esbuild: true
+  lmdb: true
+  msgpackr-extract: true
+  nice-napi: true
