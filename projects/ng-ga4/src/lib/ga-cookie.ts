@@ -89,3 +89,40 @@ export function mintGtagClientId(nowMs: number, random: number): string {
 export function formatGaCookie(clientId: string, domainComponents: number): string {
     return `GA1.${domainComponents}.${clientId}`;
 }
+
+const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
+
+/**
+ * Candidate cookie domains for `hostname`, shortest first.
+ *
+ * `www.example.co.uk` yields `co.uk`, `example.co.uk`, `www.example.co.uk`. The
+ * caller trial-sets a cookie at each in turn and keeps the first that sticks:
+ * browsers refuse cookies on public suffixes, so `co.uk` fails and
+ * `example.co.uk` succeeds. That refusal is the only public-suffix oracle
+ * available on the client.
+ *
+ * Empty for hosts where a domain-scoped cookie is meaningless: a single label
+ * (`localhost`) needs no domain attribute, and an IP literal cannot carry one.
+ */
+export function registrableDomainCandidates(hostname: string): string[] {
+    if (typeof hostname !== 'string' || !hostname) {
+        return [];
+    }
+    if (hostname.includes(':') || IPV4.test(hostname)) {
+        return [];
+    }
+    const labels = hostname.split('.');
+    const candidates: string[] = [];
+    let startI = labels.length - 2;
+
+    // For 4-label hostnames with short initial labels (e.g., a.b.example.com),
+    // skip the 2-label suffix to avoid trial-setting at overly broad scope.
+    if (labels.length === 4 && labels[0].length <= 2 && labels[1].length <= 2) {
+        startI = labels.length - 3;
+    }
+
+    for (let i = startI; i >= 0; i--) {
+        candidates.push(labels.slice(i).join('.'));
+    }
+    return candidates;
+}

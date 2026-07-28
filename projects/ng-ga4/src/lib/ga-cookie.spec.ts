@@ -1,4 +1,4 @@
-import { formatGaCookie, mintGtagClientId, parseGaCookie, readCookieValue } from './ga-cookie';
+import { formatGaCookie, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 
 describe('readCookieValue', () => {
     it('reads a cookie by exact name', () => {
@@ -110,5 +110,45 @@ describe('formatGaCookie', () => {
     it('round-trips through parseGaCookie', () => {
         const clientId = '12345678-1234-1234-1234-123456789abc';
         expect(parseGaCookie(formatGaCookie(clientId, 3))).toBe(clientId);
+    });
+});
+
+describe('registrableDomainCandidates', () => {
+    it('offers the shortest candidate first', () => {
+        expect(registrableDomainCandidates('www.example.co.uk')).toEqual([
+            'co.uk',
+            'example.co.uk',
+            'www.example.co.uk'
+        ]);
+    });
+
+    it('handles a two-label host', () => {
+        expect(registrableDomainCandidates('example.com')).toEqual(['example.com']);
+    });
+
+    it('handles a deep subdomain', () => {
+        expect(registrableDomainCandidates('a.b.example.com')).toEqual([
+            'b.example.com',
+            'a.b.example.com'
+        ]);
+    });
+
+    // A single label needs no domain attribute, and a cookie cannot be scoped to
+    // a bare IP at all, so in both cases there is nothing to trial.
+    it('returns nothing for a single-label host', () => {
+        expect(registrableDomainCandidates('localhost')).toEqual([]);
+    });
+
+    it('returns nothing for an IPv4 literal', () => {
+        expect(registrableDomainCandidates('192.168.1.10')).toEqual([]);
+    });
+
+    it('returns nothing for an IPv6 literal', () => {
+        expect(registrableDomainCandidates('[::1]')).toEqual([]);
+    });
+
+    it('returns nothing for empty or non-string input', () => {
+        expect(registrableDomainCandidates('')).toEqual([]);
+        expect(registrableDomainCandidates(undefined as any)).toEqual([]);
     });
 });
