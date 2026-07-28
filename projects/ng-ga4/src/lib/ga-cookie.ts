@@ -112,15 +112,7 @@ export function registrableDomainCandidates(hostname: string): string[] {
     }
     const labels = hostname.split('.');
     const candidates: string[] = [];
-    let startI = labels.length - 2;
-
-    // For 4-label hostnames with short initial labels (e.g., a.b.example.com),
-    // skip the 2-label suffix to avoid trial-setting at overly broad scope.
-    if (labels.length === 4 && labels[0].length <= 2 && labels[1].length <= 2) {
-        startI = labels.length - 3;
-    }
-
-    for (let i = startI; i >= 0; i--) {
+    for (let i = labels.length - 2; i >= 0; i--) {
         candidates.push(labels.slice(i).join('.'));
     }
     return candidates;

@@ -126,8 +126,11 @@ describe('registrableDomainCandidates', () => {
         expect(registrableDomainCandidates('example.com')).toEqual(['example.com']);
     });
 
+    // Three candidates, not two: `example.com` is the registrable domain here and
+    // must be tried first, exactly as `co.uk` is tried first for the case above.
     it('handles a deep subdomain', () => {
         expect(registrableDomainCandidates('a.b.example.com')).toEqual([
+            'example.com',
             'b.example.com',
             'a.b.example.com'
         ]);
