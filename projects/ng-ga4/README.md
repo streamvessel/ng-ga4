@@ -78,6 +78,35 @@ bootstrapApplication(AppComponent, {
 | `isExtension` | `boolean` | Yes | Set `true` for Chrome extensions — uses `chrome.storage` instead of `localStorage` |
 | `siteUrl` | `string` | No | Base URL for `page_location` parameter. Required for extensions since `document.location.href` points to `chrome-extension://` |
 | `debug` | `boolean` | No | Tag events with `debug_mode` so they appear in GA4 DebugView, and log validation problems to the console. Events are still recorded. |
+| `clientIdSource` | `'auto' \| 'cookie' \| 'storage'` | No | Where the client ID comes from on web. `'auto'` (default) reads the gtag.js `_ga` cookie when present, else `localStorage`. `'cookie'` treats `_ga` as authoritative and mints one if absent. `'storage'` is the previous behaviour. Ignored for extensions. |
+| `writeGaCookie` | `boolean` | No | Write `_ga` when absent, in gtag's format on the registrable domain. Off by default. Implied by `clientIdSource: 'cookie'`. |
+
+### Interop with gtag.js
+
+A site that runs both gtag.js and this library used to count one human as two
+users: gtag stores its client ID in the `_ga` cookie, scoped to the
+registrable domain, while this library kept its own ID in `localStorage`,
+scoped to the origin. `www.` and `app.` subdomains diverged from each other
+too, which gtag's cookie never did.
+
+`clientIdSource: 'auto'` (the default) fixes this by reading `_ga` when it is
+present and well-formed, and mirroring it into `localStorage` so a site that
+later removes gtag does not re-identify its users a second time. Where no
+`_ga` cookie exists, behaviour is unchanged. `clientIdSource: 'storage'`
+restores the previous behaviour exactly, ignoring any `_ga` cookie.
+
+This library does not set `_ga` unless you ask it to. `writeGaCookie: true`
+writes it when absent, in gtag's format, on the registrable domain, so your
+subdomains share an identity even on pages with no gtag.js at all.
+
+[Consent Mode](https://github.com/streamvessel/ng-ga4/issues/20) is not
+implemented yet, so if you need consent before setting analytics cookies,
+gate `writeGaCookie` behind your own consent state.
+
+**Migration:** upgrading with both gtag.js and this library present will
+re-identify each returning ng-ga4 user once, merging them onto the gtag
+identity. This is the fix working as intended, but it is a real,
+one-time shift in your user counts — worth timing deliberately.
 
 ## Usage
 

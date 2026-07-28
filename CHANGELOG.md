@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `clientIdSource` option, default `'auto'`, to interoperate with gtag.js's
+  `_ga` cookie. Previously this library always kept its client ID in
+  origin-scoped `localStorage`, so a site running both gtag.js and this
+  library counted one human as two users, and `www.`/`app.` subdomains
+  diverged where gtag's cookie never did. `'auto'` now reads `_ga` when it is
+  present and well-formed and mirrors it into `localStorage`, so adopting the
+  cookie doesn't cause a second re-identification later. `'storage'` restores
+  the previous behaviour exactly. A new `writeGaCookie` option (default
+  `false`) opts into writing `_ga` when absent, in gtag's format on the
+  registrable domain, which also gives your own subdomains a shared identity
+  with no gtag.js involved at all; `clientIdSource: 'cookie'` implies it.
+  Extensions are unaffected — there is no `_ga` cookie on a
+  `chrome-extension://` origin. ([#13](https://github.com/streamvessel/ng-ga4/issues/13))
+
 ### Fixed
 
 - Debug mode records events again. `debug: true` sent every hit to the Measurement
