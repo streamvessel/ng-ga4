@@ -346,7 +346,9 @@ describe('NgGa4Service', () => {
 
             await service.init();
 
-            expect(writtenCookies.filter(c => c.startsWith('_ga='))).toEqual([]);
+            // No cookie write of any kind — not even domain-discovery probes, which
+            // this path must never run.
+            expect(writtenCookies).toEqual([]);
         });
 
         it('writes no cookie for extensions even with writeGaCookie', async () => {
@@ -355,7 +357,43 @@ describe('NgGa4Service', () => {
 
             await service.init();
 
-            expect(writtenCookies.filter(c => c.startsWith('_ga='))).toEqual([]);
+            // No cookie write of any kind — not even domain-discovery probes, which
+            // this path must never run.
+            expect(writtenCookies).toEqual([]);
+        });
+
+        // Spec 5 stubs this for determinism, so nothing otherwise exercises the
+        // modulo arithmetic — and an off-by-one here would be invisible.
+        it('draws a client-ID seed inside gtag\'s range', () => {
+            for (let i = 0; i < 500; i++) {
+                const seed = (service as any).randomClientIdSeed();
+                expect(Number.isInteger(seed)).toBe(true);
+                expect(seed).toBeGreaterThanOrEqual(1);
+                expect(seed).toBeLessThanOrEqual(2147483647);
+            }
+        });
+
+        // A brand-new user has no identity to preserve, so the UUID payload here is
+        // the documented consequence of "write the ID we already have".
+        it('writes a UUID payload for a user with no prior identity', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+            await service.init();
+
+            expect(writtenCookies.find(c => c.startsWith('_ga=')))
+                .toContain(`_ga=GA1.1.${MOCK_UUID}`);
+        });
+
+        it('replaces a malformed _ga rather than leaving it', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            mockCookieJar = '_ga=garbage';
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+            await service.init();
+
+            expect(writtenCookies.find(c => c.startsWith('_ga=')))
+                .toContain(`_ga=GA1.1.${MOCK_UUID}`);
         });
     });
 

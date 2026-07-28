@@ -579,7 +579,7 @@ export class NgGa4Service implements OnDestroy {
     private randomClientIdSeed(): number {
         const buffer = new Uint32Array(1);
         crypto.getRandomValues(buffer);
-        // [1, 2^31 - 1], matching the ten-digit first field gtag emits.
+        // [1, 2^31 - 1], the range gtag draws its first field from.
         return (buffer[0] % 2147483647) + 1;
     }
 
@@ -594,7 +594,13 @@ export class NgGa4Service implements OnDestroy {
             `SameSite=Lax`,
             ...(domain ? [`domain=.${domain}`] : [])
         ];
-        this.setCookie(`_ga=${formatGaCookie(clientId, components)}; ${attributes.join('; ')}`);
+        // readCookieValue decodeURIComponents on read, so an unencoded value here is a
+        // latent trap: a clientId containing e.g. "; max-age=0" would be mirrored into
+        // localStorage verbatim and then re-emitted raw on the next write, injecting
+        // cookie attributes. encodeURIComponent is a no-op for gtag's numeric pairs and
+        // our UUIDs, so this costs nothing on the path that matters.
+        const value = encodeURIComponent(formatGaCookie(clientId, components));
+        this.setCookie(`_ga=${value}; ${attributes.join('; ')}`);
     }
 
     // There is no public suffix list in the browser, so the registrable domain has to
@@ -605,8 +611,12 @@ export class NgGa4Service implements OnDestroy {
     private discoverCookieDomain(): string | null {
         const probe = '_ng_ga4_domain_probe';
         for (const candidate of registrableDomainCandidates(this.getHostname())) {
-            this.setCookie(`${probe}=1; path=/; domain=.${candidate}`);
-            if (readCookieValue(this.getCookieJar(), probe) !== null) {
+            // A per-call nonce, not a constant, because document.cookie exposes no
+            // domain or path: a stale probe left at a broader scope would otherwise
+            // read back as a false positive for a narrower candidate here.
+            const nonce = String(this.randomClientIdSeed());
+            this.setCookie(`${probe}=${nonce}; path=/; domain=.${candidate}`);
+            if (readCookieValue(this.getCookieJar(), probe) === nonce) {
                 this.setCookie(`${probe}=; path=/; domain=.${candidate}; max-age=0`);
                 return candidate;
             }
