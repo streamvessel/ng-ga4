@@ -89,6 +89,9 @@ export function formatGaCookie(clientId: string, domainComponents: number): stri
     return `GA1.${domainComponents}.${clientId}`;
 }
 
+// Input is always `window.location.hostname`, which the URL parser has already validated
+// and lowercased, returns IPv6 in bracketed form, and never carries a port. So stricter
+// parsers buy nothing.
 const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
 
 /**

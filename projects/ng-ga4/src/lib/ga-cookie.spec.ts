@@ -154,4 +154,26 @@ describe('registrableDomainCandidates', () => {
         expect(registrableDomainCandidates('')).toEqual([]);
         expect(registrableDomainCandidates(undefined as any)).toEqual([]);
     });
+
+    // An FQDN with a trailing dot is a real thing to navigate to. It yields a
+    // bogus-looking 'com.' candidate, which is harmless: the browser rejects it
+    // like any other public suffix, and the next candidate is the right one.
+    it('passes a trailing-dot FQDN through without special-casing it', () => {
+        expect(registrableDomainCandidates('example.com.')).toEqual(['com.', 'example.com.']);
+    });
+
+    // window.location.hostname is always lowercased by the URL parser, and cookie
+    // domain matching is case-insensitive, so no normalisation is needed here.
+    it('leaves case alone', () => {
+        expect(registrableDomainCandidates('WWW.EXAMPLE.COM')).toEqual([
+            'EXAMPLE.COM',
+            'WWW.EXAMPLE.COM'
+        ]);
+    });
+
+    // Nobody is served from a bare public suffix, so offering it as the only
+    // candidate costs one rejected trial-set and nothing else.
+    it('offers a bare public suffix as its own only candidate', () => {
+        expect(registrableDomainCandidates('co.uk')).toEqual(['co.uk']);
+    });
 });
