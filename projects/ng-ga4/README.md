@@ -1,5 +1,9 @@
 # @stream-vessel/ng-ga4
 
+[![npm](https://img.shields.io/npm/v/@stream-vessel/ng-ga4)](https://www.npmjs.com/package/@stream-vessel/ng-ga4)
+[![CI](https://github.com/streamvessel/ng-ga4/actions/workflows/ci.yml/badge.svg)](https://github.com/streamvessel/ng-ga4/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
 Angular library for Google Analytics 4 using the [Measurement Protocol](https://developers.google.com/analytics/devguides/collection/protocol/ga4). Works in both standard web apps and Chrome extensions (Manifest V3).
 
 Built according to the official [Chrome Extensions GA4 guide](https://developer.chrome.com/docs/extensions/how-to/integrate/google-analytics-4).
@@ -178,7 +182,32 @@ Mitigation: watch your GA4 property for unusual event volume. If abuse shows up,
 - `@angular/core` ^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
 - `@angular/common` ^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
 - `@angular/router` ^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
+- `rxjs` ^7.0.0
+
+**Angular version support:** the peer range above is permissive, but CI tests
+against Angular 18 only. Reports of breakage on other majors are welcome.
+
+## Local development
+
+```bash
+pnpm install
+pnpm run build    # ng-packagr build into dist/ng-ga4
+pnpm test         # Karma/Jasmine, headless Chrome
+pnpm run lint
+```
+
+To try an unreleased change in a consuming app without publishing:
+
+```bash
+# in this repo
+pnpm run build
+# in the consuming app
+pnpm add file:../ng-ga4/dist/ng-ga4
+```
+
+Remember to restore the registry version (`pnpm add @stream-vessel/ng-ga4@latest`)
+before committing the consuming app.
 
 ## License
 
-Commercial
+Apache-2.0 — see [LICENSE](../../LICENSE).
