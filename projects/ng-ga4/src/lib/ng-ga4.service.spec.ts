@@ -1,3 +1,4 @@
+import { PLATFORM_ID } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { HttpClientTestingModule, HttpTestingController } from '@angular/common/http/testing';
 import { Router, NavigationEnd, NavigationStart } from '@angular/router';
@@ -27,7 +28,7 @@ describe('NgGa4Service', () => {
     let mockLocalStorage: Record<string, string>;
     let originalChromeStorage: any;
 
-    function configureTestBed(config?: Partial<NgGa4Config>): void {
+    function configureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
         routerEvents$ = new Subject<any>();
 
         const mockRouter = {
@@ -40,7 +41,10 @@ describe('NgGa4Service', () => {
             providers: [
                 NgGa4Service,
                 { provide: Router, useValue: mockRouter },
-                { provide: NG_GA4_CONFIG, useValue: { ...defaultConfig, ...config } }
+                { provide: NG_GA4_CONFIG, useValue: { ...defaultConfig, ...config } },
+                // Only override when a test asks for it; the testing module's own
+                // 'browser' value is what the rest of the suite should run under.
+                ...(platformId ? [{ provide: PLATFORM_ID, useValue: platformId }] : [])
             ]
         });
 
@@ -48,12 +52,12 @@ describe('NgGa4Service', () => {
         httpMock = TestBed.inject(HttpTestingController);
     }
 
-    function reconfigureTestBed(config?: Partial<NgGa4Config>): void {
+    function reconfigureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
         jasmine.clock().uninstall();
         httpMock.verify();
         jasmine.clock().install();
         jasmine.clock().mockDate(new Date(MOCK_TIMESTAMP));
-        configureTestBed(config);
+        configureTestBed(config, platformId);
     }
 
     function setupChromeMock(localStore?: Record<string, any>, sessionStore?: Record<string, any>): void {
@@ -160,6 +164,40 @@ describe('NgGa4Service', () => {
 
             await service.init();
             expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_UUID);
+        });
+    });
+
+    // --- server-side rendering ---
+
+    describe('server platform', () => {
+        it('should not touch storage or the network when init() runs on the server', async () => {
+            reconfigureTestBed({}, 'server');
+
+            await service.init();
+
+            expect(localStorage.getItem).not.toHaveBeenCalled();
+            expect(localStorage.setItem).not.toHaveBeenCalled();
+            expect(crypto.randomUUID).not.toHaveBeenCalled();
+            httpMock.expectNone(() => true);
+        });
+
+        it('should no-op trackEvent and trackPageView on the server', async () => {
+            reconfigureTestBed({}, 'server');
+            await service.init();
+
+            service.trackPageView('/ssr');
+            service.trackEvent('ssr_event');
+
+            httpMock.expectNone(() => true);
+        });
+
+        it('should not subscribe to router navigation on the server', async () => {
+            reconfigureTestBed({}, 'server');
+            await service.init();
+
+            routerEvents$.next(new NavigationEnd(1, '/ssr', '/ssr'));
+
+            httpMock.expectNone(() => true);
         });
     });
 
