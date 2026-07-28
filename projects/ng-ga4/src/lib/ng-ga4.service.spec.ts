@@ -196,6 +196,88 @@ describe('NgGa4Service', () => {
         });
     });
 
+    // --- client ID source ---
+
+    describe('client ID source', () => {
+        function sentClientId(): string {
+            service.trackPageView('/test');
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const clientId = req.request.body.client_id;
+            req.flush('', { status: 204, statusText: 'No Content' });
+            return clientId;
+        }
+
+        it('adopts the client ID from a gtag _ga cookie by default', async () => {
+            mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+
+            await service.init();
+
+            expect(sentClientId()).toBe('1234567890.1700000000');
+        });
+
+        // Otherwise a site that later drops gtag, or lets _ga expire, falls back to
+        // a stale UUID and flips every user's identity a second time.
+        it('mirrors an adopted cookie ID into localStorage', async () => {
+            mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+
+            await service.init();
+
+            expect(localStorage.setItem)
+                .toHaveBeenCalledWith('ga_client_id', '1234567890.1700000000');
+        });
+
+        it('ignores gtag\'s _ga_<STREAM> session cookie when no _ga is present', async () => {
+            mockCookieJar = '_ga_ABC123=GS1.1.1700000000.1.0.1700000000.0.0.0';
+
+            await service.init();
+
+            expect(sentClientId()).toBe(MOCK_UUID);
+        });
+
+        it('falls back to localStorage when _ga is malformed', async () => {
+            mockCookieJar = '_ga=garbage';
+            mockLocalStorage['ga_client_id'] = 'existing-id';
+
+            await service.init();
+
+            expect(sentClientId()).toBe('existing-id');
+        });
+
+        it('falls back to localStorage when reading the cookie jar throws', async () => {
+            (service as any).getCookieJar.and.throwError('denied');
+            mockLocalStorage['ga_client_id'] = 'existing-id';
+
+            await service.init();
+
+            expect(sentClientId()).toBe('existing-id');
+        });
+
+        it('writes no cookie by default', async () => {
+            await service.init();
+
+            expect(writtenCookies).toEqual([]);
+        });
+
+        it('ignores a present cookie under clientIdSource: storage', async () => {
+            reconfigureTestBed({ clientIdSource: 'storage' });
+            mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+
+            await service.init();
+
+            expect(sentClientId()).toBe(MOCK_UUID);
+        });
+
+        it('keeps using chrome.storage for extensions even with a _ga cookie present', async () => {
+            reconfigureTestBed({ isExtension: true });
+            setupChromeMock({ ga_client_id: 'chrome-client-id' });
+            mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+
+            await service.init();
+
+            expect(sentClientId()).toBe('chrome-client-id');
+        });
+    });
+
     // --- server-side rendering ---
 
     describe('server platform', () => {

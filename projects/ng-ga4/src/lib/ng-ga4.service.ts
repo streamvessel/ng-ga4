@@ -6,6 +6,7 @@ import { filter, Subscription } from 'rxjs';
 import { NG_GA4_CONFIG, NgGa4Config } from './ng-ga4.config';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
+import { parseGaCookie, readCookieValue } from './ga-cookie';
 
 interface Ga4Device {
     language?: string;
@@ -529,7 +530,42 @@ export class NgGa4Service implements OnDestroy {
         if (this.config.isExtension) {
             return this.loadOrCreateClientIdFromChromeStorage();
         }
+        return this.loadOrCreateClientIdForWeb();
+    }
+
+    // gtag.js keeps its client ID in the `_ga` cookie, which is scoped to the
+    // registrable domain; ours lived in origin-scoped localStorage. A site running
+    // both therefore counted one human as two users. Preferring the cookie makes the
+    // two agree, and costs nothing where no cookie exists.
+    private loadOrCreateClientIdForWeb(): string {
+        const source = this.config.clientIdSource ?? 'auto';
+
+        if (source !== 'storage') {
+            const fromCookie = this.readGaCookieClientId();
+            if (fromCookie) {
+                // Mirror it, so a later gtag removal or cookie expiry does not flip
+                // identity back to whatever stale value localStorage still holds.
+                this.storeClientId(fromCookie);
+                return fromCookie;
+            }
+        }
+
         return this.loadOrCreateClientIdFromLocalStorage();
+    }
+
+    private readGaCookieClientId(): string | null {
+        try {
+            const value = readCookieValue(this.getCookieJar(), '_ga');
+            return value === null ? null : parseGaCookie(value);
+        } catch {
+            // Cookie access is denied outright in some sandboxed iframes. Falling
+            // back to storage is strictly better than failing init().
+            return null;
+        }
+    }
+
+    private storeClientId(clientId: string): void {
+        localStorage.setItem('ga_client_id', clientId);
     }
 
     private loadOrCreateClientIdFromLocalStorage(): string {
