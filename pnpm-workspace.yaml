@@ -14,6 +14,7 @@ preferFrozenLockfile: true
 # pipeline. nice-napi is a Linux-only optional native dep — it does not install
 # on Windows, so an omission here only surfaces on ubuntu CI.
 allowBuilds:
+  '@parcel/watcher': true
   core-js: true
   esbuild: true
   lmdb: true
