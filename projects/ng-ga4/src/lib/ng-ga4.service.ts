@@ -1,5 +1,6 @@
-import { Inject, Injectable, OnDestroy } from '@angular/core';
+import { Inject, Injectable, OnDestroy, PLATFORM_ID } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
+import { isPlatformBrowser } from '@angular/common';
 import { NavigationEnd, Router } from '@angular/router';
 import { filter, Subscription } from 'rxjs';
 import { NG_GA4_CONFIG, NgGa4Config } from './ng-ga4.config';
@@ -34,14 +35,23 @@ export class NgGa4Service implements OnDestroy {
     private readonly GA4_ENDPOINT = 'https://www.google-analytics.com/mp/collect';
     private readonly GA4_DEBUG_ENDPOINT = 'https://www.google-analytics.com/debug/mp/collect';
 
+    private readonly isBrowser: boolean;
+
     constructor(
         private http: HttpClient,
         private router: Router,
-        @Inject(NG_GA4_CONFIG) private config: NgGa4Config
-    ) {}
+        @Inject(NG_GA4_CONFIG) private config: NgGa4Config,
+        @Inject(PLATFORM_ID) platformId: object
+    ) {
+        this.isBrowser = isPlatformBrowser(platformId);
+    }
 
     async init(): Promise<void> {
-        if (!this.config.enabled || this.initialized) {
+        // Every collection path below reads a browser-only global (localStorage,
+        // crypto, screen, navigator, window.location), so on the server this must
+        // be inert rather than merely quiet — an APP_INITIALIZER that throws takes
+        // the whole SSR/prerender bootstrap down with it.
+        if (!this.isBrowser || !this.config.enabled || this.initialized) {
             return;
         }
         this.initialized = true;
@@ -69,7 +79,9 @@ export class NgGa4Service implements OnDestroy {
     }
 
     trackPageView(pagePath: string, pageTitle?: string): void {
-        if (!this.config.enabled) {
+        // Dropped, not queued: the server has no client identity to attach a hit to,
+        // and replaying queued events after hydration would double-count the view.
+        if (!this.isBrowser || !this.config.enabled) {
             return;
         }
         if (!this.clientId) {
@@ -96,7 +108,8 @@ export class NgGa4Service implements OnDestroy {
     }
 
     trackEvent(name: string, params?: Record<string, any>): void {
-        if (!this.config.enabled) {
+        // See trackPageView: inert on the server, and deliberately not queued.
+        if (!this.isBrowser || !this.config.enabled) {
             return;
         }
         if (!this.clientId) {
