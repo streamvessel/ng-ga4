@@ -15,7 +15,9 @@ Built according to the official [Chrome Extensions GA4 guide](https://developer.
 - Session management with 30-minute timeout
 - Persistent client ID (survives app restarts)
 - Chrome extension support (`chrome.storage.local` for identity, `chrome.storage.session` for sessions)
-- Debug mode with validation endpoint
+- Device and browser detection on every browser, not only Chromium
+- Debug mode that shows events in GA4 DebugView while still recording them
+- SSR-safe — inert on the server, so Universal and prerendering work
 - Supports both NgModule and standalone Angular apps
 
 ## Installation
@@ -155,6 +157,18 @@ NgGa4Module.forRoot({
 | Client ID | `localStorage` | `chrome.storage.local` |
 | Session number | `localStorage` | `chrome.storage.local` |
 | Session ID + activity | `localStorage` | `chrome.storage.session` |
+
+## Server-side rendering
+
+Safe to include in an Angular Universal or prerendered app with no extra configuration. The service detects a non-browser platform via `PLATFORM_ID` and goes inert: `init()` touches no storage, and `trackEvent`/`trackPageView` are no-ops.
+
+Server-side calls are dropped rather than queued for replay. The server has no client identity to attach a hit to, and replaying on hydration would double-count the page view — the browser sends its own once the app boots.
+
+## Device detection
+
+GA4's Measurement Protocol does not infer anything from the `User-Agent` request header, so the library sends a `device` object explicitly.
+
+Where [User-Agent Client Hints](https://developer.mozilla.org/en-US/docs/Web/API/User-Agent_Client_Hints_API) are available (Chromium), those are used. Safari and Firefox do not implement them, so a built-in user-agent parser fills in browser, browser version, operating system, OS version and device category. Client Hints always win where present; the parser only fills fields they did not supply, which also covers Chromium installs where high-entropy hints are refused.
 
 ## Debug Mode
 
