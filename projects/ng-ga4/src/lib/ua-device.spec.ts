@@ -5,16 +5,33 @@ import { deviceFromUserAgent } from './ua-device';
 // older Chromium and the UA-CH-blocked path go through here too.
 describe('deviceFromUserAgent', () => {
     describe('Safari', () => {
-        it('reads macOS Safari', () => {
+        // Safari froze the macOS token at 10_15_7 from Big Sur onward and Firefox caps at
+        // 10.15, so on exactly the browsers this fallback exists for, that value means
+        // "unknown", not "Catalina". Reporting it would tell GA4 that every modern Mac
+        // runs 10.15.7 — a specific, wrong, decision-shaping claim.
+        it('reads macOS Safari without asserting the frozen OS version', () => {
             const ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15';
 
             expect(deviceFromUserAgent(ua)).toEqual({
                 category: 'desktop',
                 operating_system: 'macOS',
-                operating_system_version: '10.15.7',
                 browser: 'Safari',
                 browser_version: '17.4.1'
             });
+        });
+
+        it('omits the macOS version for the Firefox-capped 10.15 token too', () => {
+            const ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) Gecko/20100101 Firefox/128.0';
+
+            const device = deviceFromUserAgent(ua);
+            expect(device.operating_system).toBe('macOS');
+            expect('operating_system_version' in device).toBe(false);
+        });
+
+        it('keeps a genuinely unambiguous older macOS version', () => {
+            const ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/12.1.2 Safari/605.1.15';
+
+            expect(deviceFromUserAgent(ua).operating_system_version).toBe('10.14.6');
         });
 
         it('reads iPhone Safari as mobile iOS', () => {
@@ -38,24 +55,39 @@ describe('deviceFromUserAgent', () => {
             expect(device.browser).toBe('Safari');
         });
 
-        // Since iPadOS 13 an iPad in desktop mode is indistinguishable from a Mac by
-        // UA alone; a touch-capable "Mac" is the standard disambiguation.
+        // Since iPadOS 13 an iPad in desktop mode is indistinguishable from a Mac by UA
+        // alone; a touch-capable "Mac" is the standard disambiguation. If that signal is
+        // trusted enough to call the device a tablet, it must also correct the OS —
+        // otherwise we emit "a tablet running macOS" and file every iPad under macOS.
         it('treats a touch-capable Macintosh as an iPad in desktop mode', () => {
             const ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15';
 
-            expect(deviceFromUserAgent(ua, 5).category).toBe('tablet');
-            expect(deviceFromUserAgent(ua, 0).category).toBe('desktop');
+            const iPad = deviceFromUserAgent(ua, 5);
+            expect(iPad.category).toBe('tablet');
+            expect(iPad.operating_system).toBe('iOS');
+            // The spoofed Mac version says nothing about the real iPadOS version.
+            expect('operating_system_version' in iPad).toBe(false);
+        });
+
+        it('leaves a genuine Mac alone', () => {
+            const ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15';
+
+            const mac = deviceFromUserAgent(ua, 0);
+            expect(mac.category).toBe('desktop');
+            expect(mac.operating_system).toBe('macOS');
         });
     });
 
     describe('Firefox', () => {
-        it('reads Firefox on Windows', () => {
+        // Windows 11 reports "Windows NT 10.0" exactly like Windows 10 — Microsoft never
+        // bumped the token — so the legacy UA cannot tell them apart. Claiming "10" would
+        // misreport every Windows 11 user of a browser without Client Hints.
+        it('reads Firefox on Windows without guessing 10 versus 11', () => {
             const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0';
 
             expect(deviceFromUserAgent(ua)).toEqual({
                 category: 'desktop',
                 operating_system: 'Windows',
-                operating_system_version: '10',
                 browser: 'Firefox',
                 browser_version: '125.0'
             });
@@ -151,12 +183,20 @@ describe('deviceFromUserAgent', () => {
     });
 
     describe('older Windows releases', () => {
-        it('maps NT version numbers to marketing versions', () => {
+        it('maps unambiguous NT version numbers to marketing versions', () => {
             const nt63 = 'Mozilla/5.0 (Windows NT 6.3; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.114 Safari/537.36';
             const nt61 = 'Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.114 Safari/537.36';
 
             expect(deviceFromUserAgent(nt63).operating_system_version).toBe('8.1');
             expect(deviceFromUserAgent(nt61).operating_system_version).toBe('7');
+        });
+
+        it('omits the version for an unrecognised NT token rather than leaking the kernel number', () => {
+            const ntUnknown = 'Mozilla/5.0 (Windows NT 99.9; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.114 Safari/537.36';
+
+            const device = deviceFromUserAgent(ntUnknown);
+            expect(device.operating_system).toBe('Windows');
+            expect('operating_system_version' in device).toBe(false);
         });
     });
 
