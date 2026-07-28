@@ -1,14 +1,36 @@
 {
     "name": "@stream-vessel/ng-ga4",
     "description": "Angular library for Google Analytics 4 via Measurement Protocol, with support for Angular web apps and Chrome extensions.",
-    "version": "0.0.1",
+    "version": "0.1.0",
+    "license": "Apache-2.0",
+    "author": "Stream Vessel",
+    "homepage": "https://github.com/streamvessel/ng-ga4#readme",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/streamvessel/ng-ga4.git"
+    },
+    "bugs": {
+        "url": "https://github.com/streamvessel/ng-ga4/issues"
+    },
+    "keywords": [
+        "angular",
+        "google-analytics",
+        "ga4",
+        "analytics",
+        "measurement-protocol",
+        "chrome-extension"
+    ],
     "peerDependencies": {
         "@angular/common": "^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0",
         "@angular/core": "^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0",
-        "@angular/router": "^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0"
+        "@angular/router": "^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0",
+        "rxjs": "^7.0.0"
     },
     "dependencies": {
         "tslib": "^2.3.0"
+    },
+    "publishConfig": {
+        "access": "public"
     },
     "sideEffects": false
 }
