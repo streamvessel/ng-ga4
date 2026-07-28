@@ -27,6 +27,9 @@ describe('NgGa4Service', () => {
     let routerEvents$: Subject<any>;
     let mockLocalStorage: Record<string, string>;
     let originalChromeStorage: any;
+    let mockCookieJar: string;
+    let writtenCookies: string[];
+    let cookieAcceptsDomain: (domain: string) => boolean;
 
     function configureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
         routerEvents$ = new Subject<any>();
@@ -50,6 +53,28 @@ describe('NgGa4Service', () => {
 
         service = TestBed.inject(NgGa4Service);
         httpMock = TestBed.inject(HttpTestingController);
+
+        // The service reads and writes cookies through seams precisely so tests can
+        // stub them; mutating document.cookie for real would leak between specs and
+        // make results depend on what the Karma browser already holds on localhost.
+        spyOn(service as any, 'getCookieJar').and.callFake(() => mockCookieJar);
+        spyOn(service as any, 'setCookie').and.callFake((cookie: string) => {
+            writtenCookies.push(cookie);
+            // Emulate a browser refusing a cookie scoped to a public suffix: only
+            // domains the test declares acceptable actually land in the jar.
+            const domain = /;\s*domain=\.?([^;]+)/.exec(cookie)?.[1];
+            if (domain && !cookieAcceptsDomain(domain)) {
+                return;
+            }
+            const [pair] = cookie.split(';');
+            const maxAgeZero = /;\s*max-age=0\b/.test(cookie);
+            const name = pair.slice(0, pair.indexOf('='));
+            const others = mockCookieJar
+                .split(';')
+                .map(part => part.trim())
+                .filter(part => part && part.slice(0, part.indexOf('=')) !== name);
+            mockCookieJar = (maxAgeZero ? others : [...others, pair.trim()]).join('; ');
+        });
     }
 
     function reconfigureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
@@ -100,6 +125,10 @@ describe('NgGa4Service', () => {
 
         // Save original chrome.storage (if any) for restoration
         originalChromeStorage = (window as any).chrome?.storage;
+
+        mockCookieJar = '';
+        writtenCookies = [];
+        cookieAcceptsDomain = () => true;
 
         configureTestBed();
     });

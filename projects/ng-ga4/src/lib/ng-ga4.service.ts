@@ -269,6 +269,29 @@ export class NgGa4Service implements OnDestroy {
         return typeof fetch === 'function' ? fetch.bind(globalThis) : undefined;
     }
 
+    private getCookieJar(): string {
+        try {
+            return typeof document !== 'undefined' ? document.cookie : '';
+        } catch {
+            // document.cookie throws in some sandboxed iframes.
+            return '';
+        }
+    }
+
+    private setCookie(cookie: string): void {
+        try {
+            if (typeof document !== 'undefined') {
+                document.cookie = cookie;
+            }
+        } catch {
+            // See getCookieJar.
+        }
+    }
+
+    private getHostname(): string {
+        return typeof window !== 'undefined' && window.location ? window.location.hostname : '';
+    }
+
     private logHttpError(err: any): void {
         const redact = (v: unknown): any =>
             typeof v === 'string' ? v.replace(/api_secret=[^&\s]*/g, 'api_secret=***') : v;
