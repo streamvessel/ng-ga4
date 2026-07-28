@@ -609,14 +609,13 @@ export class NgGa4Service implements OnDestroy {
     // which makes that refusal the oracle. Returns null when no domain attribute is
     // wanted at all (single-label hosts, IP literals).
     private discoverCookieDomain(): string | null {
-        const probe = '_ng_ga4_domain_probe';
         for (const candidate of registrableDomainCandidates(this.getHostname())) {
-            // A per-call nonce, not a constant, because document.cookie exposes no
-            // domain or path: a stale probe left at a broader scope would otherwise
-            // read back as a false positive for a narrower candidate here.
-            const nonce = String(this.randomClientIdSeed());
-            this.setCookie(`${probe}=${nonce}; path=/; domain=.${candidate}`);
-            if (readCookieValue(this.getCookieJar(), probe) === nonce) {
+            // A per-attempt name, not a fixed one: document.cookie exposes no domain or
+            // path, so two tabs on sibling subdomains probing concurrently would
+            // otherwise overwrite each other's probe and misread the result.
+            const probe = `_ng_ga4_probe_${this.randomNonce()}`;
+            this.setCookie(`${probe}=1; path=/; domain=.${candidate}`);
+            if (readCookieValue(this.getCookieJar(), probe) !== null) {
                 this.setCookie(`${probe}=; path=/; domain=.${candidate}; max-age=0`);
                 return candidate;
             }
@@ -624,8 +623,19 @@ export class NgGa4Service implements OnDestroy {
         return null;
     }
 
+    private randomNonce(): string {
+        const buffer = new Uint32Array(1);
+        crypto.getRandomValues(buffer);
+        return buffer[0].toString(36);
+    }
+
     private readGaCookieClientId(): string | null {
         try {
+            // Belt-and-braces: getCookieJar already swallows and parseGaCookie/
+            // readCookieValue are pure, so nothing here should actually throw. This
+            // path runs inside an APP_INITIALIZER (init()), though, and no future
+            // change to this seam should be able to fail app bootstrap — see tier-0
+            // issue #10 on getCookieJar for why that failure mode matters here.
             const value = readCookieValue(this.getCookieJar(), '_ga');
             return value === null ? null : parseGaCookie(value);
         } catch {
@@ -643,7 +653,7 @@ export class NgGa4Service implements OnDestroy {
         let clientId = localStorage.getItem('ga_client_id');
         if (!clientId) {
             clientId = crypto.randomUUID();
-            localStorage.setItem('ga_client_id', clientId);
+            this.storeClientId(clientId);
         }
         return clientId;
     }

@@ -32,6 +32,13 @@ describe('NgGa4Service', () => {
     let cookieAcceptsDomain: (domain: string) => boolean;
 
     function configureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
+        // Reset here, not just in the top-level beforeEach, so a reconfigureTestBed()
+        // mid-spec also gets a clean slate — writtenCookies in particular would
+        // otherwise carry stale entries across a reconfigure.
+        mockCookieJar = '';
+        writtenCookies = [];
+        cookieAcceptsDomain = () => true;
+
         routerEvents$ = new Subject<any>();
 
         const mockRouter = {
@@ -125,10 +132,6 @@ describe('NgGa4Service', () => {
 
         // Save original chrome.storage (if any) for restoration
         originalChromeStorage = (window as any).chrome?.storage;
-
-        mockCookieJar = '';
-        writtenCookies = [];
-        cookieAcceptsDomain = () => true;
 
         configureTestBed();
     });
@@ -395,6 +398,43 @@ describe('NgGa4Service', () => {
             expect(writtenCookies.find(c => c.startsWith('_ga=')))
                 .toContain(`_ga=GA1.1.${MOCK_UUID}`);
         });
+
+        // encodeURIComponent on write exists to close a read/write asymmetry
+        // (readCookieValue decodes), and nothing exercised it.
+        it('percent-encodes a client ID that would otherwise inject cookie attributes', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            mockLocalStorage['ga_client_id'] = 'evil; max-age=0';
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+            await service.init();
+
+            const gaCookie = writtenCookies.find(c => c.startsWith('_ga='));
+            expect(gaCookie).toContain('evil%3B%20max-age%3D0');
+            expect(gaCookie).toContain('max-age=63072000');
+        });
+
+        // A probe left behind would be a stray cookie on every user's domain.
+        it('cleans up the domain probe once a candidate sticks', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            cookieAcceptsDomain = (domain) => domain === 'example.com';
+            spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+
+            await service.init();
+
+            expect(writtenCookies.some(c => c.includes('_ng_ga4_probe_') && c.includes('max-age=0')))
+                .toBe(true);
+            expect(mockCookieJar).not.toContain('_ng_ga4_probe_');
+        });
+
+        it('adopts a present _ga under clientIdSource: cookie without rewriting it', async () => {
+            reconfigureTestBed({ clientIdSource: 'cookie' });
+            mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+
+            await service.init();
+
+            expect(sentClientId()).toBe('1234567890.1700000000');
+            expect(writtenCookies.filter(c => c.startsWith('_ga='))).toEqual([]);
+        });
     });
 
     // --- server-side rendering ---
@@ -408,6 +448,7 @@ describe('NgGa4Service', () => {
             expect(localStorage.getItem).not.toHaveBeenCalled();
             expect(localStorage.setItem).not.toHaveBeenCalled();
             expect(crypto.randomUUID).not.toHaveBeenCalled();
+            expect(writtenCookies).toEqual([]);
             httpMock.expectNone(() => true);
         });
 
