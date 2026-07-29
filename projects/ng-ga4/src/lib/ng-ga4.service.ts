@@ -539,45 +539,35 @@ export class NgGa4Service implements OnDestroy {
         return this.loadOrCreateClientIdForWeb();
     }
 
-    // gtag.js keeps its client ID in the `_ga` cookie, which is scoped to the
-    // registrable domain; ours lived in origin-scoped localStorage. A site running
-    // both therefore counted one human as two users. Preferring the cookie makes the
-    // two agree, and costs nothing where no cookie exists.
+    // gtag.js scopes its client ID cookie to the registrable domain; ours lived in
+    // origin-scoped localStorage, so a site running both counted one human as two.
+    // Preferring the cookie fixes that, and costs nothing where none exists.
     private loadOrCreateClientIdForWeb(): string {
         const source = this.resolveClientIdSource();
 
         if (source !== 'storage') {
             const fromCookie = this.readGaCookieClientId();
             if (fromCookie) {
-                // Deliberately not persisted to localStorage: the cookie is the
-                // durable store for an ID we do not own. Mirroring it would let it
-                // outlive _ga — deleting the cookie (by hand, or by a consent tool
-                // that knows nothing about our localStorage key) would then fail to
-                // reset identity, and a poisoned _ga payload would outlive the
-                // attacker's cookie too. gtag.js itself mints a fresh client ID once
-                // _ga disappears; not persisting here keeps us aligned with that.
+                // Not persisted: the cookie is the durable store for an ID we don't
+                // own, so deleting _ga resets identity, the same way gtag.js itself
+                // mints a fresh client ID once _ga disappears.
                 return fromCookie;
             }
         }
 
-        // 'cookie' means the cookie is authoritative, so with none present we mint in
-        // gtag's own shape rather than adopting a legacy UUID. That re-identifies an
-        // existing user exactly once, which is why it is opt-in and not the default.
+        // 'cookie' makes the cookie authoritative: with none present, mint in gtag's
+        // shape rather than adopt a legacy UUID, re-identifying that user once —
+        // which is why this source is opt-in, not the default.
         if (source === 'cookie') {
             const stored = localStorage.getItem('ga_client_id');
-            // Reuse an ID we minted on a previous load, discarding only the legacy
-            // UUID this option is documented to ignore. 'cookie' means "re-identify a
-            // legacy UUID user once", not "mint a fresh identity on every load" — but
-            // that is exactly what happens if the cookie write below never lands
-            // (cookies disabled, a cross-site iframe, a consent tool stubbing
-            // document.cookie) and nothing here reads back what storeClientId wrote.
+            // Reuse an ID minted on an earlier load, discarding only the legacy UUID
+            // this option ignores by design — 'cookie' re-identifies that user once,
+            // not on every load, so a cookie write that never lands can't force a remint.
             const clientId = stored && isGtagClientId(stored)
                 ? stored
                 : mintGtagClientId(Date.now(), this.randomClientIdSeed());
-            // Adoption above returns before ever reaching here, so anything already
-            // in ga_client_id is ours by construction — a freshly minted or reused
-            // ID, never an adopted one — which is what makes persisting it, and then
-            // writing it back out as _ga, safe.
+            // Adoption above always returns first, so ga_client_id here is always ours
+            // to persist — never an adopted ID.
             this.storeClientId(clientId);
             this.persistGaCookie(clientId);
             return clientId;
@@ -586,25 +576,18 @@ export class NgGa4Service implements OnDestroy {
         const stored = this.loadOrCreateClientIdFromLocalStorage();
         // The source check is load-bearing: 'storage' means "never touch the cookie",
         // so it has to override writeGaCookie rather than combining with it.
-        //
-        // No origin check needed here: adoption above always returns before storing
-        // anything, so ga_client_id can only ever hold an ID this library minted
-        // itself. Writing it back out to _ga is exactly writeGaCookie's job.
         if (source !== 'storage' && this.config.writeGaCookie) {
-            // Write the ID we already have rather than minting: re-identifying users
-            // is the harm this whole feature exists to avoid. The cost is a _ga whose
-            // payload may be a UUID instead of gtag's numeric pair — GA4 accepts any
-            // client_id string, and if gtag later rejects the shape it rewrites the
-            // cookie, which our next read adopts. One flip, then convergence.
+            // Write the ID already held, not a fresh mint: re-identifying users is the
+            // harm this feature exists to avoid. The _ga payload may end up a UUID
+            // instead of gtag's numeric pair, but GA4 accepts any client_id string —
+            // and if gtag later rewrites the cookie, our next read adopts it.
             this.persistGaCookie(stored);
         }
         return stored;
     }
 
-    // Validated once, here, rather than trusting config.clientIdSource verbatim:
-    // a JS consumer passing an unrecognised value (e.g. a typo'd 'Cookie') would
-    // otherwise silently degrade to 'auto' — including reading the cookie for
-    // someone who was specifically trying to opt out of it.
+    // Validated once here, not trusted verbatim: a typo'd value (e.g. 'Cookie') would
+    // otherwise silently degrade to 'auto', including for someone opting out of the cookie.
     private resolveClientIdSource(): 'auto' | 'cookie' | 'storage' {
         const configured = this.config.clientIdSource;
         if (configured === undefined || configured === 'auto' || configured === 'cookie' || configured === 'storage') {
@@ -621,25 +604,19 @@ export class NgGa4Service implements OnDestroy {
         return (buffer[0] % 2147483647) + 1;
     }
 
-    // Named `persistGaCookie`, not `writeGaCookie`, so it is never confused at a
-    // glance with the `config.writeGaCookie` flag that gates it.
     private persistGaCookie(clientId: string): void {
         const options = this.resolveCookieOptions();
-        // An explicit domain bypasses discovery entirely: no probe cookie is
-        // written, and a site whose probes would otherwise be blocked still gets
-        // a correctly-scoped _ga. Strip any leading dot the caller supplied —
-        // the attribute below always adds exactly one — so both '.example.com'
-        // and 'example.com' behave the same.
+        // An explicit domain bypasses discovery entirely. Strip any leading dot the
+        // caller supplied — the attribute below always adds exactly one — so
+        // '.example.com' and 'example.com' behave the same.
         const explicitDomain = options.domain?.replace(/^\.+/, '');
         const { domain, failed } = explicitDomain
             ? { domain: explicitDomain, failed: false }
             : this.discoverCookieDomain();
         if (failed) {
-            // Every candidate was refused. A host-only _ga here would be strictly
-            // worse than none: it diverges per subdomain, and can sit in the jar
-            // under the same name as a correctly-scoped cookie (written by
-            // gtag.js, or by this library from another tab), where
-            // readCookieValue returns whichever the browser happens to list first.
+            // Every candidate was refused. A host-only _ga would be worse than none:
+            // it diverges per subdomain and can shadow a correctly-scoped cookie
+            // already in the jar (from gtag.js, or this library in another tab).
             return;
         }
         const components = domain ? domain.split('.').length : 1;
@@ -647,17 +624,13 @@ export class NgGa4Service implements OnDestroy {
             `path=/`,
             `max-age=${options.maxAgeSeconds}`,
             ...(domain ? [`domain=.${domain}`] : []),
-            // Flags, when supplied, replace both the default SameSite=Lax and the
-            // automatic Secure below — the caller is taking full responsibility
-            // for the attribute (e.g. SameSite=None; Secure for a cross-site
-            // iframe embed).
+            // Replaces the default SameSite=Lax (and automatic Secure) rather than
+            // merging: the caller takes full responsibility for the attribute, e.g.
+            // 'SameSite=None; Secure' for a cross-site iframe embed.
             options.flags ?? `SameSite=Lax${this.getProtocol() === 'https:' ? '; Secure' : ''}`
         ];
-        // readCookieValue decodeURIComponents on read, so an unencoded value here is a
-        // latent trap: a clientId containing e.g. "; max-age=0" would be mirrored into
-        // localStorage verbatim and then re-emitted raw on the next write, injecting
-        // cookie attributes. encodeURIComponent is a no-op for gtag's numeric pairs and
-        // our UUIDs, so this costs nothing on the path that matters.
+        // readCookieValue decodes on read, so writing unencoded here is an encode/decode
+        // asymmetry — and a clientId containing ";" would inject cookie attributes.
         const value = encodeURIComponent(formatGaCookie(clientId, components));
         this.setCookie(`_ga=${value}; ${attributes.join('; ')}`);
     }
@@ -672,22 +645,19 @@ export class NgGa4Service implements OnDestroy {
         };
     }
 
-    // There is no public suffix list in the browser, so the registrable domain has to
-    // be discovered: trial-set a throwaway cookie at each candidate shortest-first and
-    // keep the first that sticks. Browsers refuse cookies scoped to a public suffix,
-    // which makes that refusal the oracle.
+    // There is no public suffix list in the browser, so the registrable domain must be
+    // discovered: trial-set a throwaway cookie at each candidate shortest-first and
+    // keep the first that sticks — a browser's refusal on a public suffix is the only
+    // oracle available.
     //
-    // `domain: null, failed: false` means no domain attribute is wanted at all
-    // (single-label hosts, IP literals) — a host-only cookie is correct there.
-    // `domain: null, failed: true` means candidates existed and every one was
-    // refused — the caller must not fall back to a host-only cookie in that case,
-    // see persistGaCookie.
+    // `domain: null, failed: false` means no domain attribute is wanted (single-label
+    // host, IP literal); `failed: true` means every candidate was refused — the caller
+    // must not fall back to a host-only cookie then; see persistGaCookie.
     private discoverCookieDomain(): { domain: string | null; failed: boolean } {
         const candidates = registrableDomainCandidates(this.getHostname());
         for (const candidate of candidates) {
-            // A per-attempt name, not a fixed one: document.cookie exposes no domain or
-            // path, so two tabs on sibling subdomains probing concurrently would
-            // otherwise overwrite each other's probe and misread the result.
+            // Per-attempt, not fixed: document.cookie exposes no domain or path, so
+            // two tabs probing sibling subdomains concurrently would otherwise clash.
             const probe = `_ng_ga4_probe_${this.randomNonce()}`;
             this.setCookie(`${probe}=1; path=/; domain=.${candidate}`);
             if (readCookieValue(this.getCookieJar(), probe) !== null) {
@@ -705,21 +675,13 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private readGaCookieClientId(): string | null {
+        // Belt-and-braces, not a full graceful-degradation story: this runs inside
+        // init()'s APP_INITIALIZER, where a throw kills bootstrap, but the same
+        // sandboxed iframes that deny cookie access typically block localStorage too.
         try {
-            // Belt-and-braces: getCookieJar already swallows and parseGaCookie/
-            // readCookieValue are pure, so nothing here should actually throw. This
-            // path runs inside an APP_INITIALIZER (init()), though, and no future
-            // change to this seam should be able to fail app bootstrap — see tier-0
-            // issue #10 on getCookieJar for why that failure mode matters here.
             const value = readCookieValue(this.getCookieJar(), '_ga');
             return value === null ? null : parseGaCookie(value);
         } catch {
-            // Cookie access is denied outright in some sandboxed iframes. Returning
-            // null here is not a guaranteed graceful fallback: the same sandbox
-            // typically blocks localStorage too, so the fallback path this feeds
-            // (loadOrCreateClientIdFromLocalStorage, below) can still throw and take
-            // init() down with it. This just avoids adding a second, redundant
-            // failure of our own on top of whatever the sandbox already does.
             return null;
         }
     }
@@ -731,12 +693,10 @@ export class NgGa4Service implements OnDestroy {
     private loadOrCreateClientIdFromLocalStorage(): string {
         let clientId = localStorage.getItem('ga_client_id');
         if (!clientId) {
-            // A brand-new install has no identity to preserve, so mint in gtag's own
-            // shape rather than a UUID: that is what gtag.js itself writes, so a _ga
-            // we create from this is one gtag will accept rather than reject and
-            // rewrite. This is also the fallback loadOrCreateClientIdFromChromeStorage
-            // uses when chrome.storage is unavailable — fine, since either shape is a
-            // valid client_id and there is no _ga cookie to align with there anyway.
+            // No identity to preserve, so mint in gtag's own shape, not a UUID: gtag
+            // accepts this shape rather than rejecting and rewriting it. Also backs
+            // loadOrCreateClientIdFromChromeStorage's own fallback when chrome.storage
+            // is unavailable, where there's no _ga to align with either way.
             clientId = mintGtagClientId(Date.now(), this.randomClientIdSeed());
             this.storeClientId(clientId);
         }

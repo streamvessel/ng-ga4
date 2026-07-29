@@ -44,13 +44,12 @@ export function readCookieValue(jar: string, name: string): string | null {
 
 // Anyone who can set a cookie on the registrable domain — XSS on a sibling
 // subdomain, a subdomain takeover, plain-HTTP injection on a non-Secure cookie —
-// can otherwise write anything into `_ga`. Because an adopted ID is mirrored into
-// localStorage (see loadOrCreateClientIdForWeb), an unbounded payload would let
-// that write pin every visitor to one attacker-chosen `client_id`, or inject a
-// multi-kilobyte value into every request, permanently: the poisoning outlives
-// the attacker's cookie. This class/length is permissive enough for gtag's
-// numeric pairs, our UUIDs, and the third-party `_ga` writers this library
-// deliberately interoperates with, and useless as an injection vector.
+// can otherwise write anything into `_ga`, for as long as that cookie survives (up
+// to its own two-year expiry): a pinned attacker-chosen `client_id`, or a
+// multi-kilobyte value injected into every request. This class/length is
+// permissive enough for gtag's numeric pairs, our UUIDs, and the third-party `_ga`
+// writers this library deliberately interoperates with, and useless as an
+// injection vector.
 const PLAUSIBLE_CLIENT_ID = /^[A-Za-z0-9._-]{1,64}$/;
 
 /**

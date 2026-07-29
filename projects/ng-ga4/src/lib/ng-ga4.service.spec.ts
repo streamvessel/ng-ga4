@@ -253,11 +253,9 @@ describe('NgGa4Service', () => {
             expect(sentClientId()).toBe('1234567890.1700000000');
         });
 
-        // The cookie is the durable store for an ID we do not own: mirroring it
-        // into localStorage would let it outlive _ga, so that deleting the cookie
-        // (by hand, or by a consent tool that has never heard of our localStorage
-        // key) fails to reset identity — and a poisoned _ga payload would outlive
-        // the attacker's cookie too.
+        // The cookie is the durable store for an ID we don't own: mirroring it into
+        // localStorage would let it outlive _ga, so deleting the cookie would fail
+        // to reset identity.
         it('does not mirror an adopted cookie ID into localStorage', async () => {
             mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
 
@@ -498,12 +496,11 @@ describe('NgGa4Service', () => {
             expect(sentClientId()).toBe('1234567890.1700000000');
         });
 
-        // Every other spec in this describe calls init() exactly once, which is
-        // exactly why the bugs below survived three reviews: a service that mints a
-        // fresh identity, or resurrects a deleted cookie, on the *second* load looks
-        // identical to a correct one on the first. reconfigureTestBed() simulates a
-        // second page load: a fresh service instance backed by the same
-        // mockLocalStorage, with the cookie jar under the test's control.
+        // A service that mints a fresh identity, or resurrects a deleted cookie, on
+        // the *second* load looks identical to a correct one on the first, so this
+        // block exercises two loads: reconfigureTestBed() simulates a fresh service
+        // instance backed by the same mockLocalStorage, with the cookie jar under the
+        // test's control.
         describe('across multiple page loads', () => {
             it('keeps the same client_id under clientIdSource: cookie across two inits when the cookie write is rejected', async () => {
                 reconfigureTestBed({ clientIdSource: 'cookie' });
@@ -546,12 +543,10 @@ describe('NgGa4Service', () => {
                 expect(second).toBe(first);
             });
 
-            // Adoption no longer mirrors into localStorage (see 'does not mirror an
-            // adopted cookie ID into localStorage' above), so a deleted _ga is no
-            // longer resurrected — there is nothing left remembering the deleted
-            // identity to resurrect it with. Instead, the next load mints a fresh ID
-            // and writes *that* to _ga: the user's deletion actually reset their
-            // identity, the same way it would under gtag.js itself.
+            // Not mirrored into localStorage (see 'does not mirror an adopted cookie
+            // ID into localStorage' above), so nothing remembers the deleted identity:
+            // the next load mints a fresh ID and writes it to _ga, the same way
+            // deleting _ga resets identity under gtag.js itself.
             it('writes a freshly minted _ga after the user deletes it, not the previously adopted ID', async () => {
                 // First load: adopt gtag's cookie.
                 mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
@@ -599,11 +594,10 @@ describe('NgGa4Service', () => {
             });
 
             // The two specs above model a domain-scoped rejection (cookieAcceptsDomain).
-            // Neither can model a browser with cookies disabled outright, a cross-site
-            // iframe, or a consent tool that stubs document.cookie before consent —
-            // environments where a write is attempted, silently discarded, and there is
-            // nothing to read back. That gap is exactly why the respawn bug this guards
-            // against survived three rounds of review: it was only reachable sideways.
+            // This models the case they can't: a browser with cookies disabled
+            // outright, a cross-site iframe, or a consent tool stubbing document.cookie
+            // before consent — a write is attempted, silently discarded, and there is
+            // nothing to read back.
             it('keeps the same client_id under clientIdSource: cookie across two inits when cookies are disabled entirely', async () => {
                 reconfigureTestBed({ clientIdSource: 'cookie' });
                 cookiesEnabled = false;
