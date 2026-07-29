@@ -527,6 +527,99 @@ describe('NgGa4Service', () => {
         });
     });
 
+    // --- writeGaCookie options ---
+
+    describe('writeGaCookie options', () => {
+        it('writes with an explicit domain and issues no probe cookie', async () => {
+            reconfigureTestBed({ writeGaCookie: { domain: '.example.com' } });
+            spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+
+            await service.init();
+
+            const gaCookie = writtenCookies.find(c => c.startsWith('_ga='));
+            expect(gaCookie).toContain('domain=.example.com');
+            // Discovery is bypassed entirely — no throwaway probe cookie at all.
+            expect(writtenCookies.some(c => c.includes('_ng_ga4_probe_'))).toBe(false);
+        });
+
+        it('emits a custom max-age', async () => {
+            reconfigureTestBed({ writeGaCookie: { maxAgeSeconds: 60 } });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+            await service.init();
+
+            expect(writtenCookies.find(c => c.startsWith('_ga='))).toContain('max-age=60');
+        });
+
+        it('emits custom flags in place of the default SameSite=Lax', async () => {
+            reconfigureTestBed({ writeGaCookie: { flags: 'SameSite=None; Secure' } });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+            await service.init();
+
+            const gaCookie = writtenCookies.find(c => c.startsWith('_ga='));
+            expect(gaCookie).toContain('SameSite=None; Secure');
+            expect(gaCookie).not.toContain('SameSite=Lax');
+        });
+
+        it('adds Secure to the default flags on HTTPS', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+            spyOn(service as any, 'getProtocol').and.returnValue('https:');
+
+            await service.init();
+
+            expect(writtenCookies.find(c => c.startsWith('_ga=')))
+                .toContain('SameSite=Lax; Secure');
+        });
+
+        it('omits Secure from the default flags on HTTP', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+            spyOn(service as any, 'getProtocol').and.returnValue('http:');
+
+            await service.init();
+
+            expect(writtenCookies.find(c => c.startsWith('_ga='))).not.toContain('Secure');
+        });
+
+        // A host-only _ga diverges per subdomain and can shadow a correctly-scoped
+        // one already in the jar, so it must not be written as a "better than
+        // nothing" fallback once every candidate domain has been refused.
+        it('writes no _ga at all when every candidate domain is refused', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+            cookieAcceptsDomain = () => false;
+
+            await service.init();
+
+            expect(writtenCookies.filter(c => c.startsWith('_ga='))).toEqual([]);
+        });
+
+        // A single-label host has no candidates to refuse in the first place — that
+        // is "nothing to try", not "everything refused", so it must still write.
+        it('still writes a host-only _ga on a single-label host', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+            await service.init();
+
+            const gaCookie = writtenCookies.find(c => c.startsWith('_ga='));
+            expect(gaCookie).toBeDefined();
+            expect(gaCookie).not.toContain('domain=');
+        });
+
+        it('writes with every default when given an empty options object', async () => {
+            reconfigureTestBed({ writeGaCookie: {} });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+            await service.init();
+
+            expect(writtenCookies.find(c => c.startsWith('_ga=')))
+                .toContain('max-age=63072000');
+        });
+    });
+
     // --- server-side rendering ---
 
     describe('server platform', () => {

@@ -3,7 +3,7 @@ import { HttpClient } from '@angular/common/http';
 import { isPlatformBrowser } from '@angular/common';
 import { NavigationEnd, Router } from '@angular/router';
 import { filter, Subscription } from 'rxjs';
-import { NG_GA4_CONFIG, NgGa4Config } from './ng-ga4.config';
+import { NG_GA4_CONFIG, NgGa4Config, NgGa4CookieOptions } from './ng-ga4.config';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
@@ -293,6 +293,10 @@ export class NgGa4Service implements OnDestroy {
 
     private getHostname(): string {
         return typeof window !== 'undefined' && window.location ? window.location.hostname : '';
+    }
+
+    private getProtocol(): string {
+        return typeof window !== 'undefined' && window.location ? window.location.protocol : '';
     }
 
     private logHttpError(err: any): void {
@@ -618,13 +622,34 @@ export class NgGa4Service implements OnDestroy {
     // Named `persistGaCookie`, not `writeGaCookie`, so it is never confused at a
     // glance with the `config.writeGaCookie` flag that gates it.
     private persistGaCookie(clientId: string): void {
-        const domain = this.discoverCookieDomain();
+        const options = this.resolveCookieOptions();
+        // An explicit domain bypasses discovery entirely: no probe cookie is
+        // written, and a site whose probes would otherwise be blocked still gets
+        // a correctly-scoped _ga. Strip any leading dot the caller supplied —
+        // the attribute below always adds exactly one — so both '.example.com'
+        // and 'example.com' behave the same.
+        const explicitDomain = options.domain?.replace(/^\.+/, '');
+        const { domain, failed } = explicitDomain
+            ? { domain: explicitDomain, failed: false }
+            : this.discoverCookieDomain();
+        if (failed) {
+            // Every candidate was refused. A host-only _ga here would be strictly
+            // worse than none: it diverges per subdomain, and can sit in the jar
+            // under the same name as a correctly-scoped cookie (written by
+            // gtag.js, or by this library from another tab), where
+            // readCookieValue returns whichever the browser happens to list first.
+            return;
+        }
         const components = domain ? domain.split('.').length : 1;
         const attributes = [
             `path=/`,
-            `max-age=${this.GA_COOKIE_MAX_AGE_SECONDS}`,
-            `SameSite=Lax`,
-            ...(domain ? [`domain=.${domain}`] : [])
+            `max-age=${options.maxAgeSeconds}`,
+            ...(domain ? [`domain=.${domain}`] : []),
+            // Flags, when supplied, replace both the default SameSite=Lax and the
+            // automatic Secure below — the caller is taking full responsibility
+            // for the attribute (e.g. SameSite=None; Secure for a cross-site
+            // iframe embed).
+            options.flags ?? `SameSite=Lax${this.getProtocol() === 'https:' ? '; Secure' : ''}`
         ];
         // readCookieValue decodeURIComponents on read, so an unencoded value here is a
         // latent trap: a clientId containing e.g. "; max-age=0" would be mirrored into
@@ -635,13 +660,29 @@ export class NgGa4Service implements OnDestroy {
         this.setCookie(`_ga=${value}; ${attributes.join('; ')}`);
     }
 
+    private resolveCookieOptions(): { domain?: string; flags?: string; maxAgeSeconds: number } {
+        const configured = this.config.writeGaCookie;
+        const options: NgGa4CookieOptions = typeof configured === 'object' && configured !== null ? configured : {};
+        return {
+            domain: options.domain,
+            flags: options.flags,
+            maxAgeSeconds: options.maxAgeSeconds ?? this.GA_COOKIE_MAX_AGE_SECONDS
+        };
+    }
+
     // There is no public suffix list in the browser, so the registrable domain has to
     // be discovered: trial-set a throwaway cookie at each candidate shortest-first and
     // keep the first that sticks. Browsers refuse cookies scoped to a public suffix,
-    // which makes that refusal the oracle. Returns null when no domain attribute is
-    // wanted at all (single-label hosts, IP literals).
-    private discoverCookieDomain(): string | null {
-        for (const candidate of registrableDomainCandidates(this.getHostname())) {
+    // which makes that refusal the oracle.
+    //
+    // `domain: null, failed: false` means no domain attribute is wanted at all
+    // (single-label hosts, IP literals) — a host-only cookie is correct there.
+    // `domain: null, failed: true` means candidates existed and every one was
+    // refused — the caller must not fall back to a host-only cookie in that case,
+    // see persistGaCookie.
+    private discoverCookieDomain(): { domain: string | null; failed: boolean } {
+        const candidates = registrableDomainCandidates(this.getHostname());
+        for (const candidate of candidates) {
             // A per-attempt name, not a fixed one: document.cookie exposes no domain or
             // path, so two tabs on sibling subdomains probing concurrently would
             // otherwise overwrite each other's probe and misread the result.
@@ -649,10 +690,10 @@ export class NgGa4Service implements OnDestroy {
             this.setCookie(`${probe}=1; path=/; domain=.${candidate}`);
             if (readCookieValue(this.getCookieJar(), probe) !== null) {
                 this.setCookie(`${probe}=; path=/; domain=.${candidate}; max-age=0`);
-                return candidate;
+                return { domain: candidate, failed: false };
             }
         }
-        return null;
+        return { domain: null, failed: candidates.length > 0 };
     }
 
     private randomNonce(): string {

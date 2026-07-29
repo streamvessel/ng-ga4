@@ -1,5 +1,26 @@
 import { InjectionToken } from '@angular/core';
 
+/**
+ * Options for the `_ga` cookie this library writes when `writeGaCookie` is
+ * truthy. All fields are optional — `{}` writes with every default gtag itself
+ * would use.
+ */
+export interface NgGa4CookieOptions {
+    /**
+     * Explicit cookie domain, e.g. `'.example.com'`. Skips discovery entirely:
+     * no probe cookie is written, and a site whose probes are blocked still gets
+     * a correctly-scoped `_ga`. Set this if you know your registrable domain.
+     */
+    domain?: string;
+    /**
+     * Cookie attributes replacing the defaults (`SameSite=Lax`, plus `Secure` on
+     * HTTPS). For example `'SameSite=None; Secure'` for a cross-site iframe embed.
+     */
+    flags?: string;
+    /** Lifetime in seconds. Defaults to 63072000 — two years, as gtag uses. */
+    maxAgeSeconds?: number;
+}
+
 export interface NgGa4Config {
     measurementId: string;
     apiSecret: string;
@@ -37,17 +58,28 @@ export interface NgGa4Config {
 
     /**
      * Write `_ga` when it is absent, on the registrable domain, with gtag's
-     * two-year expiry. Only that envelope — name, domain, expiry — is gtag's
-     * format: the value written is whatever client ID this library already
-     * has, typically its own `crypto.randomUUID()` for an existing user, not
-     * gtag's numeric `<random>.<seconds>` pair. Reusing the existing ID is
-     * deliberate, to avoid re-identifying the user; only a newly minted ID
-     * (no stored ID yet) uses gtag's numeric shape. Off by default: this
+     * two-year expiry by default. Only that envelope — name, domain, expiry —
+     * is gtag's format: the value written is whatever client ID this library
+     * already has, typically its own `crypto.randomUUID()` for an existing
+     * user, not gtag's numeric `<random>.<seconds>` pair. Reusing the existing
+     * ID is deliberate, to avoid re-identifying the user; only a newly minted
+     * ID (no stored ID yet) uses gtag's numeric shape. Off by default: this
      * library does not set a cookie unless asked, which matters because
      * Consent Mode is not implemented yet. Ignored for `'storage'` and for
      * extensions; implied by `'cookie'`.
+     *
+     * Truthiness governs whether the cookie is written — `{}` writes with all
+     * defaults, `false` or omitted writes nothing. Reading `_ga` remains
+     * governed by `clientIdSource`; this option only ever controls the write
+     * direction, hence the name.
+     *
+     * An ID adopted from an existing `_ga` cookie is never written back out
+     * under this option, no matter how it is configured: doing so would
+     * resurrect a cookie a user (or their consent tool) deleted after this
+     * library adopted it. This option only ever publishes an ID the library
+     * minted itself.
      */
-    writeGaCookie?: boolean;
+    writeGaCookie?: boolean | NgGa4CookieOptions;
 }
 
 export const NG_GA4_CONFIG = new InjectionToken<NgGa4Config>('NG_GA4_CONFIG');
