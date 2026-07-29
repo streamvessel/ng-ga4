@@ -228,15 +228,18 @@ describe('NgGa4Service', () => {
             expect(sentClientId()).toBe('1234567890.1700000000');
         });
 
-        // Otherwise a site that later drops gtag, or lets _ga expire, falls back to
-        // a stale UUID and flips every user's identity a second time.
-        it('mirrors an adopted cookie ID into localStorage', async () => {
+        // The cookie is the durable store for an ID we do not own: mirroring it
+        // into localStorage would let it outlive _ga, so that deleting the cookie
+        // (by hand, or by a consent tool that has never heard of our localStorage
+        // key) fails to reset identity — and a poisoned _ga payload would outlive
+        // the attacker's cookie too.
+        it('does not mirror an adopted cookie ID into localStorage', async () => {
             mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
 
             await service.init();
 
             expect(localStorage.setItem)
-                .toHaveBeenCalledWith('ga_client_id', '1234567890.1700000000');
+                .not.toHaveBeenCalledWith('ga_client_id', jasmine.any(String));
         });
 
         it('ignores gtag\'s _ga_<STREAM> session cookie when no _ga is present', async () => {
@@ -506,27 +509,50 @@ describe('NgGa4Service', () => {
                 expect(second).toBe(first);
             });
 
-            it('does not respawn a _ga cookie the user deleted', async () => {
-                // First load: adopt gtag's cookie, mirroring it into localStorage.
+            // Adoption no longer mirrors into localStorage (see 'does not mirror an
+            // adopted cookie ID into localStorage' above), so a deleted _ga is no
+            // longer resurrected — there is nothing left remembering the deleted
+            // identity to resurrect it with. Instead, the next load mints a fresh ID
+            // and writes *that* to _ga: the user's deletion actually reset their
+            // identity, the same way it would under gtag.js itself.
+            it('writes a freshly minted _ga after the user deletes it, not the previously adopted ID', async () => {
+                // First load: adopt gtag's cookie.
                 mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
                 await service.init();
                 expect(sentClientId()).toBe('1234567890.1700000000');
 
-                // Second load: the user's consent tool deleted _ga, but not
-                // localStorage — and this time writeGaCookie is on.
+                // Second load: the user's consent tool deleted _ga, and this time
+                // writeGaCookie is on.
                 reconfigureTestBed({ writeGaCookie: true });
                 mockCookieJar = '';
                 spyOn(service as any, 'getHostname').and.returnValue('localhost');
 
                 await service.init();
 
-                expect(writtenCookies.filter(c => c.startsWith('_ga='))).toEqual([]);
+                const gaCookie = writtenCookies.find(c => c.startsWith('_ga='));
+                expect(gaCookie).toBeDefined();
+                expect(gaCookie).not.toContain('1234567890.1700000000');
             });
 
-            it('still writes _ga for a locally-owned client_id, proving the respawn guard does not disable writeGaCookie entirely', async () => {
+            it('sends a client_id that differs from the adopted one after the user deletes _ga and reloads', async () => {
+                // First load: adopt gtag's cookie.
+                mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+                await service.init();
+                const adopted = sentClientId();
+
+                // Second load: the user's consent tool deleted _ga.
+                reconfigureTestBed();
+                mockCookieJar = '';
+
+                await service.init();
+                const afterDeletion = sentClientId();
+
+                expect(afterDeletion).not.toBe(adopted);
+            });
+
+            it('still writes _ga for a locally-owned client_id on a single-label host', async () => {
                 reconfigureTestBed({ writeGaCookie: true });
                 mockLocalStorage['ga_client_id'] = 'existing-local-id';
-                mockLocalStorage['ga_client_id_source'] = 'local';
                 spyOn(service as any, 'getHostname').and.returnValue('localhost');
 
                 await service.init();
