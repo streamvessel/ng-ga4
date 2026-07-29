@@ -42,6 +42,17 @@ export function readCookieValue(jar: string, name: string): string | null {
     return null;
 }
 
+// Anyone who can set a cookie on the registrable domain — XSS on a sibling
+// subdomain, a subdomain takeover, plain-HTTP injection on a non-Secure cookie —
+// can otherwise write anything into `_ga`. Because an adopted ID is mirrored into
+// localStorage (see loadOrCreateClientIdForWeb), an unbounded payload would let
+// that write pin every visitor to one attacker-chosen `client_id`, or inject a
+// multi-kilobyte value into every request, permanently: the poisoning outlives
+// the attacker's cookie. This class/length is permissive enough for gtag's
+// numeric pairs, our UUIDs, and the third-party `_ga` writers this library
+// deliberately interoperates with, and useless as an injection vector.
+const PLAUSIBLE_CLIENT_ID = /^[A-Za-z0-9._-]{1,64}$/;
+
 /**
  * Extract the client ID from a `_ga` cookie value.
  *
@@ -49,6 +60,9 @@ export function readCookieValue(jar: string, name: string): string | null {
  * the payload's shape: the second field is a domain-component count, not a version,
  * and this library writes a pre-existing UUID into `_ga` when asked to, so there is
  * not always a numeric pair to find. A bare `<digits>.<digits>` is accepted too.
+ *
+ * Either way, the returned value is bounded by `PLAUSIBLE_CLIENT_ID` — see there
+ * for why.
  */
 export function parseGaCookie(value: string): string | null {
     if (typeof value !== 'string') {
@@ -61,12 +75,21 @@ export function parseGaCookie(value: string): string | null {
     const prefixed = /^GA\d+\.\d+\.(.+)$/.exec(trimmed);
     if (prefixed) {
         const clientId = prefixed[1].trim();
-        return clientId || null;
+        return PLAUSIBLE_CLIENT_ID.test(clientId) ? clientId : null;
     }
     // Defensive interop: server-side and custom `_ga` writers do not all emit gtag's prefix.
-    // The strict `^\d+\.\d+$` test ensures this branch cannot swallow junk: anything that
-    // is not exactly two numeric fields still returns null.
-    return /^\d+\.\d+$/.test(trimmed) ? trimmed : null;
+    // The strict `^\d+\.\d+$` test ensures this branch cannot swallow junk on its own; the
+    // PLAUSIBLE_CLIENT_ID check on top of it additionally bounds its length.
+    return /^\d+\.\d+$/.test(trimmed) && PLAUSIBLE_CLIENT_ID.test(trimmed) ? trimmed : null;
+}
+
+/**
+ * True for gtag's own `<random>.<seconds>` client-ID shape — two numeric fields
+ * joined by a dot, as produced by `mintGtagClientId`. Used to tell a client ID
+ * this library minted in that shape apart from a legacy UUID.
+ */
+export function isGtagClientId(value: string): boolean {
+    return /^\d+\.\d+$/.test(value);
 }
 
 /**

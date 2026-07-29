@@ -1,4 +1,4 @@
-import { formatGaCookie, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
+import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 
 describe('readCookieValue', () => {
     it('reads a cookie by exact name', () => {
@@ -89,6 +89,45 @@ describe('parseGaCookie', () => {
 
     it('rejects a prefixed value whose remainder is whitespace-only', () => {
         expect(parseGaCookie('GA1.1.   ')).toBeNull();
+    });
+
+    // Anyone who can set a cookie on the registrable domain must not be able to pin
+    // every visitor to an arbitrary-length value.
+    it('rejects an over-long payload', () => {
+        const tooLong = 'a'.repeat(65);
+        expect(parseGaCookie(`GA1.1.${tooLong}`)).toBeNull();
+        expect(parseGaCookie(tooLong)).toBeNull();
+    });
+
+    it('accepts a payload at the length boundary', () => {
+        const atLimit = 'a'.repeat(64);
+        expect(parseGaCookie(`GA1.1.${atLimit}`)).toBe(atLimit);
+    });
+
+    // Character-class bound: a cookie value containing these could inject cookie
+    // attributes or markup wherever the client ID is later echoed.
+    it('rejects a payload containing a semicolon, a space, or an angle bracket', () => {
+        expect(parseGaCookie('GA1.1.evil;max-age=0')).toBeNull();
+        expect(parseGaCookie('GA1.1.evil value')).toBeNull();
+        expect(parseGaCookie('GA1.1.<script>')).toBeNull();
+    });
+});
+
+describe('isGtagClientId', () => {
+    it('accepts gtag\'s <random>.<seconds> shape', () => {
+        expect(isGtagClientId('123.456')).toBe(true);
+    });
+
+    it('rejects a UUID', () => {
+        expect(isGtagClientId('12345678-1234-1234-1234-123456789abc')).toBe(false);
+    });
+
+    it('rejects an empty string', () => {
+        expect(isGtagClientId('')).toBe(false);
+    });
+
+    it('rejects three numeric fields', () => {
+        expect(isGtagClientId('12.34.56')).toBe(false);
     });
 });
 
