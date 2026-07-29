@@ -30,6 +30,7 @@ describe('NgGa4Service', () => {
     let mockCookieJar: string;
     let writtenCookies: string[];
     let cookieAcceptsDomain: (domain: string) => boolean;
+    let cookiesEnabled: boolean;
 
     function configureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
         // Reset here, not just in the top-level beforeEach, so a reconfigureTestBed()
@@ -38,6 +39,7 @@ describe('NgGa4Service', () => {
         mockCookieJar = '';
         writtenCookies = [];
         cookieAcceptsDomain = () => true;
+        cookiesEnabled = true;
 
         routerEvents$ = new Subject<any>();
 
@@ -64,9 +66,17 @@ describe('NgGa4Service', () => {
         // The service reads and writes cookies through seams precisely so tests can
         // stub them; mutating document.cookie for real would leak between specs and
         // make results depend on what the Karma browser already holds on localhost.
-        spyOn(service as any, 'getCookieJar').and.callFake(() => mockCookieJar);
+        spyOn(service as any, 'getCookieJar').and.callFake(() => cookiesEnabled ? mockCookieJar : '');
         spyOn(service as any, 'setCookie').and.callFake((cookie: string) => {
+            // The attempt happens regardless — a real document.cookie assignment
+            // with cookies disabled, in a cross-site iframe, or with a consent tool
+            // stubbing document.cookie is a write the caller believes succeeded.
             writtenCookies.push(cookie);
+            if (!cookiesEnabled) {
+                // Silently discarded: the jar never changes, exactly like a browser
+                // that ignores document.cookie assignments entirely.
+                return;
+            }
             // Emulate a browser refusing a cookie scoped to a public suffix: only
             // domains the test declares acceptable actually land in the jar.
             const domain = /;\s*domain=\.?([^;]+)/.exec(cookie)?.[1];
@@ -524,6 +534,48 @@ describe('NgGa4Service', () => {
                 expect(writtenCookies.find(c => c.startsWith('_ga=')))
                     .toContain('_ga=GA1.1.existing-local-id');
             });
+
+            // The two specs above model a domain-scoped rejection (cookieAcceptsDomain).
+            // Neither can model a browser with cookies disabled outright, a cross-site
+            // iframe, or a consent tool that stubs document.cookie before consent —
+            // environments where a write is attempted, silently discarded, and there is
+            // nothing to read back. That gap is exactly why the respawn bug this guards
+            // against survived three rounds of review: it was only reachable sideways.
+            it('keeps the same client_id under clientIdSource: cookie across two inits when cookies are disabled entirely', async () => {
+                reconfigureTestBed({ clientIdSource: 'cookie' });
+                cookiesEnabled = false;
+                spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+                spyOn(service as any, 'randomClientIdSeed').and.returnValue(1234567890);
+
+                await service.init();
+                const first = sentClientId();
+
+                // Simulates the second page load: same config, same localStorage
+                // (mockLocalStorage persists across reconfigureTestBed), cookies still
+                // disabled. cookiesEnabled resets to true on reconfigureTestBed, so it
+                // must be set again here.
+                reconfigureTestBed({ clientIdSource: 'cookie' });
+                cookiesEnabled = false;
+                spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+
+                await service.init();
+                const second = sentClientId();
+
+                expect(second).toBe(first);
+            });
+        });
+
+        // Companion to the spec above: with cookies disabled, a write is attempted
+        // but the browser has nothing to hand back, so every domain probe in
+        // discoverCookieDomain fails the same way a public-suffix refusal would.
+        it('writes no _ga cookie when cookies are disabled, since every domain probe fails', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            cookiesEnabled = false;
+            spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+
+            await expectAsync(service.init()).toBeResolved();
+
+            expect(writtenCookies.filter(c => c.startsWith('_ga='))).toEqual([]);
         });
     });
 
