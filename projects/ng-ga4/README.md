@@ -108,16 +108,18 @@ way happens by default under `clientIdSource: 'auto'` — not only writing
 one. Set `clientIdSource: 'storage'` if you need this library to never read
 `_ga` at all.
 
-An adopted cookie ID is mirrored into `localStorage`, and the library keeps
-using that ID — including as the `client_id` it sends to GA4 — even after
-`_ga` is gone. A user, or a consent tool, deleting `_ga` to reset tracking
-does not achieve that on its own: the mirrored copy in `localStorage`
-survives, and the next page load reads it from there, since this is the
-default configuration. What deletion *does* change is whether the cookie
-comes back: an ID adopted from `_ga` is recorded as such, and this library
-never writes an adopted ID back out, with `writeGaCookie` on or off — so a
-deleted `_ga` is not respawned with the same value, it simply is not read
-back into the cookie.
+An adopted cookie ID is used but never persisted — `_ga` remains its only
+store. Deleting `_ga` therefore resets identity: the library falls back to
+its own stored ID, minting one if it doesn't have one yet, the same way
+gtag.js mints a fresh client ID once `_ga` disappears. A site that later
+removes gtag.js flips its returning users back to their pre-adoption
+identity, once — an accepted cost, not a bug, since that identity always
+lived in gtag's cookie and never in anything this library stored (which
+also means there is no adopted third-party identifier sitting in storage
+for a consent tool to miss). With `writeGaCookie` on, a deleted `_ga` does
+come back, but carrying a freshly minted ID rather than the one that was
+deleted — the library is minting a new identity, not respawning the old
+one.
 
 `clientIdSource: 'cookie'` goes further: `_ga` is authoritative, and a
 missing cookie is minted rather than adopting whatever ID is already in
@@ -128,10 +130,10 @@ writing a cookie: it implies `writeGaCookie`.
 
 `clientIdSource: 'storage'` keeps the previous storage-only mechanism,
 ignoring any `_ga` cookie entirely — nothing about it is read, and nothing
-is written. That restores the previous *behaviour*, but it is not an undo:
-once `'auto'` has adopted a cookie ID it has already overwritten
-`localStorage`, so switching to `'storage'` afterwards does not restore the
-pre-upgrade identity.
+is written. Because an adopted cookie ID is never persisted, switching to
+`'storage'` is a true undo: it returns to whatever ID was already in
+`localStorage` before `'auto'` ever ran, or mints a fresh one if there
+never was one.
 
 This library does not set `_ga` unless you ask it to. `writeGaCookie: true`
 (or an options object — see below) writes it when absent or unreadable, on

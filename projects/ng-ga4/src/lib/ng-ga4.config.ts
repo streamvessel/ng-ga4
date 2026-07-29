@@ -43,10 +43,13 @@ export interface NgGa4Config {
      * there is no `_ga` cookie on a `chrome-extension://` origin.
      *
      * - `'auto'` (default): the `_ga` cookie if present and well-formed, else
-     *   `localStorage`. An adopted cookie ID is mirrored into `localStorage`,
-     *   so a later gtag removal or cookie expiry does not flip identity again.
-     *   A site also running gtag.js shares one identity with it; a site that
-     *   is not behaves exactly as before.
+     *   this library's own stored ID (minted if none exists yet). An adopted
+     *   cookie ID is never persisted — `_ga` remains its only store — so
+     *   deleting the cookie falls back to the library's own ID again, the
+     *   same way gtag.js itself mints a fresh client ID once `_ga`
+     *   disappears. A site also running gtag.js shares one identity with it
+     *   for as long as `_ga` exists; removing gtag.js flips returning users
+     *   back to their pre-adoption identity, once.
      * - `'cookie'`: `_ga` is authoritative, and one is minted in gtag's format if
      *   absent. Implies `writeGaCookie` — choosing this source is itself the
      *   opt-in to setting a cookie. Note that it deliberately ignores an existing

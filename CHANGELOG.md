@@ -17,18 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   present and well-formed — the client-ID portion bounded to 64 characters
   of `[A-Za-z0-9._-]`, so a cookie planted by an attacker on a sibling
   subdomain cannot pin every visitor to one ID or inject an oversized value
-  into every request — and mirrors it into `localStorage`. That mirrored
-  copy is what keeps the identity working afterwards: the library goes on
-  using it even once `_ga` is gone, so deleting the cookie alone does not
-  reset tracking. On a site running both gtag.js and this library, every
-  returning ng-ga4 user is re-identified once as a result, merging onto the
-  gtag identity — a real, one-time shift in your user counts, worth timing
-  deliberately. Because reading a cookie already on the device is itself a
-  consent-relevant act, not only writing one, this happens by default; set
-  `clientIdSource: 'storage'` to stop this library from reading `_ga` at
-  all. That restores the previous storage-only behaviour, but it is not an
-  undo — `'auto'` may already have overwritten `localStorage` by the time
-  you switch. `clientIdSource: 'cookie'` goes further still: `_ga` is
+  into every request — and uses it live, without copying it into
+  `localStorage`: `_ga` stays the only durable store for an adopted ID, so
+  deleting it resets identity, the same way gtag.js itself mints a fresh
+  client ID once `_ga` disappears. On a site running both gtag.js and this
+  library, every returning ng-ga4 user is re-identified once as a result,
+  merging onto the gtag identity — a real, one-time shift in your user
+  counts, worth timing deliberately; removing gtag.js later flips that same
+  user back to their pre-adoption identity, once, since the adopted
+  identity only ever lived in gtag's cookie. Because reading a cookie
+  already on the device is itself a consent-relevant act, not only writing
+  one, this happens by default; set `clientIdSource: 'storage'` to stop
+  this library from reading `_ga` at all — and since adoption never
+  touches `localStorage`, switching to `'storage'` is a true undo, not an
+  approximation of one. `clientIdSource: 'cookie'` goes further still: `_ga` is
   authoritative, and a missing cookie is minted rather than adopting
   whatever ID is already stored, re-identifying that user once more. An
   unrecognised `clientIdSource` value now logs a warning and falls back to
