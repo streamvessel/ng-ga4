@@ -5,10 +5,19 @@ import { Router, NavigationEnd, NavigationStart } from '@angular/router';
 import { Subject } from 'rxjs';
 import { NgGa4Service } from './ng-ga4.service';
 import { NG_GA4_CONFIG, NgGa4Config } from './ng-ga4.config';
+import { isGtagClientId } from './ga-cookie';
 
 const MOCK_UUID = '12345678-1234-1234-1234-123456789abc';
 const MOCK_TIMESTAMP = 1700000000000;
 const MOCK_SESSION_ID = Math.floor(MOCK_TIMESTAMP / 1000).toString();
+// The web path now mints a brand-new client ID in gtag's own shape rather than a
+// UUID (see loadOrCreateClientIdFromLocalStorage). randomClientIdSeed is stubbed
+// to this value wherever a test needs the minted ID pinned exactly; the seed is
+// deliberately different from the 1234567890 used by the clientIdSource: 'cookie'
+// specs below so a test that forgets to stub cookie-adoption away can't pass by
+// coincidence.
+const MOCK_CLIENT_ID_SEED = 555555555;
+const MOCK_MINTED_CLIENT_ID = `${MOCK_CLIENT_ID_SEED}.${Math.floor(MOCK_TIMESTAMP / 1000)}`;
 
 const defaultConfig: NgGa4Config = {
     measurementId: 'G-TEST123',
@@ -27,8 +36,20 @@ describe('NgGa4Service', () => {
     let routerEvents$: Subject<any>;
     let mockLocalStorage: Record<string, string>;
     let originalChromeStorage: any;
+    let mockCookieJar: string;
+    let writtenCookies: string[];
+    let cookieAcceptsDomain: (domain: string) => boolean;
+    let cookiesEnabled: boolean;
 
     function configureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
+        // Reset here, not just in the top-level beforeEach, so a reconfigureTestBed()
+        // mid-spec also gets a clean slate — writtenCookies in particular would
+        // otherwise carry stale entries across a reconfigure.
+        mockCookieJar = '';
+        writtenCookies = [];
+        cookieAcceptsDomain = () => true;
+        cookiesEnabled = true;
+
         routerEvents$ = new Subject<any>();
 
         const mockRouter = {
@@ -50,6 +71,36 @@ describe('NgGa4Service', () => {
 
         service = TestBed.inject(NgGa4Service);
         httpMock = TestBed.inject(HttpTestingController);
+
+        // The service reads and writes cookies through seams precisely so tests can
+        // stub them; mutating document.cookie for real would leak between specs and
+        // make results depend on what the Karma browser already holds on localhost.
+        spyOn(service as any, 'getCookieJar').and.callFake(() => cookiesEnabled ? mockCookieJar : '');
+        spyOn(service as any, 'setCookie').and.callFake((cookie: string) => {
+            // The attempt happens regardless — a real document.cookie assignment
+            // with cookies disabled, in a cross-site iframe, or with a consent tool
+            // stubbing document.cookie is a write the caller believes succeeded.
+            writtenCookies.push(cookie);
+            if (!cookiesEnabled) {
+                // Silently discarded: the jar never changes, exactly like a browser
+                // that ignores document.cookie assignments entirely.
+                return;
+            }
+            // Emulate a browser refusing a cookie scoped to a public suffix: only
+            // domains the test declares acceptable actually land in the jar.
+            const domain = /;\s*domain=\.?([^;]+)/.exec(cookie)?.[1];
+            if (domain && !cookieAcceptsDomain(domain)) {
+                return;
+            }
+            const [pair] = cookie.split(';');
+            const maxAgeZero = /;\s*max-age=0\b/.test(cookie);
+            const name = pair.slice(0, pair.indexOf('='));
+            const others = mockCookieJar
+                .split(';')
+                .map(part => part.trim())
+                .filter(part => part && part.slice(0, part.indexOf('=')) !== name);
+            mockCookieJar = (maxAgeZero ? others : [...others, pair.trim()]).join('; ');
+        });
     }
 
     function reconfigureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
@@ -121,16 +172,29 @@ describe('NgGa4Service', () => {
             httpMock.expectNone(() => true);
         });
 
-        it('should create and store client ID in localStorage', async () => {
+        it('should create and store a client ID in localStorage, minted in gtag\'s shape', async () => {
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
+
             await service.init();
-            expect(crypto.randomUUID).toHaveBeenCalled();
-            expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_UUID);
+
+            expect(crypto.randomUUID).not.toHaveBeenCalled();
+            expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_MINTED_CLIENT_ID);
         });
 
-        it('should reuse existing client ID from localStorage', async () => {
-            mockLocalStorage['ga_client_id'] = 'existing-id';
+        // Guards the "creation only" half of the change: an install that already
+        // has an ID keeps it, whatever its shape — a stored legacy UUID is not
+        // upgraded to gtag's shape on the next load.
+        it('should reuse an existing UUID-shaped client ID unchanged', async () => {
+            mockLocalStorage['ga_client_id'] = MOCK_UUID;
+
             await service.init();
+            service.trackPageView('/test');
+
             expect(localStorage.getItem).toHaveBeenCalledWith('ga_client_id');
+            expect(localStorage.setItem).not.toHaveBeenCalledWith('ga_client_id', jasmine.anything());
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.client_id).toBe(MOCK_UUID);
+            req.flush('', { status: 204, statusText: 'No Content' });
         });
 
         it('should load client ID from chrome.storage.local when isExtension', async () => {
@@ -158,12 +222,510 @@ describe('NgGa4Service', () => {
 
         it('should fallback to localStorage when chrome.storage not available', async () => {
             reconfigureTestBed({ isExtension: true });
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
 
             // Ensure chrome.storage is not set
             clearChromeMock();
 
             await service.init();
-            expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_UUID);
+            // The localStorage fallback mints in gtag's shape same as the direct web
+            // path, not a UUID — see loadOrCreateClientIdFromLocalStorage.
+            expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_MINTED_CLIENT_ID);
+        });
+    });
+
+    // --- client ID source ---
+
+    describe('client ID source', () => {
+        function sentClientId(): string {
+            service.trackPageView('/test');
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const clientId = req.request.body.client_id;
+            req.flush('', { status: 204, statusText: 'No Content' });
+            return clientId;
+        }
+
+        it('adopts the client ID from a gtag _ga cookie by default', async () => {
+            mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+
+            await service.init();
+
+            expect(sentClientId()).toBe('1234567890.1700000000');
+        });
+
+        // The cookie is the durable store for an ID we don't own: mirroring it into
+        // localStorage would let it outlive _ga, so deleting the cookie would fail
+        // to reset identity.
+        it('does not mirror an adopted cookie ID into localStorage', async () => {
+            mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+
+            await service.init();
+
+            expect(localStorage.setItem)
+                .not.toHaveBeenCalledWith('ga_client_id', jasmine.any(String));
+        });
+
+        it('ignores gtag\'s _ga_<STREAM> session cookie when no _ga is present', async () => {
+            mockCookieJar = '_ga_ABC123=GS1.1.1700000000.1.0.1700000000.0.0.0';
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
+
+            await service.init();
+
+            expect(sentClientId()).toBe(MOCK_MINTED_CLIENT_ID);
+        });
+
+        it('falls back to localStorage when _ga is malformed', async () => {
+            mockCookieJar = '_ga=garbage';
+            mockLocalStorage['ga_client_id'] = 'existing-id';
+
+            await service.init();
+
+            expect(sentClientId()).toBe('existing-id');
+        });
+
+        it('falls back to localStorage when reading the cookie jar throws', async () => {
+            (service as any).getCookieJar.and.throwError('denied');
+            mockLocalStorage['ga_client_id'] = 'existing-id';
+
+            await service.init();
+
+            expect(sentClientId()).toBe('existing-id');
+        });
+
+        it('writes no cookie by default', async () => {
+            await service.init();
+
+            expect(writtenCookies).toEqual([]);
+        });
+
+        it('ignores a present cookie under clientIdSource: storage', async () => {
+            reconfigureTestBed({ clientIdSource: 'storage' });
+            mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
+
+            await service.init();
+
+            // A distinct seed from the cookie's own "1234567890" so this assertion
+            // cannot pass by coincidence if the cookie were read instead of ignored.
+            expect(sentClientId()).toBe(MOCK_MINTED_CLIENT_ID);
+        });
+
+        it('keeps using chrome.storage for extensions even with a _ga cookie present', async () => {
+            reconfigureTestBed({ isExtension: true });
+            setupChromeMock({ ga_client_id: 'chrome-client-id' });
+            mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+
+            await service.init();
+
+            expect(sentClientId()).toBe('chrome-client-id');
+        });
+
+        it('writes the existing stored ID to _ga under auto + writeGaCookie', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            mockLocalStorage['ga_client_id'] = 'existing-id';
+            cookieAcceptsDomain = (domain) => domain === 'example.com';
+            spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+
+            await service.init();
+
+            const gaCookie = writtenCookies.find(c => c.startsWith('_ga='));
+            expect(gaCookie).toContain('_ga=GA1.2.existing-id');
+            expect(gaCookie).toContain('domain=.example.com');
+            expect(gaCookie).toContain('max-age=63072000');
+            expect(gaCookie).toContain('path=/');
+            expect(gaCookie).toContain('SameSite=Lax');
+            // Identity is preserved: writing a cookie must not re-identify the user.
+            expect(sentClientId()).toBe('existing-id');
+        });
+
+        // Browsers refuse cookies on public suffixes, and that refusal is the only
+        // public-suffix oracle available on the client.
+        it('skips candidate domains the browser refuses', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            cookieAcceptsDomain = (domain) => domain === 'example.co.uk';
+            spyOn(service as any, 'getHostname').and.returnValue('www.example.co.uk');
+
+            await service.init();
+
+            expect(writtenCookies.find(c => c.startsWith('_ga='))).toContain('domain=.example.co.uk');
+        });
+
+        it('writes without a domain attribute on a single-label host', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+            await service.init();
+
+            const gaCookie = writtenCookies.find(c => c.startsWith('_ga='));
+            expect(gaCookie).toContain('_ga=GA1.1.');
+            expect(gaCookie).not.toContain('domain=');
+        });
+
+        it('does not overwrite a _ga cookie that already exists', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+
+            await service.init();
+
+            expect(writtenCookies.filter(c => c.startsWith('_ga='))).toEqual([]);
+        });
+
+        it('mints a gtag-format ID and writes it under clientIdSource: cookie', async () => {
+            reconfigureTestBed({ clientIdSource: 'cookie' });
+            // Deliberately present: 'cookie' ignores it, which re-identifies that user
+            // once — the reason it is not the default.
+            mockLocalStorage['ga_client_id'] = 'existing-id';
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(1234567890);
+
+            await service.init();
+
+            expect(sentClientId()).toBe(`1234567890.${Math.floor(MOCK_TIMESTAMP / 1000)}`);
+            expect(writtenCookies.find(c => c.startsWith('_ga='))).toBeDefined();
+        });
+
+        it('writes no cookie under clientIdSource: storage even with writeGaCookie', async () => {
+            reconfigureTestBed({ clientIdSource: 'storage', writeGaCookie: true });
+
+            await service.init();
+
+            // No cookie write of any kind — not even domain-discovery probes, which
+            // this path must never run.
+            expect(writtenCookies).toEqual([]);
+        });
+
+        it('writes no cookie for extensions even with writeGaCookie', async () => {
+            reconfigureTestBed({ isExtension: true, writeGaCookie: true });
+            setupChromeMock({});
+
+            await service.init();
+
+            // No cookie write of any kind — not even domain-discovery probes, which
+            // this path must never run.
+            expect(writtenCookies).toEqual([]);
+        });
+
+        // Spec 5 stubs this for determinism, so nothing otherwise exercises the
+        // modulo arithmetic — and an off-by-one here would be invisible.
+        it('draws a client-ID seed inside gtag\'s range', () => {
+            for (let i = 0; i < 500; i++) {
+                const seed = (service as any).randomClientIdSeed();
+                expect(Number.isInteger(seed)).toBe(true);
+                expect(seed).toBeGreaterThanOrEqual(1);
+                expect(seed).toBeLessThanOrEqual(2147483647);
+            }
+        });
+
+        // A brand-new user has no identity to preserve, so there is no reason to
+        // write a shape gtag.js may reject and rewrite: the payload here is minted
+        // in gtag's own <random>.<seconds> shape, not a UUID, which is the actual
+        // point of this change — pinned directly via isGtagClientId rather than
+        // only implied by the other specs in this file.
+        it('mints a gtag-shaped ID, not a UUID, for a user with no prior identity', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
+
+            await service.init();
+
+            const gaCookie = writtenCookies.find(c => c.startsWith('_ga='));
+            expect(gaCookie).toContain(`_ga=GA1.1.${MOCK_MINTED_CLIENT_ID}`);
+            const mintedId = gaCookie!.slice(gaCookie!.indexOf('GA1.1.') + 'GA1.1.'.length).split(';')[0];
+            expect(isGtagClientId(mintedId)).toBe(true);
+            expect(crypto.randomUUID).not.toHaveBeenCalled();
+        });
+
+        it('replaces a malformed _ga rather than leaving it', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            mockCookieJar = '_ga=garbage';
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
+
+            await service.init();
+
+            expect(writtenCookies.find(c => c.startsWith('_ga=')))
+                .toContain(`_ga=GA1.1.${MOCK_MINTED_CLIENT_ID}`);
+        });
+
+        // encodeURIComponent on write exists to close a read/write asymmetry
+        // (readCookieValue decodes), and nothing exercised it.
+        it('percent-encodes a client ID that would otherwise inject cookie attributes', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            mockLocalStorage['ga_client_id'] = 'evil; max-age=0';
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+            await service.init();
+
+            const gaCookie = writtenCookies.find(c => c.startsWith('_ga='));
+            expect(gaCookie).toContain('evil%3B%20max-age%3D0');
+            expect(gaCookie).toContain('max-age=63072000');
+        });
+
+        // A probe left behind would be a stray cookie on every user's domain.
+        it('cleans up the domain probe once a candidate sticks', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            cookieAcceptsDomain = (domain) => domain === 'example.com';
+            spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+
+            await service.init();
+
+            expect(writtenCookies.some(c => c.includes('_ng_ga4_probe_') && c.includes('max-age=0')))
+                .toBe(true);
+            expect(mockCookieJar).not.toContain('_ng_ga4_probe_');
+        });
+
+        it('adopts a present _ga under clientIdSource: cookie without rewriting it', async () => {
+            reconfigureTestBed({ clientIdSource: 'cookie' });
+            mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+
+            await service.init();
+
+            expect(sentClientId()).toBe('1234567890.1700000000');
+            expect(writtenCookies.filter(c => c.startsWith('_ga='))).toEqual([]);
+        });
+
+        it('warns and falls back to auto for an unrecognised clientIdSource', async () => {
+            spyOn(console, 'warn');
+            reconfigureTestBed({ clientIdSource: 'Cookie' as any });
+            mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+
+            await service.init();
+
+            expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/^\[ng-ga4\].*Cookie/));
+            // Falls back to 'auto', which still adopts a present cookie.
+            expect(sentClientId()).toBe('1234567890.1700000000');
+        });
+
+        // A service that mints a fresh identity, or resurrects a deleted cookie, on
+        // the *second* load looks identical to a correct one on the first, so this
+        // block exercises two loads: reconfigureTestBed() simulates a fresh service
+        // instance backed by the same mockLocalStorage, with the cookie jar under the
+        // test's control.
+        describe('across multiple page loads', () => {
+            it('keeps the same client_id under clientIdSource: cookie across two inits when the cookie write is rejected', async () => {
+                reconfigureTestBed({ clientIdSource: 'cookie' });
+                spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+                spyOn(service as any, 'randomClientIdSeed').and.returnValue(1234567890);
+                cookieAcceptsDomain = () => false;
+
+                await service.init();
+                const first = sentClientId();
+
+                // Simulates the write never landing: cookies disabled, a cross-site
+                // iframe, or a consent tool stubbing document.cookie before consent.
+                reconfigureTestBed({ clientIdSource: 'cookie' });
+                spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+                cookieAcceptsDomain = () => false;
+
+                await service.init();
+                const second = sentClientId();
+
+                expect(second).toBe(first);
+            });
+
+            it('keeps the same client_id under clientIdSource: cookie across two inits when the cookie write succeeds', async () => {
+                reconfigureTestBed({ clientIdSource: 'cookie' });
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+                spyOn(service as any, 'randomClientIdSeed').and.returnValue(1234567890);
+
+                await service.init();
+                const first = sentClientId();
+                const gaCookiePair = writtenCookies.find(c => c.startsWith('_ga='))!.split(';')[0];
+
+                reconfigureTestBed({ clientIdSource: 'cookie' });
+                // Simulates the cookie surviving to the next page load.
+                mockCookieJar = gaCookiePair;
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+                const second = sentClientId();
+
+                expect(second).toBe(first);
+            });
+
+            // Not mirrored into localStorage (see 'does not mirror an adopted cookie
+            // ID into localStorage' above), so nothing remembers the deleted identity:
+            // the next load mints a fresh ID and writes it to _ga, the same way
+            // deleting _ga resets identity under gtag.js itself.
+            it('writes a freshly minted _ga after the user deletes it, not the previously adopted ID', async () => {
+                // First load: adopt gtag's cookie.
+                mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+                await service.init();
+                expect(sentClientId()).toBe('1234567890.1700000000');
+
+                // Second load: the user's consent tool deleted _ga, and this time
+                // writeGaCookie is on.
+                reconfigureTestBed({ writeGaCookie: true });
+                mockCookieJar = '';
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+
+                const gaCookie = writtenCookies.find(c => c.startsWith('_ga='));
+                expect(gaCookie).toBeDefined();
+                expect(gaCookie).not.toContain('1234567890.1700000000');
+            });
+
+            it('sends a client_id that differs from the adopted one after the user deletes _ga and reloads', async () => {
+                // First load: adopt gtag's cookie.
+                mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+                await service.init();
+                const adopted = sentClientId();
+
+                // Second load: the user's consent tool deleted _ga.
+                reconfigureTestBed();
+                mockCookieJar = '';
+
+                await service.init();
+                const afterDeletion = sentClientId();
+
+                expect(afterDeletion).not.toBe(adopted);
+            });
+
+            it('still writes _ga for a locally-owned client_id on a single-label host', async () => {
+                reconfigureTestBed({ writeGaCookie: true });
+                mockLocalStorage['ga_client_id'] = 'existing-local-id';
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+
+                expect(writtenCookies.find(c => c.startsWith('_ga=')))
+                    .toContain('_ga=GA1.1.existing-local-id');
+            });
+
+            // The two specs above model a domain-scoped rejection (cookieAcceptsDomain).
+            // This models the case they can't: a browser with cookies disabled
+            // outright, a cross-site iframe, or a consent tool stubbing document.cookie
+            // before consent — a write is attempted, silently discarded, and there is
+            // nothing to read back.
+            it('keeps the same client_id under clientIdSource: cookie across two inits when cookies are disabled entirely', async () => {
+                reconfigureTestBed({ clientIdSource: 'cookie' });
+                cookiesEnabled = false;
+                spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+                spyOn(service as any, 'randomClientIdSeed').and.returnValue(1234567890);
+
+                await service.init();
+                const first = sentClientId();
+
+                // Simulates the second page load: same config, same localStorage
+                // (mockLocalStorage persists across reconfigureTestBed), cookies still
+                // disabled. cookiesEnabled resets to true on reconfigureTestBed, so it
+                // must be set again here.
+                reconfigureTestBed({ clientIdSource: 'cookie' });
+                cookiesEnabled = false;
+                spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+
+                await service.init();
+                const second = sentClientId();
+
+                expect(second).toBe(first);
+            });
+        });
+
+        // Companion to the spec above: with cookies disabled, a write is attempted
+        // but the browser has nothing to hand back, so every domain probe in
+        // discoverCookieDomain fails the same way a public-suffix refusal would.
+        it('writes no _ga cookie when cookies are disabled, since every domain probe fails', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            cookiesEnabled = false;
+            spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+
+            await expectAsync(service.init()).toBeResolved();
+
+            expect(writtenCookies.filter(c => c.startsWith('_ga='))).toEqual([]);
+        });
+    });
+
+    // --- writeGaCookie options ---
+
+    describe('writeGaCookie options', () => {
+        it('writes with an explicit domain and issues no probe cookie', async () => {
+            reconfigureTestBed({ writeGaCookie: { domain: '.example.com' } });
+            spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+
+            await service.init();
+
+            const gaCookie = writtenCookies.find(c => c.startsWith('_ga='));
+            expect(gaCookie).toContain('domain=.example.com');
+            // Discovery is bypassed entirely — no throwaway probe cookie at all.
+            expect(writtenCookies.some(c => c.includes('_ng_ga4_probe_'))).toBe(false);
+        });
+
+        it('emits a custom max-age', async () => {
+            reconfigureTestBed({ writeGaCookie: { maxAgeSeconds: 60 } });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+            await service.init();
+
+            expect(writtenCookies.find(c => c.startsWith('_ga='))).toContain('max-age=60');
+        });
+
+        it('emits custom flags in place of the default SameSite=Lax', async () => {
+            reconfigureTestBed({ writeGaCookie: { flags: 'SameSite=None; Secure' } });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+            await service.init();
+
+            const gaCookie = writtenCookies.find(c => c.startsWith('_ga='));
+            expect(gaCookie).toContain('SameSite=None; Secure');
+            expect(gaCookie).not.toContain('SameSite=Lax');
+        });
+
+        it('adds Secure to the default flags on HTTPS', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+            spyOn(service as any, 'getProtocol').and.returnValue('https:');
+
+            await service.init();
+
+            expect(writtenCookies.find(c => c.startsWith('_ga=')))
+                .toContain('SameSite=Lax; Secure');
+        });
+
+        it('omits Secure from the default flags on HTTP', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+            spyOn(service as any, 'getProtocol').and.returnValue('http:');
+
+            await service.init();
+
+            expect(writtenCookies.find(c => c.startsWith('_ga='))).not.toContain('Secure');
+        });
+
+        // A host-only _ga diverges per subdomain and can shadow a correctly-scoped
+        // one already in the jar, so it must not be written as a "better than
+        // nothing" fallback once every candidate domain has been refused.
+        it('writes no _ga at all when every candidate domain is refused', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+            cookieAcceptsDomain = () => false;
+
+            await service.init();
+
+            expect(writtenCookies.filter(c => c.startsWith('_ga='))).toEqual([]);
+        });
+
+        // A single-label host has no candidates to refuse in the first place — that
+        // is "nothing to try", not "everything refused", so it must still write.
+        it('still writes a host-only _ga on a single-label host', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+            await service.init();
+
+            const gaCookie = writtenCookies.find(c => c.startsWith('_ga='));
+            expect(gaCookie).toBeDefined();
+            expect(gaCookie).not.toContain('domain=');
+        });
+
+        it('writes with every default when given an empty options object', async () => {
+            reconfigureTestBed({ writeGaCookie: {} });
+            spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+            await service.init();
+
+            expect(writtenCookies.find(c => c.startsWith('_ga=')))
+                .toContain('max-age=63072000');
         });
     });
 
@@ -178,6 +740,7 @@ describe('NgGa4Service', () => {
             expect(localStorage.getItem).not.toHaveBeenCalled();
             expect(localStorage.setItem).not.toHaveBeenCalled();
             expect(crypto.randomUUID).not.toHaveBeenCalled();
+            expect(writtenCookies).toEqual([]);
             httpMock.expectNone(() => true);
         });
 
@@ -558,10 +1121,13 @@ describe('NgGa4Service', () => {
                 }
             };
             spyOn(console, 'warn');
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
 
             await service.init();
 
-            expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_UUID);
+            // Same localStorage fallback as the direct web path, so it mints in
+            // gtag's shape here too — see loadOrCreateClientIdFromLocalStorage.
+            expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_MINTED_CLIENT_ID);
             expect(console.warn).toHaveBeenCalled();
         });
 
