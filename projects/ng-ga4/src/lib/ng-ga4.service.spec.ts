@@ -435,6 +435,96 @@ describe('NgGa4Service', () => {
             expect(sentClientId()).toBe('1234567890.1700000000');
             expect(writtenCookies.filter(c => c.startsWith('_ga='))).toEqual([]);
         });
+
+        it('warns and falls back to auto for an unrecognised clientIdSource', async () => {
+            spyOn(console, 'warn');
+            reconfigureTestBed({ clientIdSource: 'Cookie' as any });
+            mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+
+            await service.init();
+
+            expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/^\[ng-ga4\].*Cookie/));
+            // Falls back to 'auto', which still adopts a present cookie.
+            expect(sentClientId()).toBe('1234567890.1700000000');
+        });
+
+        // Every other spec in this describe calls init() exactly once, which is
+        // exactly why the bugs below survived three reviews: a service that mints a
+        // fresh identity, or resurrects a deleted cookie, on the *second* load looks
+        // identical to a correct one on the first. reconfigureTestBed() simulates a
+        // second page load: a fresh service instance backed by the same
+        // mockLocalStorage, with the cookie jar under the test's control.
+        describe('across multiple page loads', () => {
+            it('keeps the same client_id under clientIdSource: cookie across two inits when the cookie write is rejected', async () => {
+                reconfigureTestBed({ clientIdSource: 'cookie' });
+                spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+                spyOn(service as any, 'randomClientIdSeed').and.returnValue(1234567890);
+                cookieAcceptsDomain = () => false;
+
+                await service.init();
+                const first = sentClientId();
+
+                // Simulates the write never landing: cookies disabled, a cross-site
+                // iframe, or a consent tool stubbing document.cookie before consent.
+                reconfigureTestBed({ clientIdSource: 'cookie' });
+                spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+                cookieAcceptsDomain = () => false;
+
+                await service.init();
+                const second = sentClientId();
+
+                expect(second).toBe(first);
+            });
+
+            it('keeps the same client_id under clientIdSource: cookie across two inits when the cookie write succeeds', async () => {
+                reconfigureTestBed({ clientIdSource: 'cookie' });
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+                spyOn(service as any, 'randomClientIdSeed').and.returnValue(1234567890);
+
+                await service.init();
+                const first = sentClientId();
+                const gaCookiePair = writtenCookies.find(c => c.startsWith('_ga='))!.split(';')[0];
+
+                reconfigureTestBed({ clientIdSource: 'cookie' });
+                // Simulates the cookie surviving to the next page load.
+                mockCookieJar = gaCookiePair;
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+                const second = sentClientId();
+
+                expect(second).toBe(first);
+            });
+
+            it('does not respawn a _ga cookie the user deleted', async () => {
+                // First load: adopt gtag's cookie, mirroring it into localStorage.
+                mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+                await service.init();
+                expect(sentClientId()).toBe('1234567890.1700000000');
+
+                // Second load: the user's consent tool deleted _ga, but not
+                // localStorage — and this time writeGaCookie is on.
+                reconfigureTestBed({ writeGaCookie: true });
+                mockCookieJar = '';
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+
+                expect(writtenCookies.filter(c => c.startsWith('_ga='))).toEqual([]);
+            });
+
+            it('still writes _ga for a locally-owned client_id, proving the respawn guard does not disable writeGaCookie entirely', async () => {
+                reconfigureTestBed({ writeGaCookie: true });
+                mockLocalStorage['ga_client_id'] = 'existing-local-id';
+                mockLocalStorage['ga_client_id_source'] = 'local';
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+
+                expect(writtenCookies.find(c => c.startsWith('_ga=')))
+                    .toContain('_ga=GA1.1.existing-local-id');
+            });
+        });
     });
 
     // --- server-side rendering ---

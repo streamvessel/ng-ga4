@@ -6,7 +6,7 @@ import { filter, Subscription } from 'rxjs';
 import { NG_GA4_CONFIG, NgGa4Config } from './ng-ga4.config';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
-import { formatGaCookie, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
+import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 
 interface Ga4Device {
     language?: string;
@@ -540,14 +540,16 @@ export class NgGa4Service implements OnDestroy {
     // both therefore counted one human as two users. Preferring the cookie makes the
     // two agree, and costs nothing where no cookie exists.
     private loadOrCreateClientIdForWeb(): string {
-        const source = this.config.clientIdSource ?? 'auto';
+        const source = this.resolveClientIdSource();
 
         if (source !== 'storage') {
             const fromCookie = this.readGaCookieClientId();
             if (fromCookie) {
                 // Mirror it, so a later gtag removal or cookie expiry does not flip
                 // identity back to whatever stale value localStorage still holds.
-                this.storeClientId(fromCookie);
+                // Recorded as 'cookie'-origin: it is not ours to rewrite (see the
+                // writeGaCookie branch below).
+                this.storeClientId(fromCookie, 'cookie');
                 return fromCookie;
             }
         }
@@ -556,16 +558,33 @@ export class NgGa4Service implements OnDestroy {
         // gtag's own shape rather than adopting a legacy UUID. That re-identifies an
         // existing user exactly once, which is why it is opt-in and not the default.
         if (source === 'cookie') {
-            const minted = mintGtagClientId(Date.now(), this.randomClientIdSeed());
-            this.storeClientId(minted);
-            this.persistGaCookie(minted);
-            return minted;
+            const stored = localStorage.getItem('ga_client_id');
+            // Reuse an ID we minted on a previous load, discarding only the legacy
+            // UUID this option is documented to ignore. 'cookie' means "re-identify a
+            // legacy UUID user once", not "mint a fresh identity on every load" — but
+            // that is exactly what happens if the cookie write below never lands
+            // (cookies disabled, a cross-site iframe, a consent tool stubbing
+            // document.cookie) and nothing here reads back what storeClientId wrote.
+            const clientId = stored && isGtagClientId(stored)
+                ? stored
+                : mintGtagClientId(Date.now(), this.randomClientIdSeed());
+            // Origin 'local': a freshly minted or reused ID here is ours, not adopted
+            // from a cookie, so writing it back out is exactly writeGaCookie's job.
+            this.storeClientId(clientId, 'local');
+            this.persistGaCookie(clientId);
+            return clientId;
         }
 
         const stored = this.loadOrCreateClientIdFromLocalStorage();
         // The source check is load-bearing: 'storage' means "never touch the cookie",
         // so it has to override writeGaCookie rather than combining with it.
-        if (source !== 'storage' && this.config.writeGaCookie) {
+        //
+        // Also skip when the ID we're holding was adopted from a cookie: writing it
+        // back out would resurrect a _ga cookie the user (or their consent tool)
+        // deleted since we adopted it — consent tools delete declared cookies, they
+        // do not clear localStorage — restoring a third-party identifier the user
+        // revoked. Only an ID this library minted itself ('local') is ours to publish.
+        if (source !== 'storage' && this.config.writeGaCookie && this.storedClientIdOrigin() !== 'cookie') {
             // Write the ID we already have rather than minting: re-identifying users
             // is the harm this whole feature exists to avoid. The cost is a _ga whose
             // payload may be a UUID instead of gtag's numeric pair — GA4 accepts any
@@ -574,6 +593,19 @@ export class NgGa4Service implements OnDestroy {
             this.persistGaCookie(stored);
         }
         return stored;
+    }
+
+    // Validated once, here, rather than trusting config.clientIdSource verbatim:
+    // a JS consumer passing an unrecognised value (e.g. a typo'd 'Cookie') would
+    // otherwise silently degrade to 'auto' — including reading the cookie for
+    // someone who was specifically trying to opt out of it.
+    private resolveClientIdSource(): 'auto' | 'cookie' | 'storage' {
+        const configured = this.config.clientIdSource;
+        if (configured === undefined || configured === 'auto' || configured === 'cookie' || configured === 'storage') {
+            return configured ?? 'auto';
+        }
+        console.warn(`[ng-ga4] Unrecognised clientIdSource "${configured}", falling back to "auto".`);
+        return 'auto';
     }
 
     private randomClientIdSeed(): number {
@@ -639,21 +671,37 @@ export class NgGa4Service implements OnDestroy {
             const value = readCookieValue(this.getCookieJar(), '_ga');
             return value === null ? null : parseGaCookie(value);
         } catch {
-            // Cookie access is denied outright in some sandboxed iframes. Falling
-            // back to storage is strictly better than failing init().
+            // Cookie access is denied outright in some sandboxed iframes. Returning
+            // null here is not a guaranteed graceful fallback: the same sandbox
+            // typically blocks localStorage too, so storeClientId() below can still
+            // throw and take init() down with it. This just avoids adding a second,
+            // redundant failure of our own on top of whatever the sandbox already does.
             return null;
         }
     }
 
-    private storeClientId(clientId: string): void {
+    private storeClientId(clientId: string, origin: 'cookie' | 'local'): void {
         localStorage.setItem('ga_client_id', clientId);
+        // Provenance for the respawn guard in loadOrCreateClientIdForWeb: an ID
+        // adopted from a cookie must never be written back out as if we minted it.
+        localStorage.setItem('ga_client_id_source', origin);
+    }
+
+    private storedClientIdOrigin(): 'cookie' | 'local' {
+        // Installs predating this key hold an ID this library minted itself, so
+        // 'local' is the correct default — writing our own ID to a cookie is the
+        // whole point of writeGaCookie.
+        return localStorage.getItem('ga_client_id_source') === 'cookie' ? 'cookie' : 'local';
     }
 
     private loadOrCreateClientIdFromLocalStorage(): string {
+        // Read only — must NOT call storeClientId() here, which would stamp
+        // 'ga_client_id_source' as 'local' even when the stored ID was actually
+        // adopted from a cookie on some earlier load and merely persisted here.
         let clientId = localStorage.getItem('ga_client_id');
         if (!clientId) {
             clientId = crypto.randomUUID();
-            this.storeClientId(clientId);
+            this.storeClientId(clientId, 'local');
         }
         return clientId;
     }
