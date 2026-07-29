@@ -57,8 +57,8 @@ export interface NgGa4Config {
     clientIdSource?: 'auto' | 'cookie' | 'storage';
 
     /**
-     * Write `_ga` when it is absent, on the registrable domain, with gtag's
-     * two-year expiry by default. Only that envelope — name, domain, expiry —
+     * Write `_ga` when it is absent or unreadable, on the registrable domain,
+     * with gtag's two-year expiry by default. Only that envelope — name, domain, expiry —
      * is gtag's format: the value written is whatever client ID this library
      * already has, typically its own `crypto.randomUUID()` for an existing
      * user, not gtag's numeric `<random>.<seconds>` pair. Reusing the existing

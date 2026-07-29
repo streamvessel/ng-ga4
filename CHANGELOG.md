@@ -13,23 +13,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_ga` cookie. Previously this library always kept its client ID in
   origin-scoped `localStorage`, so a site running both gtag.js and this
   library counted one human as two users, and `www.`/`app.` subdomains
-  diverged where gtag's cookie never did. `'auto'` now reads `_ga` when it is
-  present and well-formed and mirrors it into `localStorage`. On a site
-  running both gtag.js and this library, every returning ng-ga4 user is
-  re-identified once as a result, merging onto the gtag identity — a
-  real, one-time shift in your user counts, worth timing deliberately.
-  `'storage'` keeps the previous storage-only mechanism and ignores `_ga`,
-  but it is not an undo: once `'auto'` has adopted a cookie ID,
-  `localStorage` has already been overwritten. A new `writeGaCookie` option
-  (default `false`) opts into writing `_ga` when it is absent — only the
-  envelope (cookie name, domain, gtag's two-year expiry) is gtag's format,
-  since an existing stored ID is written as-is rather than replaced, and
-  only a newly minted ID uses gtag's numeric shape — which also gives your
-  own subdomains a shared identity with no gtag.js involved at all.
-  `clientIdSource: 'cookie'` implies `writeGaCookie` and deliberately
-  ignores any existing stored ID, re-identifying that user once more.
-  Extensions are unaffected — there is no `_ga` cookie on a
-  `chrome-extension://` origin. ([#13](https://github.com/streamvessel/ng-ga4/issues/13))
+  diverged where gtag's cookie never did. `'auto'` reads `_ga` when it is
+  present and well-formed — the client-ID portion bounded to 64 characters
+  of `[A-Za-z0-9._-]`, so a cookie planted by an attacker on a sibling
+  subdomain cannot pin every visitor to one ID or inject an oversized value
+  into every request — and mirrors it into `localStorage`. That mirrored
+  copy is what keeps the identity working afterwards: the library goes on
+  using it even once `_ga` is gone, so deleting the cookie alone does not
+  reset tracking. On a site running both gtag.js and this library, every
+  returning ng-ga4 user is re-identified once as a result, merging onto the
+  gtag identity — a real, one-time shift in your user counts, worth timing
+  deliberately. Because reading a cookie already on the device is itself a
+  consent-relevant act, not only writing one, this happens by default; set
+  `clientIdSource: 'storage'` to stop this library from reading `_ga` at
+  all. That restores the previous storage-only behaviour, but it is not an
+  undo — `'auto'` may already have overwritten `localStorage` by the time
+  you switch. `clientIdSource: 'cookie'` goes further still: `_ga` is
+  authoritative, and a missing cookie is minted rather than adopting
+  whatever ID is already stored, re-identifying that user once more. An
+  unrecognised `clientIdSource` value now logs a warning and falls back to
+  `'auto'` rather than failing silently. Extensions are unaffected — there
+  is no `_ga` cookie on a `chrome-extension://` origin.
+  ([#13](https://github.com/streamvessel/ng-ga4/issues/13))
+- `writeGaCookie` option (default `false`, implied by `clientIdSource:
+  'cookie'`) to write `_ga` when it is absent or unreadable. Only the
+  envelope — cookie name, registrable domain, gtag's two-year expiry — is
+  gtag's format: an existing stored ID is written as-is rather than
+  replaced, and only a newly minted ID uses gtag's numeric shape, which
+  also gives your own subdomains a shared identity with no gtag.js involved
+  at all. The cookie gets `SameSite=Lax`, plus `Secure` on HTTPS, by
+  default. It also accepts an `NgGa4CookieOptions` object (`domain`,
+  `flags`, `maxAgeSeconds`) in place of `true`: setting `domain` explicitly
+  skips the registrable-domain discovery step entirely, so no probe cookie
+  is written and a site whose probes would be blocked still gets a
+  correctly-scoped cookie. When discovery does run and every candidate
+  domain is refused, nothing is written, rather than falling back to a
+  host-only cookie that would diverge per subdomain and could collide in
+  the jar with a correctly-scoped one. An ID adopted from `_ga` is never
+  written back out under this option, in any configuration — doing so would
+  resurrect an identifier a user, or their consent tool, had deleted.
+  ([#13](https://github.com/streamvessel/ng-ga4/issues/13))
 
 ### Fixed
 
