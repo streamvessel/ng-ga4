@@ -5,10 +5,19 @@ import { Router, NavigationEnd, NavigationStart } from '@angular/router';
 import { Subject } from 'rxjs';
 import { NgGa4Service } from './ng-ga4.service';
 import { NG_GA4_CONFIG, NgGa4Config } from './ng-ga4.config';
+import { isGtagClientId } from './ga-cookie';
 
 const MOCK_UUID = '12345678-1234-1234-1234-123456789abc';
 const MOCK_TIMESTAMP = 1700000000000;
 const MOCK_SESSION_ID = Math.floor(MOCK_TIMESTAMP / 1000).toString();
+// The web path now mints a brand-new client ID in gtag's own shape rather than a
+// UUID (see loadOrCreateClientIdFromLocalStorage). randomClientIdSeed is stubbed
+// to this value wherever a test needs the minted ID pinned exactly; the seed is
+// deliberately different from the 1234567890 used by the clientIdSource: 'cookie'
+// specs below so a test that forgets to stub cookie-adoption away can't pass by
+// coincidence.
+const MOCK_CLIENT_ID_SEED = 555555555;
+const MOCK_MINTED_CLIENT_ID = `${MOCK_CLIENT_ID_SEED}.${Math.floor(MOCK_TIMESTAMP / 1000)}`;
 
 const defaultConfig: NgGa4Config = {
     measurementId: 'G-TEST123',
@@ -163,16 +172,29 @@ describe('NgGa4Service', () => {
             httpMock.expectNone(() => true);
         });
 
-        it('should create and store client ID in localStorage', async () => {
+        it('should create and store a client ID in localStorage, minted in gtag\'s shape', async () => {
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
+
             await service.init();
-            expect(crypto.randomUUID).toHaveBeenCalled();
-            expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_UUID);
+
+            expect(crypto.randomUUID).not.toHaveBeenCalled();
+            expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_MINTED_CLIENT_ID);
         });
 
-        it('should reuse existing client ID from localStorage', async () => {
-            mockLocalStorage['ga_client_id'] = 'existing-id';
+        // Guards the "creation only" half of the change: an install that already
+        // has an ID keeps it, whatever its shape — a stored legacy UUID is not
+        // upgraded to gtag's shape on the next load.
+        it('should reuse an existing UUID-shaped client ID unchanged', async () => {
+            mockLocalStorage['ga_client_id'] = MOCK_UUID;
+
             await service.init();
+            service.trackPageView('/test');
+
             expect(localStorage.getItem).toHaveBeenCalledWith('ga_client_id');
+            expect(localStorage.setItem).not.toHaveBeenCalledWith('ga_client_id', jasmine.anything());
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.client_id).toBe(MOCK_UUID);
+            req.flush('', { status: 204, statusText: 'No Content' });
         });
 
         it('should load client ID from chrome.storage.local when isExtension', async () => {
@@ -200,12 +222,15 @@ describe('NgGa4Service', () => {
 
         it('should fallback to localStorage when chrome.storage not available', async () => {
             reconfigureTestBed({ isExtension: true });
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
 
             // Ensure chrome.storage is not set
             clearChromeMock();
 
             await service.init();
-            expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_UUID);
+            // The localStorage fallback mints in gtag's shape same as the direct web
+            // path, not a UUID — see loadOrCreateClientIdFromLocalStorage.
+            expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_MINTED_CLIENT_ID);
         });
     });
 
@@ -244,10 +269,11 @@ describe('NgGa4Service', () => {
 
         it('ignores gtag\'s _ga_<STREAM> session cookie when no _ga is present', async () => {
             mockCookieJar = '_ga_ABC123=GS1.1.1700000000.1.0.1700000000.0.0.0';
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
 
             await service.init();
 
-            expect(sentClientId()).toBe(MOCK_UUID);
+            expect(sentClientId()).toBe(MOCK_MINTED_CLIENT_ID);
         });
 
         it('falls back to localStorage when _ga is malformed', async () => {
@@ -277,10 +303,13 @@ describe('NgGa4Service', () => {
         it('ignores a present cookie under clientIdSource: storage', async () => {
             reconfigureTestBed({ clientIdSource: 'storage' });
             mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
 
             await service.init();
 
-            expect(sentClientId()).toBe(MOCK_UUID);
+            // A distinct seed from the cookie's own "1234567890" so this assertion
+            // cannot pass by coincidence if the cookie were read instead of ignored.
+            expect(sentClientId()).toBe(MOCK_MINTED_CLIENT_ID);
         });
 
         it('keeps using chrome.storage for extensions even with a _ga cookie present', async () => {
@@ -389,27 +418,35 @@ describe('NgGa4Service', () => {
             }
         });
 
-        // A brand-new user has no identity to preserve, so the UUID payload here is
-        // the documented consequence of "write the ID we already have".
-        it('writes a UUID payload for a user with no prior identity', async () => {
+        // A brand-new user has no identity to preserve, so there is no reason to
+        // write a shape gtag.js may reject and rewrite: the payload here is minted
+        // in gtag's own <random>.<seconds> shape, not a UUID, which is the actual
+        // point of this change — pinned directly via isGtagClientId rather than
+        // only implied by the other specs in this file.
+        it('mints a gtag-shaped ID, not a UUID, for a user with no prior identity', async () => {
             reconfigureTestBed({ writeGaCookie: true });
             spyOn(service as any, 'getHostname').and.returnValue('localhost');
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
 
             await service.init();
 
-            expect(writtenCookies.find(c => c.startsWith('_ga=')))
-                .toContain(`_ga=GA1.1.${MOCK_UUID}`);
+            const gaCookie = writtenCookies.find(c => c.startsWith('_ga='));
+            expect(gaCookie).toContain(`_ga=GA1.1.${MOCK_MINTED_CLIENT_ID}`);
+            const mintedId = gaCookie!.slice(gaCookie!.indexOf('GA1.1.') + 'GA1.1.'.length).split(';')[0];
+            expect(isGtagClientId(mintedId)).toBe(true);
+            expect(crypto.randomUUID).not.toHaveBeenCalled();
         });
 
         it('replaces a malformed _ga rather than leaving it', async () => {
             reconfigureTestBed({ writeGaCookie: true });
             mockCookieJar = '_ga=garbage';
             spyOn(service as any, 'getHostname').and.returnValue('localhost');
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
 
             await service.init();
 
             expect(writtenCookies.find(c => c.startsWith('_ga=')))
-                .toContain(`_ga=GA1.1.${MOCK_UUID}`);
+                .toContain(`_ga=GA1.1.${MOCK_MINTED_CLIENT_ID}`);
         });
 
         // encodeURIComponent on write exists to close a read/write asymmetry
@@ -1090,10 +1127,13 @@ describe('NgGa4Service', () => {
                 }
             };
             spyOn(console, 'warn');
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
 
             await service.init();
 
-            expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_UUID);
+            // Same localStorage fallback as the direct web path, so it mints in
+            // gtag's shape here too — see loadOrCreateClientIdFromLocalStorage.
+            expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_MINTED_CLIENT_ID);
             expect(console.warn).toHaveBeenCalled();
         });
 

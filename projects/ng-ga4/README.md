@@ -137,19 +137,21 @@ never was one.
 
 This library does not set `_ga` unless you ask it to. `writeGaCookie: true`
 (or an options object — see below) writes it when absent or unreadable, on
-the registrable domain, with gtag's two-year expiry — but only that
-envelope (cookie name, domain, expiry) is gtag's format. The value written
-is whatever client ID the library already has: for an existing user
-upgrading, that's this library's own `crypto.randomUUID()`, not gtag's
-numeric `<random>.<seconds>` pair. That's deliberate — reusing the existing
-ID is what avoids re-identifying the user, which is the harm this feature
-exists to prevent in the first place. Only a genuinely new install, with no
-stored ID yet, mints a value in gtag's numeric shape. One consequence
-follows from that: if `gtag.js` later loads on the same page and rejects
-the non-numeric payload, it rewrites the cookie with its own value, and the
-next read here adopts that — one further identity flip, then convergence.
-As noted above, an ID *adopted from* a cookie is never written back out
-under this option, no matter how it is configured.
+the registrable domain, with gtag's two-year expiry. The value written is
+whatever client ID the library already has: for an existing user upgrading
+from a version before this shape change, that's a previously stored
+`crypto.randomUUID()`, reused as-is rather than replaced — deliberately,
+since reusing the existing ID is what avoids re-identifying the user, the
+harm this feature exists to prevent in the first place. A genuinely new
+install, with no stored ID yet, mints a value in gtag's own numeric
+`<random>.<seconds>` shape instead of a UUID: there is no identity to
+preserve there, so there is no reason to write a shape `gtag.js` might
+reject and rewrite. One consequence follows from that for the upgrading
+case above: if `gtag.js` later loads on the same page and rejects a
+carried-over UUID, it rewrites the cookie with its own value, and the next
+read here adopts that — one further identity flip, then convergence. As
+noted above, an ID *adopted from* a cookie is never written back out under
+this option, no matter how it is configured.
 
 `writeGaCookie` also accepts an `NgGa4CookieOptions` object (exported from
 the public API) in place of `true` — `{}` writes with every default:

@@ -731,7 +731,13 @@ export class NgGa4Service implements OnDestroy {
     private loadOrCreateClientIdFromLocalStorage(): string {
         let clientId = localStorage.getItem('ga_client_id');
         if (!clientId) {
-            clientId = crypto.randomUUID();
+            // A brand-new install has no identity to preserve, so mint in gtag's own
+            // shape rather than a UUID: that is what gtag.js itself writes, so a _ga
+            // we create from this is one gtag will accept rather than reject and
+            // rewrite. This is also the fallback loadOrCreateClientIdFromChromeStorage
+            // uses when chrome.storage is unavailable — fine, since either shape is a
+            // valid client_id and there is no _ga cookie to align with there anyway.
+            clientId = mintGtagClientId(Date.now(), this.randomClientIdSeed());
             this.storeClientId(clientId);
         }
         return clientId;

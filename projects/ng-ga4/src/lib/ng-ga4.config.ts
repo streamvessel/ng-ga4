@@ -63,13 +63,15 @@ export interface NgGa4Config {
      * Write `_ga` when it is absent or unreadable, on the registrable domain,
      * with gtag's two-year expiry by default. Only that envelope — name, domain, expiry —
      * is gtag's format: the value written is whatever client ID this library
-     * already has, typically its own `crypto.randomUUID()` for an existing
-     * user, not gtag's numeric `<random>.<seconds>` pair. Reusing the existing
-     * ID is deliberate, to avoid re-identifying the user; only a newly minted
-     * ID (no stored ID yet) uses gtag's numeric shape. Off by default: this
-     * library does not set a cookie unless asked, which matters because
-     * Consent Mode is not implemented yet. Ignored for `'storage'` and for
-     * extensions; implied by `'cookie'`.
+     * already has. A genuinely new install mints one in gtag's own numeric
+     * `<random>.<seconds>` shape — there is no identity to preserve there, so
+     * no reason to write a shape `gtag.js` might reject and rewrite. An
+     * existing user upgrading from a version before this shape change keeps
+     * their previously stored `crypto.randomUUID()` as-is; reusing rather
+     * than replacing it is deliberate, to avoid re-identifying the user. Off
+     * by default: this library does not set a cookie unless asked, which
+     * matters because Consent Mode is not implemented yet. Ignored for
+     * `'storage'` and for extensions; implied by `'cookie'`.
      *
      * Truthiness governs whether the cookie is written — `{}` writes with all
      * defaults, `false` or omitted writes nothing. Reading `_ga` remains
