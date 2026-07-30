@@ -151,7 +151,10 @@ export class NgGa4Service implements OnDestroy {
         }
     }
 
-    private sendToGA4(events: Array<{ name: string; params?: Record<string, any> }>): void {
+    private sendToGA4(
+        events: Array<{ name: string; params?: Record<string, any> }>,
+        forceBeacon = false
+    ): void {
         const url = this.collectUrl(this.GA4_ENDPOINT);
 
         const body: {
@@ -185,7 +188,11 @@ export class NgGa4Service implements OnDestroy {
             this.sendForValidation(body);
         }
 
-        if (this.config.transport === 'xhr') {
+        // forceBeacon is for sends that happen as the page goes away, where XHR is
+        // aborted and the hit is simply lost. Overriding an explicit transport
+        // choice is deliberate: losing the event outright is worse than skipping
+        // the consumer's HTTP interceptors for it.
+        if (this.config.transport === 'xhr' && !forceBeacon) {
             this.sendViaXhr(url, body);
             return;
         }
