@@ -7,8 +7,8 @@
 // as `_et`; this measures the same thing.
 //
 // The clock arrives as a constructor parameter rather than being read from
-// `Date.now()` directly, so this stays free of globals and testable as a table
-// — the same reason `deviceFromUserAgent` takes `maxTouchPoints`.
+// `Date.now()` directly, so tests can advance it between calls to simulate
+// a live, controllable clock — the only way to unit-test interval accumulation.
 
 export class EngagementTimer {
     private accumulated = 0;

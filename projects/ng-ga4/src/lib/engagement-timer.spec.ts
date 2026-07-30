@@ -90,4 +90,21 @@ describe('EngagementTimer', () => {
 
         expect(timer.consume()).toBe(0);
     });
+
+    // Real visibilitychange traffic is not one clean hide/show pair — a user
+    // alt-tabbing repeatedly produces several spans before the next hit.
+    it('sums several visible spans before a single consume', () => {
+        const timer = new EngagementTimer(clock, true);
+        now = 2000;               // visible 1000→2000, +1000
+        timer.setVisible(false);
+        now = 3000;
+        timer.setVisible(true);   // visible 3000→4000, +1000
+        now = 4000;
+        timer.setVisible(false);
+        now = 5000;
+        timer.setVisible(true);   // visible 5000→6000, +1000
+        now = 6000;
+
+        expect(timer.consume()).toBe(3000);
+    });
 });
