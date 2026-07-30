@@ -33,6 +33,9 @@ export class NgGa4Service implements OnDestroy {
     private routerSubscription: Subscription;
     private visibilityListener?: () => void;
     private pagehideListener?: () => void;
+    // The hide-time event has no page path of its own — it names the page the
+    // trailing time was accrued on, which is whatever page_view fired last.
+    private lastPagePath = '/';
     private device: Ga4Device | null = null;
     private userLocation: Ga4UserLocation | null = null;
     private pendingCalls: Array<() => void> = [];
@@ -110,6 +113,7 @@ export class NgGa4Service implements OnDestroy {
             }
             return;
         }
+        this.lastPagePath = pagePath;
 
         this.ensureSession();
 
@@ -467,10 +471,16 @@ export class NgGa4Service implements OnDestroy {
                 this.flushEngagement();
             }
         };
-        // pagehide as well as visibilitychange: iOS Safari does not reliably fire
-        // unload, and visibilitychange is the only signal there. Both are wired,
-        // and whichever fires second finds the accumulator already drained.
-        this.pagehideListener = () => this.flushEngagement();
+        // pagehide covers cross-document navigation and tab close, where a hidden
+        // visibilitychange may not be delivered. unload/beforeunload would be the
+        // obvious fallback for that, but iOS Safari drops those too, which is why
+        // pagehide is what's actually wired here. setVisible(false) closes the
+        // interval before flushing so a bfcache restore minutes later can't have
+        // that dead time reopened and counted as foreground time.
+        this.pagehideListener = () => {
+            this.engagement?.setVisible(false);
+            this.flushEngagement();
+        };
         document.addEventListener('visibilitychange', this.visibilityListener);
         window.addEventListener('pagehide', this.pagehideListener);
     }
@@ -488,14 +498,22 @@ export class NgGa4Service implements OnDestroy {
         if (engagementTime <= 0) {
             return;
         }
-        this.ensureSession();
+        // The user is leaving. Rolling an already-expired session here would land
+        // the trailing time in a session that never had a page view, and bump
+        // session_number for a session that never really happened. Attribute it to
+        // the session it was accrued in and let the next real visit do the rolling.
+        if (Date.now() - this.lastActivityTimestamp <= this.SESSION_TIMEOUT_MS) {
+            this.ensureSession();
+        }
         this.sendToGA4([{
             name: this.config.engagementEventName ?? 'page_engagement',
             params: {
                 engagement_time_msec: engagementTime,
                 session_id: this.sessionId,
                 session_number: this.sessionNumber,
-                page_location: this.config.siteUrl ?? window.location.href,
+                page_location: this.config.siteUrl
+                    ? this.joinSiteUrl(this.config.siteUrl, this.lastPagePath)
+                    : window.location.href,
                 ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
             }
         }], true);

@@ -784,6 +784,35 @@ describe('NgGa4Service', () => {
             httpMock.expectNone(() => true);
         });
 
+        it('does not roll the session when flushing after the timeout', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            const before = (service as any).sessionNumber;
+
+            jasmine.clock().tick(31 * 60 * 1000);
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.session_number).toBe(before);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('attributes the engagement event to the last tracked page', async () => {
+            reconfigureTestBed({ siteUrl: 'https://example.com' });
+            observeFlushViaXhr();
+            await service.init();
+            service.trackPageView('/pricing');
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            jasmine.clock().tick(5000);
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.page_location).toBe('https://example.com/pricing');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
         it('removes its listeners on destroy', async () => {
             await service.init();
             const documentRemove = spyOn(document, 'removeEventListener').and.callThrough();
