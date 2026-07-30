@@ -646,6 +646,16 @@ describe('NgGa4Service', () => {
             return params;
         }
 
+        // The hide flush forces the beacon transport so it survives unload, which
+        // means it never reaches HttpClient and HttpTestingController cannot see it.
+        // Neutralise both beacon and fetch(keepalive) so the send falls through to
+        // XHR, where the suite can assert on the payload. That the flush really does
+        // force the beacon is covered separately by its own spec.
+        function observeFlushViaXhr(): void {
+            spyOn(service as any, 'getNavigator').and.returnValue({});
+            spyOn(service as any, 'getFetch').and.returnValue(undefined);
+        }
+
         it('reports the foreground time accrued before a page view', async () => {
             await service.init();
 
@@ -685,6 +695,104 @@ describe('NgGa4Service', () => {
             service.trackEvent('video_progress', { engagement_time_msec: 42 });
 
             expect(sentParams()['engagement_time_msec']).toBe(42);
+        });
+
+        it('sends the engagement event when the page hides', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(7000);
+
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const event = req.request.body.events[0];
+            expect(event.name).toBe('page_engagement');
+            expect(event.params.engagement_time_msec).toBe(7000);
+            expect(event.params.session_id).toBeDefined();
+            expect(event.params.page_location).toBeDefined();
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        // pagehide often follows visibilitychange. The accumulator is already
+        // drained by the first flush, so the second must be silent — that is the
+        // deduplication, rather than a separate guard.
+        it('sends nothing on a second flush with no time accrued', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(3000);
+
+            (service as any).flushEngagement();
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            (service as any).flushEngagement();
+            httpMock.expectNone(() => true);
+        });
+
+        it('sends nothing when no time has accrued at all', async () => {
+            await service.init();
+
+            (service as any).flushEngagement();
+
+            httpMock.expectNone(() => true);
+        });
+
+        it('does not send when sendEngagementOnHide is false', async () => {
+            reconfigureTestBed({ sendEngagementOnHide: false });
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            httpMock.expectNone(() => true);
+        });
+
+        it('honours a custom engagementEventName', async () => {
+            reconfigureTestBed({ engagementEventName: 'dwell' });
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe('dwell');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('flushes when a visibilitychange to hidden fires', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(6000);
+
+            spyOn(service as any, 'isPageVisible').and.returnValue(false);
+            document.dispatchEvent(new Event('visibilitychange'));
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.engagement_time_msec).toBe(6000);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('forces the beacon transport for the hide flush even under transport: xhr', async () => {
+            await service.init();
+            jasmine.clock().tick(3000);
+            const beaconSpy = spyOn(service as any, 'trySendBeacon').and.returnValue(true);
+
+            (service as any).flushEngagement();
+
+            expect(beaconSpy).toHaveBeenCalled();
+            httpMock.expectNone(() => true);
+        });
+
+        it('removes its listeners on destroy', async () => {
+            await service.init();
+            const documentRemove = spyOn(document, 'removeEventListener').and.callThrough();
+            const windowRemove = spyOn(window, 'removeEventListener').and.callThrough();
+
+            service.ngOnDestroy();
+
+            expect(documentRemove).toHaveBeenCalledWith('visibilitychange', jasmine.any(Function));
+            expect(windowRemove).toHaveBeenCalledWith('pagehide', jasmine.any(Function));
         });
     });
 

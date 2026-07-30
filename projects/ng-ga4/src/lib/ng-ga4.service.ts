@@ -31,6 +31,8 @@ export class NgGa4Service implements OnDestroy {
     private lastActivityTimestamp = 0;
     private initialized = false;
     private routerSubscription: Subscription;
+    private visibilityListener?: () => void;
+    private pagehideListener?: () => void;
     private device: Ga4Device | null = null;
     private userLocation: Ga4UserLocation | null = null;
     private pendingCalls: Array<() => void> = [];
@@ -82,10 +84,18 @@ export class NgGa4Service implements OnDestroy {
             .subscribe((event: NavigationEnd) => {
                 this.trackPageView(event.urlAfterRedirects);
             });
+
+        this.registerEngagementListeners();
     }
 
     ngOnDestroy(): void {
         this.routerSubscription?.unsubscribe();
+        if (this.visibilityListener && typeof document !== 'undefined') {
+            document.removeEventListener('visibilitychange', this.visibilityListener);
+        }
+        if (this.pagehideListener && typeof window !== 'undefined') {
+            window.removeEventListener('pagehide', this.pagehideListener);
+        }
     }
 
     trackPageView(pagePath: string, pageTitle?: string): void {
@@ -444,6 +454,51 @@ export class NgGa4Service implements OnDestroy {
     // !this.clientId guard makes this unreachable today—fallback exists if that changes.
     private consumeEngagementTime(): number {
         return this.engagement?.consume() ?? 0;
+    }
+
+    private registerEngagementListeners(): void {
+        if (typeof document === 'undefined' || typeof window === 'undefined') {
+            return;
+        }
+        this.visibilityListener = () => {
+            const visible = this.isPageVisible();
+            this.engagement?.setVisible(visible);
+            if (!visible) {
+                this.flushEngagement();
+            }
+        };
+        // pagehide as well as visibilitychange: iOS Safari does not reliably fire
+        // unload, and visibilitychange is the only signal there. Both are wired,
+        // and whichever fires second finds the accumulator already drained.
+        this.pagehideListener = () => this.flushEngagement();
+        document.addEventListener('visibilitychange', this.visibilityListener);
+        window.addEventListener('pagehide', this.pagehideListener);
+    }
+
+    // The trailing chunk of foreground time is otherwise lost: for a visit that
+    // fires only the initial page_view, that is the entire visit, which is why
+    // engagement metrics read as ~0 without this.
+    private flushEngagement(): void {
+        if (this.config.sendEngagementOnHide === false || !this.clientId) {
+            return;
+        }
+        const engagementTime = this.consumeEngagementTime();
+        // Non-zero only. This is also what deduplicates the visibilitychange and
+        // pagehide listeners: whichever fires second finds nothing to send.
+        if (engagementTime <= 0) {
+            return;
+        }
+        this.ensureSession();
+        this.sendToGA4([{
+            name: this.config.engagementEventName ?? 'page_engagement',
+            params: {
+                engagement_time_msec: engagementTime,
+                session_id: this.sessionId,
+                session_number: this.sessionNumber,
+                page_location: this.config.siteUrl ?? window.location.href,
+                ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
+            }
+        }], true);
     }
 
     private ensureSession(): void {
