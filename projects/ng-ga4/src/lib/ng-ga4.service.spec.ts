@@ -108,6 +108,10 @@ describe('NgGa4Service', () => {
         httpMock.verify();
         jasmine.clock().install();
         jasmine.clock().mockDate(new Date(MOCK_TIMESTAMP));
+        // The outgoing instance's listeners (visibilitychange/pagehide) would
+        // otherwise dangle on document/window past this reconfigure — see the
+        // afterEach below for why that matters.
+        service?.ngOnDestroy();
         configureTestBed(config, platformId);
     }
 
@@ -156,6 +160,13 @@ describe('NgGa4Service', () => {
     });
 
     afterEach(() => {
+        // Specs that call init() register a visibilitychange/pagehide listener pair
+        // on the real document/window. Without this, ~120 specs' worth of listeners
+        // accumulate across the Karma page, each retaining a dead service and its
+        // injector — benign under headless Chrome (always visibilityState:
+        // 'visible') but a leak that would flush through un-spied transports and
+        // fire real requests at google-analytics.com in a headed or backgrounded run.
+        service?.ngOnDestroy();
         httpMock.verify();
         jasmine.clock().uninstall();
         clearChromeMock();
@@ -781,6 +792,7 @@ describe('NgGa4Service', () => {
             (service as any).flushEngagement();
 
             expect(beaconSpy).toHaveBeenCalled();
+            expect(JSON.parse(beaconSpy.calls.mostRecent().args[1] as string).events[0].name).toBe('page_engagement');
             httpMock.expectNone(() => true);
         });
 
@@ -820,8 +832,8 @@ describe('NgGa4Service', () => {
 
             service.ngOnDestroy();
 
-            expect(documentRemove).toHaveBeenCalledWith('visibilitychange', jasmine.any(Function));
-            expect(windowRemove).toHaveBeenCalledWith('pagehide', jasmine.any(Function));
+            expect(documentRemove).toHaveBeenCalledWith('visibilitychange', (service as any).visibilityListener);
+            expect(windowRemove).toHaveBeenCalledWith('pagehide', (service as any).pagehideListener);
         });
     });
 
