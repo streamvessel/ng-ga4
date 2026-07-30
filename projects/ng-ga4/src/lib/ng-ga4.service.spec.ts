@@ -809,6 +809,33 @@ describe('NgGa4Service', () => {
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
+        // The hide path is the one hit path the #16 adoption fix didn't reach: the
+        // expiry guard below used to be evaluated against the pre-adoption in-memory
+        // timestamp, so a tab sitting idle-but-visible past the timeout would skip
+        // adoption entirely and emit page_engagement for a session another tab had
+        // already rolled past — even though storage held a perfectly live one.
+        it('adopts a newer session from storage before judging expiry on flush', async () => {
+            mockLocalStorage['ga_session_id'] = 'S1';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP);
+            mockLocalStorage['ga_session_number'] = '3';
+            observeFlushViaXhr();
+            await service.init();
+
+            jasmine.clock().tick(31 * 60 * 1000);
+            // Another tab rolled 5 minutes ago: live from "now", even though this
+            // tab's own in-memory timestamp (still MOCK_TIMESTAMP) is 31 min stale.
+            mockLocalStorage['ga_session_id'] = 'S2';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP + 26 * 60 * 1000);
+            mockLocalStorage['ga_session_number'] = '4';
+
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.session_id).toBe('S2');
+            expect(req.request.body.events[0].params.session_number).toBe(4);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
         it('attributes the engagement event to the last tracked page', async () => {
             reconfigureTestBed({ siteUrl: 'https://example.com' });
             observeFlushViaXhr();
@@ -877,6 +904,14 @@ describe('NgGa4Service', () => {
             mockLocalStorage['ga_session_number'] = '3';
             await service.init();
 
+            // A different id at an older timestamp: adoption must not fire just
+            // because *some* persisted session exists, only a strictly newer one.
+            // (Seeding the same id/timestamp as in-memory, as this spec used to,
+            // can't tell a correct implementation from one that adopts unconditionally
+            // — the sessionId comes out the same either way.)
+            mockLocalStorage['ga_session_id'] = 'S_STALE';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP - 1000);
+
             service.trackEvent('same_tab');
 
             expect(sentParams()['session_id']).toBe('S1');
@@ -898,6 +933,27 @@ describe('NgGa4Service', () => {
             service.trackEvent('after_idle');
 
             expect(sentParams()['session_number']).toBe(8);
+        });
+
+        // session_number is monotonically non-decreasing for a client id. A cleared
+        // ga_session_number (plausible: it's written only on a roll, while
+        // ga_session_id/ga_last_activity are written on every hit) must not clobber
+        // a known-good in-memory count down to 0 — parseIntSafe(undefined) is 0, and
+        // 0 is not a valid GA4 session ordinal.
+        it('does not drop the session number when storage has no ga_session_number', async () => {
+            mockLocalStorage['ga_session_id'] = 'S1';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP);
+            mockLocalStorage['ga_session_number'] = '3';
+            await service.init();
+
+            jasmine.clock().tick(60000);
+            mockLocalStorage['ga_session_id'] = 'S2';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP + 60000);
+            delete mockLocalStorage['ga_session_number'];
+
+            service.trackEvent('after_number_cleared');
+
+            expect(sentParams()['session_number']).toBe(3);
         });
 
         it('adopts session changes pushed by chrome.storage.onChanged', async () => {
@@ -929,6 +985,35 @@ describe('NgGa4Service', () => {
             const params = sentParams();
             expect(params['session_id']).toBe('S2');
             expect(params['session_number']).toBe(4);
+        });
+
+        // Chrome only reports keys whose value actually changed, so a push can carry
+        // ga_session_id alone, with no ga_last_activity at all. Adopting the id on no
+        // freshness signal would also let two contexts rolling within the same second
+        // each adopt the other's id (millisecond-distinct ids, no ordering between
+        // them) — both fields must be gated on the same signal.
+        it('does not adopt a pushed session id with no accompanying activity change', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const listeners: Array<(changes: any, area: string) => void> = [];
+            setupChromeMock(
+                { ga_client_id: 'ext-id', ga_session_number: '3' },
+                { ga_session_id: 'S1', ga_last_activity: String(MOCK_TIMESTAMP) }
+            );
+            (window as any).chrome.storage.onChanged = {
+                addListener: (fn: any) => listeners.push(fn),
+                removeListener: (fn: any) => {
+                    const i = listeners.indexOf(fn);
+                    if (i >= 0) listeners.splice(i, 1);
+                }
+            };
+
+            await service.init();
+
+            listeners.forEach(fn => fn({ ga_session_id: { newValue: 'S_STALE' } }, 'session'));
+
+            service.trackEvent('ext_event');
+
+            expect(sentParams()['session_id']).toBe('S1');
         });
 
         it('removes the chrome.storage.onChanged listener on destroy', async () => {

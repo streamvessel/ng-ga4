@@ -503,6 +503,10 @@ export class NgGa4Service implements OnDestroy {
         if (engagementTime <= 0) {
             return;
         }
+        // Adopt before judging expiry: the in-memory timestamp can go stale while
+        // this tab sits visible and idle, and judging against that stale value
+        // would treat a session another tab kept alive as dead.
+        this.adoptPersistedSessionIfNewer();
         // The user is leaving. Rolling an already-expired session here would land
         // the trailing time in a session that never had a page view, and bump
         // session_number for a session that never really happened. Attribute it to
@@ -528,18 +532,35 @@ export class NgGa4Service implements OnDestroy {
         // Adopt whatever another tab wrote most recently before deciding anything.
         // Without this, in-memory state read once at init() goes stale the moment
         // any other tab rolls, and this tab sends the dead session forever.
-        const persisted = this.readPersistedSessionSync();
-        if (persisted && persisted.lastActivityTimestamp > this.lastActivityTimestamp) {
-            this.sessionId = persisted.sessionId;
-            this.sessionNumber = persisted.sessionNumber;
-            this.lastActivityTimestamp = persisted.lastActivityTimestamp;
-        }
+        this.adoptPersistedSessionIfNewer();
         // Evaluated against the adopted timestamp, not the pre-adoption one.
         if (Date.now() - this.lastActivityTimestamp > this.SESSION_TIMEOUT_MS) {
             this.startNewSession();
         }
         this.lastActivityTimestamp = Date.now();
         this.saveSessionState();
+    }
+
+    // Adopt whatever another tab wrote most recently. Split out of ensureSession()
+    // because the hide-time flush needs to adopt without rolling: it must decide
+    // expiry against fresh state, not against a timestamp that went stale while
+    // this tab sat visible and idle.
+    private adoptPersistedSessionIfNewer(): void {
+        const persisted = this.readPersistedSessionSync();
+        if (!persisted || persisted.lastActivityTimestamp <= this.lastActivityTimestamp) {
+            return;
+        }
+        this.sessionId = persisted.sessionId;
+        this.adoptSessionNumber(persisted.sessionNumber);
+        this.lastActivityTimestamp = persisted.lastActivityTimestamp;
+    }
+
+    // Monotonic: session_number never decreases for a client id, so a missing or
+    // junk key (parseIntSafe yields 0) must not clobber a known-good value.
+    private adoptSessionNumber(candidate: number): void {
+        if (candidate > this.sessionNumber) {
+            this.sessionNumber = candidate;
+        }
     }
 
     private async restoreOrStartSession(): Promise<void> {
@@ -552,11 +573,14 @@ export class NgGa4Service implements OnDestroy {
         }
     }
 
-    // this.sessionNumber++ is only correct because ensureSession() adopts the
-    // latest sessionNumber from storage immediately before calling this — so the
-    // increment always applies on top of what other tabs have already done, not
-    // the stale value read once at init(). Easy to "simplify" back into the
-    // cross-tab bug from #16 by incrementing a value that was never refreshed.
+    // this.sessionNumber++ is only correct because sessionNumber was refreshed
+    // immediately before each call site, not read stale. From restoreOrStartSession()
+    // it's whatever loadSessionNumber() just read at init(). From ensureSession() it's
+    // whatever adoptPersistedSessionIfNewer() just adopted synchronously on the web
+    // path — or, on the extension path, whatever the last chrome.storage.onChanged
+    // push already landed (a weaker, eventually-consistent guarantee; see
+    // registerSessionSyncListener). Easy to "simplify" back into the cross-tab bug
+    // from #16 by incrementing a value that was never refreshed.
     private startNewSession(): void {
         this.sessionId = Math.floor(Date.now() / 1000).toString();
         this.sessionNumber++;
@@ -669,11 +693,14 @@ export class NgGa4Service implements OnDestroy {
             if (areaName === 'session') {
                 const id = changes['ga_session_id']?.newValue;
                 const activity = this.parseIntSafe(changes['ga_last_activity']?.newValue);
-                if (typeof id === 'string' && id) {
-                    this.sessionId = id;
-                }
-                // Guarded so a stale or out-of-order push cannot rewind activity.
+                // Both fields gated on the same freshness signal — Chrome only reports
+                // keys that actually changed, so a push carrying ga_session_id without
+                // ga_last_activity must not adopt the id on no signal at all, and two
+                // contexts rolling in the same second must not each adopt the other's id.
                 if (activity > this.lastActivityTimestamp) {
+                    if (typeof id === 'string' && id) {
+                        this.sessionId = id;
+                    }
                     this.lastActivityTimestamp = activity;
                 }
                 return;
@@ -681,7 +708,7 @@ export class NgGa4Service implements OnDestroy {
             if (areaName === 'local') {
                 const number = changes['ga_session_number']?.newValue;
                 if (number !== undefined) {
-                    this.sessionNumber = this.parseIntSafe(number);
+                    this.adoptSessionNumber(this.parseIntSafe(number));
                 }
             }
         };
