@@ -433,7 +433,8 @@ export class NgGa4Service implements OnDestroy {
         return typeof navigator !== 'undefined' ? navigator.userAgent : undefined;
     }
 
-    // Null only before init() has run, where any accrued time is by definition zero.
+    // engagement is always constructed before clientId is set, so the callers'
+    // !this.clientId guard makes this unreachable today—fallback exists if that changes.
     private consumeEngagementTime(): number {
         return this.engagement?.consume() ?? 0;
     }
