@@ -80,6 +80,37 @@ bootstrapApplication(AppComponent, {
 | `debug` | `boolean` | No | Tag events with `debug_mode` so they appear in GA4 DebugView, and log validation problems to the console. Events are still recorded. |
 | `clientIdSource` | `'auto' \| 'cookie' \| 'storage'` | No | Where the client ID comes from on web. `'auto'` (default) reads the `_ga` cookie when present and well-formed, else `localStorage` — set `'storage'` if you don't want this library reading `_ga` at all, since doing so is itself consent-relevant, not only writing one. `'cookie'` treats `_ga` as authoritative and mints one if absent. `'storage'` is the previous behaviour. An unrecognised value logs a console warning and falls back to `'auto'`. Ignored for extensions. |
 | `writeGaCookie` | `boolean \| NgGa4CookieOptions` | No | Write `_ga` when absent or unreadable, using the client ID already on hand, on the registrable domain, with `SameSite=Lax` and (on HTTPS) `Secure` by default. Pass `{}` to write with every default, or an `NgGa4CookieOptions` object to override `domain`, `flags`, or `maxAgeSeconds` — see "Interop with gtag.js" below. Off by default. Implied by `clientIdSource: 'cookie'`; ignored for `'storage'` and extensions. |
+| `sendEngagementOnHide` | `boolean` | No | Send an event when the page hides, carrying the engagement time accrued since the last hit — without it, a visit that only fires the initial `page_view` reports ~0 ms of engagement however long the user actually stayed, and reads as a bounce. Default `true`; see "Engagement measurement" below. |
+| `engagementEventName` | `string` | No | Event name for the hide-time event above. Default `'page_engagement'`. Can't be `user_engagement` — the Measurement Protocol reserves that name — so it arrives as an ordinary custom event and appears in Events reports. |
+
+### Engagement measurement
+
+`engagement_time_msec` drives GA4's average engagement time, engaged
+sessions, engagement rate and, by extension, bounce rate. This library
+measures real foreground time between hits: each `page_view` or custom
+event reports the time elapsed since the previous hit, the same interval
+gtag.js tracks as `_et`.
+
+"Foreground" means page visibility, not window focus — a visible tab
+behind another window still counts. That's deliberate, matching gtag.js's
+own visibility-based timer, so these numbers stay comparable with a
+gtag-measured property.
+
+A visit that only fires the initial `page_view` would otherwise report
+almost no engagement time, however long the user stayed, and read as a
+bounce. `sendEngagementOnHide` (default `true`) sends an event on page
+hide, carrying the time since the last hit; `false` opts out, at the cost
+of under-reporting engagement. That event can't be named `user_engagement`
+— the Measurement Protocol reserves that name, and gtag.js is exempt only
+because it posts to Google's internal `/g/collect` endpoint, not the
+Measurement Protocol — so it ships as an ordinary custom event,
+`engagementEventName`, default `'page_engagement'`, visible in Events
+reports. It always goes out over `navigator.sendBeacon`, regardless of the
+configured `transport`, since an in-flight XHR is aborted on unload and
+the hit would simply be lost.
+
+Expect these numbers to trend close to, not match exactly, a property also
+measured by gtag.js.
 
 ### Interop with gtag.js
 
@@ -275,6 +306,19 @@ NgGa4Module.forRoot({
 | Client ID | `_ga` cookie when present and well-formed (default), else `localStorage`; writing to the cookie is opt-in (see "Interop with gtag.js" above) | `chrome.storage.local` |
 | Session number | `localStorage` | `chrome.storage.local` |
 | Session ID + activity | `localStorage` | `chrome.storage.session` |
+
+### Cross-tab session sync
+
+Session state used to be read once at `init()` and cached in memory, so once
+one tab rolled to a new session, every other open tab kept sending the dead
+one indefinitely. Every hit path now re-reads persisted session state first
+and adopts it if it is newer before deciding whether to roll. On web that
+re-read is synchronous, straight from `localStorage`. On extensions,
+`chrome.storage` cannot be read synchronously, so freshness instead comes
+from a `chrome.storage.onChanged` listener that adopts session ID and
+activity from the `session` storage area and session number from `local` as
+they change. Session number itself only ever increases for a given client
+ID, never decreases, so a stale or missing read can't roll it backwards.
 
 ## Server-side rendering
 
