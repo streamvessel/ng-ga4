@@ -33,6 +33,7 @@ export class NgGa4Service implements OnDestroy {
     private routerSubscription: Subscription;
     private visibilityListener?: () => void;
     private pagehideListener?: () => void;
+    private chromeStorageListener?: (changes: Record<string, { newValue?: unknown }>, areaName: string) => void;
     // The hide-time event has no page path of its own — it names the page the
     // trailing time was accrued on, which is whatever page_view fired last.
     private lastPagePath = '/';
@@ -89,6 +90,7 @@ export class NgGa4Service implements OnDestroy {
             });
 
         this.registerEngagementListeners();
+        this.registerSessionSyncListener();
     }
 
     ngOnDestroy(): void {
@@ -98,6 +100,9 @@ export class NgGa4Service implements OnDestroy {
         }
         if (this.pagehideListener && typeof window !== 'undefined') {
             window.removeEventListener('pagehide', this.pagehideListener);
+        }
+        if (this.chromeStorageListener && chrome?.storage?.onChanged) {
+            chrome.storage.onChanged.removeListener(this.chromeStorageListener);
         }
     }
 
@@ -650,6 +655,37 @@ export class NgGa4Service implements OnDestroy {
             sessionNumber: this.parseIntSafe(localStorage.getItem('ga_session_number')),
             lastActivityTimestamp: lastActivity
         };
+    }
+
+    // The extension counterpart to readPersistedSessionSync: chrome.storage cannot
+    // be read synchronously, so instead of polling we let it push. The session id
+    // and last-activity live in chrome.storage.session while the session number
+    // lives in chrome.storage.local, hence the two areas.
+    private registerSessionSyncListener(): void {
+        if (!this.config.isExtension || !chrome?.storage?.onChanged) {
+            return;
+        }
+        this.chromeStorageListener = (changes, areaName) => {
+            if (areaName === 'session') {
+                const id = changes['ga_session_id']?.newValue;
+                const activity = this.parseIntSafe(changes['ga_last_activity']?.newValue);
+                if (typeof id === 'string' && id) {
+                    this.sessionId = id;
+                }
+                // Guarded so a stale or out-of-order push cannot rewind activity.
+                if (activity > this.lastActivityTimestamp) {
+                    this.lastActivityTimestamp = activity;
+                }
+                return;
+            }
+            if (areaName === 'local') {
+                const number = changes['ga_session_number']?.newValue;
+                if (number !== undefined) {
+                    this.sessionNumber = this.parseIntSafe(number);
+                }
+            }
+        };
+        chrome.storage.onChanged.addListener(this.chromeStorageListener);
     }
 
     private saveSessionState(): void {

@@ -899,6 +899,57 @@ describe('NgGa4Service', () => {
 
             expect(sentParams()['session_number']).toBe(8);
         });
+
+        it('adopts session changes pushed by chrome.storage.onChanged', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const listeners: Array<(changes: any, area: string) => void> = [];
+            setupChromeMock(
+                { ga_client_id: 'ext-id', ga_session_number: '3' },
+                { ga_session_id: 'S1', ga_last_activity: String(MOCK_TIMESTAMP) }
+            );
+            (window as any).chrome.storage.onChanged = {
+                addListener: (fn: any) => listeners.push(fn),
+                removeListener: (fn: any) => {
+                    const i = listeners.indexOf(fn);
+                    if (i >= 0) listeners.splice(i, 1);
+                }
+            };
+
+            await service.init();
+
+            jasmine.clock().tick(60000);
+            listeners.forEach(fn => fn({
+                ga_session_id: { newValue: 'S2' },
+                ga_last_activity: { newValue: String(MOCK_TIMESTAMP + 60000) }
+            }, 'session'));
+            listeners.forEach(fn => fn({ ga_session_number: { newValue: '4' } }, 'local'));
+
+            service.trackEvent('ext_event');
+
+            const params = sentParams();
+            expect(params['session_id']).toBe('S2');
+            expect(params['session_number']).toBe(4);
+        });
+
+        it('removes the chrome.storage.onChanged listener on destroy', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const listeners: Array<any> = [];
+            setupChromeMock({ ga_client_id: 'ext-id' }, {});
+            (window as any).chrome.storage.onChanged = {
+                addListener: (fn: any) => listeners.push(fn),
+                removeListener: (fn: any) => {
+                    const i = listeners.indexOf(fn);
+                    if (i >= 0) listeners.splice(i, 1);
+                }
+            };
+
+            await service.init();
+            expect(listeners.length).toBe(1);
+
+            service.ngOnDestroy();
+
+            expect(listeners.length).toBe(0);
+        });
     });
 
     // --- writeGaCookie options ---
@@ -1007,6 +1058,8 @@ describe('NgGa4Service', () => {
             expect(crypto.randomUUID).not.toHaveBeenCalled();
             expect(writtenCookies).toEqual([]);
             httpMock.expectNone(() => true);
+            expect((service as any).visibilityListener).toBeUndefined();
+            expect((service as any).chromeStorageListener).toBeUndefined();
         });
 
         it('should no-op trackEvent and trackPageView on the server', async () => {
