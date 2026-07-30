@@ -520,6 +520,16 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private ensureSession(): void {
+        // Adopt whatever another tab wrote most recently before deciding anything.
+        // Without this, in-memory state read once at init() goes stale the moment
+        // any other tab rolls, and this tab sends the dead session forever.
+        const persisted = this.readPersistedSessionSync();
+        if (persisted && persisted.lastActivityTimestamp > this.lastActivityTimestamp) {
+            this.sessionId = persisted.sessionId;
+            this.sessionNumber = persisted.sessionNumber;
+            this.lastActivityTimestamp = persisted.lastActivityTimestamp;
+        }
+        // Evaluated against the adopted timestamp, not the pre-adoption one.
         if (Date.now() - this.lastActivityTimestamp > this.SESSION_TIMEOUT_MS) {
             this.startNewSession();
         }
@@ -537,6 +547,11 @@ export class NgGa4Service implements OnDestroy {
         }
     }
 
+    // this.sessionNumber++ is only correct because ensureSession() adopts the
+    // latest sessionNumber from storage immediately before calling this — so the
+    // increment always applies on top of what other tabs have already done, not
+    // the stale value read once at init(). Easy to "simplify" back into the
+    // cross-tab bug from #16 by incrementing a value that was never refreshed.
     private startNewSession(): void {
         this.sessionId = Math.floor(Date.now() / 1000).toString();
         this.sessionNumber++;
@@ -614,6 +629,27 @@ export class NgGa4Service implements OnDestroy {
             }
         }
         return null;
+    }
+
+    // Synchronous counterpart to loadSessionState, for the hit path.
+    //
+    // Returns null on the extension path: chrome.storage is async, so there is
+    // nothing to read synchronously there — freshness comes from the
+    // chrome.storage.onChanged listener instead.
+    private readPersistedSessionSync(): { sessionId: string; sessionNumber: number; lastActivityTimestamp: number } | null {
+        if (this.config.isExtension && chrome?.storage?.session) {
+            return null;
+        }
+        const sessionId = localStorage.getItem('ga_session_id');
+        const lastActivity = this.parseIntSafe(localStorage.getItem('ga_last_activity'));
+        if (!sessionId || lastActivity <= 0) {
+            return null;
+        }
+        return {
+            sessionId,
+            sessionNumber: this.parseIntSafe(localStorage.getItem('ga_session_number')),
+            lastActivityTimestamp: lastActivity
+        };
     }
 
     private saveSessionState(): void {

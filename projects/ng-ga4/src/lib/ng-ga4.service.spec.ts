@@ -837,6 +837,70 @@ describe('NgGa4Service', () => {
         });
     });
 
+    // --- cross-tab session state ---
+
+    describe('cross-tab session state', () => {
+        // Bracket notation throughout: the repo's tsconfig sets
+        // noPropertyAccessFromIndexSignature, so dot access on a Record<string, any>
+        // is a compile error, not a style preference.
+        function sentParams(): Record<string, any> {
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const params = req.request.body.events[0].params;
+            req.flush('', { status: 204, statusText: 'No Content' });
+            return params;
+        }
+
+        // The interleaving from #16: two tabs start together, one rolls, and the
+        // other must adopt rather than keep sending the session it started with.
+        it('adopts a session another tab rolled', async () => {
+            mockLocalStorage['ga_session_id'] = 'S1';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP);
+            mockLocalStorage['ga_session_number'] = '3';
+            await service.init();
+
+            // Another tab rolls: newer activity, new id, incremented number.
+            jasmine.clock().tick(60000);
+            mockLocalStorage['ga_session_id'] = 'S2';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP + 60000);
+            mockLocalStorage['ga_session_number'] = '4';
+
+            service.trackEvent('tab_a_event');
+
+            const params = sentParams();
+            expect(params['session_id']).toBe('S2');
+            expect(params['session_number']).toBe(4);
+        });
+
+        it('keeps its own session when storage is not newer', async () => {
+            mockLocalStorage['ga_session_id'] = 'S1';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP);
+            mockLocalStorage['ga_session_number'] = '3';
+            await service.init();
+
+            service.trackEvent('same_tab');
+
+            expect(sentParams()['session_id']).toBe('S1');
+        });
+
+        // The roll must take the number from storage, not from the value read at
+        // init(): otherwise two tabs increment independently and diverge forever.
+        it('increments the session number from storage when rolling', async () => {
+            mockLocalStorage['ga_session_id'] = 'S1';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP);
+            mockLocalStorage['ga_session_number'] = '3';
+            await service.init();
+
+            // Another tab advanced the number, then everyone went idle past the timeout.
+            mockLocalStorage['ga_session_number'] = '7';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP + 1000);
+            jasmine.clock().tick(31 * 60 * 1000);
+
+            service.trackEvent('after_idle');
+
+            expect(sentParams()['session_number']).toBe(8);
+        });
+    });
+
     // --- writeGaCookie options ---
 
     describe('writeGaCookie options', () => {
