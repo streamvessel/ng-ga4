@@ -898,19 +898,16 @@ describe('NgGa4Service', () => {
             expect(params['session_number']).toBe(4);
         });
 
+        // Equal timestamp, different id: the only seeding that discriminates `>`
+        // from `>=`. An older timestamp fails both comparisons, so it would pass
+        // whichever operator adoption used.
         it('keeps its own session when storage is not newer', async () => {
             mockLocalStorage['ga_session_id'] = 'S1';
             mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP);
             mockLocalStorage['ga_session_number'] = '3';
             await service.init();
 
-            // A different id at an older timestamp: adoption must not fire just
-            // because *some* persisted session exists, only a strictly newer one.
-            // (Seeding the same id/timestamp as in-memory, as this spec used to,
-            // can't tell a correct implementation from one that adopts unconditionally
-            // — the sessionId comes out the same either way.)
-            mockLocalStorage['ga_session_id'] = 'S_STALE';
-            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP - 1000);
+            mockLocalStorage['ga_session_id'] = 'S_EQUAL';
 
             service.trackEvent('same_tab');
 
