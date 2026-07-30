@@ -85,6 +85,28 @@ export interface NgGa4Config {
      * minted itself.
      */
     writeGaCookie?: boolean | NgGa4CookieOptions;
+
+    /**
+     * Send an event when the page hides, carrying the engagement time accrued
+     * since the last hit. Default `true`.
+     *
+     * Without this, a visit that fires only the initial `page_view` reports ~0 ms
+     * of engagement however long the user actually stayed — so it never counts as
+     * an engaged session and reads as a bounce. gtag.js sends its own
+     * `user_engagement` hit for exactly this reason.
+     */
+    sendEngagementOnHide?: boolean;
+
+    /**
+     * Event name used for that hide-time event. Default `'page_engagement'`.
+     *
+     * It cannot be `user_engagement`: the Measurement Protocol reserves that name
+     * (along with `session_start`, `first_visit` and `first_open`) and rejects it.
+     * gtag.js is not bound by that because it posts to Google's internal
+     * `/g/collect` rather than the Measurement Protocol. The consequence is that
+     * ours arrives as an ordinary custom event and appears in Events reports.
+     */
+    engagementEventName?: string;
 }
 
 export const NG_GA4_CONFIG = new InjectionToken<NgGa4Config>('NG_GA4_CONFIG');
