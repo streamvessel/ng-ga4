@@ -636,6 +636,58 @@ describe('NgGa4Service', () => {
         });
     });
 
+    // --- engagement time ---
+
+    describe('engagement time', () => {
+        function sentParams(): Record<string, any> {
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const params = req.request.body.events[0].params;
+            req.flush('', { status: 204, statusText: 'No Content' });
+            return params;
+        }
+
+        it('reports the foreground time accrued before a page view', async () => {
+            await service.init();
+
+            jasmine.clock().tick(5000);
+            service.trackPageView('/test');
+
+            expect(sentParams()['engagement_time_msec']).toBe(5000);
+        });
+
+        it('reports the foreground time accrued before a custom event', async () => {
+            await service.init();
+
+            jasmine.clock().tick(2500);
+            service.trackEvent('cta_click');
+
+            expect(sentParams()['engagement_time_msec']).toBe(2500);
+        });
+
+        // Time since the previous hit, as gtag's _et reports — not a running
+        // total, which would multiply-count the same seconds.
+        it('reports only the time since the previous hit', async () => {
+            await service.init();
+
+            jasmine.clock().tick(3000);
+            service.trackEvent('first');
+            expect(sentParams()['engagement_time_msec']).toBe(3000);
+
+            jasmine.clock().tick(1000);
+            service.trackEvent('second');
+            expect(sentParams()['engagement_time_msec']).toBe(1000);
+        });
+
+        it('lets an explicit caller value override the measurement', async () => {
+            await service.init();
+
+            jasmine.clock().tick(5000);
+            service.trackEvent('video_progress', { engagement_time_msec: 42 });
+
+            expect(sentParams()['engagement_time_msec']).toBe(42);
+        });
+    });
+
     // --- writeGaCookie options ---
 
     describe('writeGaCookie options', () => {

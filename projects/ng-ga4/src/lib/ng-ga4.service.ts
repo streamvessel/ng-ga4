@@ -6,6 +6,7 @@ import { filter, Subscription } from 'rxjs';
 import { NG_GA4_CONFIG, NgGa4Config, NgGa4CookieOptions } from './ng-ga4.config';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
+import { EngagementTimer } from './engagement-timer';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 
 interface Ga4Device {
@@ -33,6 +34,7 @@ export class NgGa4Service implements OnDestroy {
     private device: Ga4Device | null = null;
     private userLocation: Ga4UserLocation | null = null;
     private pendingCalls: Array<() => void> = [];
+    private engagement: EngagementTimer | null = null;
     private readonly SESSION_TIMEOUT_MS = 30 * 60 * 1000;
     // gtag.js's own default _ga lifetime.
     private readonly GA_COOKIE_MAX_AGE_SECONDS = 63072000;
@@ -59,6 +61,10 @@ export class NgGa4Service implements OnDestroy {
             return;
         }
         this.initialized = true;
+
+        // Created here rather than in the constructor: the constructor also runs
+        // on the server, where `document` does not exist.
+        this.engagement = new EngagementTimer(() => Date.now(), this.isPageVisible());
 
         const clientId = await this.loadOrCreateClientId();
         this.sessionNumber = await this.loadSessionNumber();
@@ -102,7 +108,7 @@ export class NgGa4Service implements OnDestroy {
                 ? this.joinSiteUrl(this.config.siteUrl, pagePath)
                 : window.location.href,
             page_title: pageTitle,
-            engagement_time_msec: 100,
+            engagement_time_msec: this.consumeEngagementTime(),
             session_id: this.sessionId,
             session_number: this.sessionNumber,
             ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
@@ -128,7 +134,7 @@ export class NgGa4Service implements OnDestroy {
         this.sendToGA4([{
             name,
             params: {
-                engagement_time_msec: 100,
+                engagement_time_msec: this.consumeEngagementTime(),
                 session_id: this.sessionId,
                 session_number: this.sessionNumber,
                 ...params,
@@ -299,6 +305,10 @@ export class NgGa4Service implements OnDestroy {
         return typeof window !== 'undefined' && window.location ? window.location.protocol : '';
     }
 
+    private isPageVisible(): boolean {
+        return typeof document === 'undefined' || document.visibilityState !== 'hidden';
+    }
+
     private logHttpError(err: any): void {
         const redact = (v: unknown): any =>
             typeof v === 'string' ? v.replace(/api_secret=[^&\s]*/g, 'api_secret=***') : v;
@@ -421,6 +431,11 @@ export class NgGa4Service implements OnDestroy {
 
     private getUserAgentString(): string | undefined {
         return typeof navigator !== 'undefined' ? navigator.userAgent : undefined;
+    }
+
+    // Null only before init() has run, where any accrued time is by definition zero.
+    private consumeEngagementTime(): number {
+        return this.engagement?.consume() ?? 0;
     }
 
     private ensureSession(): void {
