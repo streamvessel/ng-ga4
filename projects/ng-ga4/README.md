@@ -81,7 +81,7 @@ bootstrapApplication(AppComponent, {
 | `clientIdSource` | `'auto' \| 'cookie' \| 'storage'` | No | Where the client ID comes from on web. `'auto'` (default) reads the `_ga` cookie when present and well-formed, else `localStorage` — set `'storage'` if you don't want this library reading `_ga` at all, since doing so is itself consent-relevant, not only writing one. `'cookie'` treats `_ga` as authoritative and mints one if absent. `'storage'` is the previous behaviour. An unrecognised value logs a console warning and falls back to `'auto'`. Ignored for extensions. |
 | `writeGaCookie` | `boolean \| NgGa4CookieOptions` | No | Write `_ga` when absent or unreadable, using the client ID already on hand, on the registrable domain, with `SameSite=Lax` and (on HTTPS) `Secure` by default. Pass `{}` to write with every default, or an `NgGa4CookieOptions` object to override `domain`, `flags`, or `maxAgeSeconds` — see "Interop with gtag.js" below. Off by default. Implied by `clientIdSource: 'cookie'`; ignored for `'storage'` and extensions. |
 | `sendEngagementOnHide` | `boolean` | No | Send an event when the page hides, carrying the engagement time accrued since the last hit — without it, a visit that only fires the initial `page_view` reports ~0 ms of engagement however long the user actually stayed, and reads as a bounce. Default `true`; see "Engagement measurement" below. |
-| `engagementEventName` | `string` | No | Event name for the hide-time event above. Default `'page_engagement'`. Can't be `user_engagement` — the Measurement Protocol reserves that name — so it arrives as an ordinary custom event and appears in Events reports. |
+| `engagementEventName` | `string` | No | Event name for the hide-time event above. Default `'page_engagement'`. Can't be `user_engagement` — the Measurement Protocol reserves that name — so it arrives as an ordinary custom event and appears in Events reports. An empty or reserved name logs a console warning and falls back to the default, since GA4 answers `2xx` and silently drops invalid names. |
 
 ### Engagement measurement
 
@@ -105,10 +105,12 @@ bounce. `sendEngagementOnHide` (default `true`) sends an event when the
 page is hidden or loses focus, carrying the time since the last hit;
 `false` opts out, at the cost of under-reporting engagement. Because
 losing focus already stops the clock, it flushes this event too, exactly
-as hiding the page does — a blur with nothing accrued sends nothing, but
-one that did accrue time does, so it's expected to see a hit fire in the
+as hiding the page does — so it's expected to see a hit fire in the
 network tab the moment a user clicks away to another window, not only
-when they switch tabs or close the page. That event can't be named
+when they switch tabs or close the page. Flushes below about a second are
+skipped rather than sent, so rapid alt-tabbing does not emit an event per
+switch; that time is not discarded, it stays accrued and rides out on the
+next flush or hit. That event can't be named
 `user_engagement` — the Measurement Protocol reserves that name, and
 gtag.js is exempt only because it posts to Google's internal `/g/collect`
 endpoint, not the Measurement Protocol — so it ships as an ordinary custom
