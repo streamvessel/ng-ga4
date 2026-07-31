@@ -36,8 +36,12 @@ export class NgGa4Service implements OnDestroy {
     private focusListener?: () => void;
     private blurListener?: () => void;
     private chromeStorageListener?: (changes: Record<string, { newValue?: unknown }>, areaName: string) => void;
-    // The hide-time event has no page path of its own — it names the page the
-    // trailing time was accrued on, which is whatever page_view fired last.
+    // Only read when siteUrl is configured: flushEngagement() then joins it
+    // onto siteUrl for the hide-time event's page_location, since that event
+    // has no page path of its own — this names the page the trailing time was
+    // accrued on, which is whatever page_view fired last. Without siteUrl,
+    // flushEngagement() uses window.location.href directly instead, and this
+    // field is never read.
     private lastPagePath = '/';
     private device: Ga4Device | null = null;
     private userLocation: Ga4UserLocation | null = null;

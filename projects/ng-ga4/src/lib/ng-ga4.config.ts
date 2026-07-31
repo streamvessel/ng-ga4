@@ -94,6 +94,15 @@ export interface NgGa4Config {
      * of engagement however long the user actually stayed — so it never counts as
      * an engaged session and reads as a bounce. gtag.js sends its own
      * `user_engagement` hit for exactly this reason.
+     *
+     * Also fires when the page merely loses focus (e.g. alt-tab to another
+     * window or application), not only when it hides — losing focus already
+     * stops the engagement clock, so the same event flushes it. This event
+     * always takes the unload-safe transport (`navigator.sendBeacon`, falling
+     * back to `fetch(keepalive)` then XHR) regardless of the configured
+     * `transport`, since an in-flight XHR is aborted on unload and the hit
+     * would simply be lost. A consumer on `transport: 'xhr'` should expect
+     * this one event class to bypass their `HttpClient` interceptors.
      */
     sendEngagementOnHide?: boolean;
 

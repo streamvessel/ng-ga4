@@ -123,6 +123,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Validation responses are reported with `console.warn` only when
   `validationMessages` is non-empty. Previously every response was logged with
   `console.log`, which made a clean payload and a rejected one look alike.
+- The `sendEngagementOnHide` event now also fires when the page merely loses
+  focus (e.g. alt-tab to another window or application), not only when it
+  hides, and always goes out over the unload-safe transport chain
+  (`navigator.sendBeacon`, `fetch(keepalive)`, then XHR) regardless of the
+  configured `transport` — an in-flight XHR is aborted on unload and the hit
+  would otherwise be lost. A consumer on `transport: 'xhr'` will find this one
+  event class bypassing their `HttpClient` interceptors, since it never goes
+  through `HttpClient` at all.
 
 ## [0.1.0] - 2026-07-28
 

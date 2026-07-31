@@ -118,6 +118,21 @@ of the configured `transport` — `navigator.sendBeacon`, falling back to
 `fetch(keepalive)` and only then to XHR — because an in-flight XHR is
 aborted on unload and the hit would simply be lost.
 
+Inside an unfocused iframe, `document.hasFocus()` is `false` even while the
+embed is fully visible and being read, so an embedded app a user looks at but
+never clicks into accrues zero engagement time. That is correct per GA4's own
+"in focus" definition, but it is a real change in direction for consumers who
+embed this library in an iframe and expect scroll or dwell time alone to
+count.
+
+Any flush — the hide/blur event above, or an ordinary hit — also calls the
+same session-freshness logic as every other hit, which extends a live GA4
+session. In practice that means a tab left open and merely alt-tabbed between
+keeps its session alive indefinitely, where previously it would expire after
+30 minutes with no hits at all. This matches gtag.js, where any hit extends a
+session, but it is a real change in your session counts that is not
+documented anywhere else.
+
 Expect these numbers to trend close to, not match exactly, a property also
 measured by gtag.js. Both are measured on the same definition of
 engagement — visible and focused — but the reserved `user_engagement`
