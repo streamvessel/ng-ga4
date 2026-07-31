@@ -90,13 +90,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   browser, operating system or device category, leaving those GA4 dimensions
   `(not set)`. A dependency-free user-agent parser now fills any field Client Hints
   did not supply. ([#11](https://github.com/streamvessel/ng-ga4/issues/11))
-- `engagement_time_msec` reflects real foreground time instead of a constant
+- `engagement_time_msec` reflects real engaged time instead of a constant
   `100` on every hit. GA4 derives average engagement time, engaged sessions,
   engagement rate and therefore bounce rate from this field, so every one of
   those metrics was wrong, not merely imprecise. Each hit now reports the time
-  elapsed since the previous hit — the same interval gtag.js tracks as `_et` —
-  measured from page visibility, not window focus, so the numbers stay
-  comparable with a gtag-measured property.
+  elapsed since the previous hit, not a running total — the same interval
+  gtag.js tracks as `_et` — accrued only while the page is both visible and
+  focused, matching GA4's own definition of engagement: switching to another
+  window or application stops the clock even though the tab itself stays
+  visible.
   ([#14](https://github.com/streamvessel/ng-ga4/issues/14))
 - The trailing chunk of engagement time is no longer lost. A visit that fired
   only the initial `page_view` reported ~0 ms of engagement however long the

@@ -87,30 +87,41 @@ bootstrapApplication(AppComponent, {
 
 `engagement_time_msec` drives GA4's average engagement time, engaged
 sessions, engagement rate and, by extension, bounce rate. This library
-measures real foreground time between hits: each `page_view` or custom
-event reports the time elapsed since the previous hit, the same interval
-gtag.js tracks as `_et`.
+measures real engaged time between hits: each `page_view` or custom event
+reports the time elapsed since the previous hit, not a running total —
+the same interval gtag.js tracks as `_et`.
 
-"Foreground" means page visibility, not window focus — a visible tab
-behind another window still counts. That's deliberate, matching gtag.js's
-own visibility-based timer, so these numbers stay comparable with a
-gtag-measured property.
+Time only accrues while the page is both visible *and* focused, matching
+how GA4 itself defines user engagement: "the amount of time someone
+spends with your web page in focus." Switching tabs, switching to another
+window or application, and minimising the browser all stop the clock —
+even a window switch that leaves this tab visible in the background, which
+`visibilitychange` alone would never catch. Switching back to the tab and
+refocusing it resumes accumulation.
 
 A visit that only fires the initial `page_view` would otherwise report
 almost no engagement time, however long the user stayed, and read as a
-bounce. `sendEngagementOnHide` (default `true`) sends an event on page
-hide, carrying the time since the last hit; `false` opts out, at the cost
-of under-reporting engagement. That event can't be named `user_engagement`
-— the Measurement Protocol reserves that name, and gtag.js is exempt only
-because it posts to Google's internal `/g/collect` endpoint, not the
-Measurement Protocol — so it ships as an ordinary custom event,
-`engagementEventName`, default `'page_engagement'`, visible in Events
-reports. It always goes out over `navigator.sendBeacon`, regardless of the
-configured `transport`, since an in-flight XHR is aborted on unload and
-the hit would simply be lost.
+bounce. `sendEngagementOnHide` (default `true`) sends an event when the
+page is hidden or loses focus, carrying the time since the last hit;
+`false` opts out, at the cost of under-reporting engagement. Because
+losing focus already stops the clock, it flushes this event too, exactly
+as hiding the page does — a blur with nothing accrued sends nothing, but
+one that did accrue time does, so it's expected to see a hit fire in the
+network tab the moment a user clicks away to another window, not only
+when they switch tabs or close the page. That event can't be named
+`user_engagement` — the Measurement Protocol reserves that name, and
+gtag.js is exempt only because it posts to Google's internal `/g/collect`
+endpoint, not the Measurement Protocol — so it ships as an ordinary custom
+event, `engagementEventName`, default `'page_engagement'`, visible in
+Events reports. It always goes out over `navigator.sendBeacon`, regardless
+of the configured `transport`, since an in-flight XHR is aborted on
+unload and the hit would simply be lost.
 
 Expect these numbers to trend close to, not match exactly, a property also
-measured by gtag.js.
+measured by gtag.js. Both are measured on the same definition of
+engagement — visible and focused — but the reserved `user_engagement`
+event name above is out of reach for this library, which is one likely
+source of any remaining gap.
 
 ### Interop with gtag.js
 
