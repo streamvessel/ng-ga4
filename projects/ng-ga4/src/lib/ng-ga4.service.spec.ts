@@ -763,6 +763,27 @@ describe('NgGa4Service', () => {
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
+        // pagehide's listener calls setEngaged(false) before flushing — the
+        // bfcache guard — so a bfcache restore minutes later can't have that
+        // dead time reopened and counted as foreground time. Nothing else in
+        // this suite dispatches pagehide, so nothing else exercises that call.
+        it('closes the engaged interval on pagehide so time afterwards does not count', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            window.dispatchEvent(new Event('pagehide'));
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            // Simulates a bfcache restore: time passes with the interval already
+            // closed by setEngaged(false), and nothing re-engaged it.
+            jasmine.clock().tick(10000);
+
+            service.trackEvent('after_pagehide');
+            expect(sentParams()['engagement_time_msec']).toBe(0);
+        });
+
         // pagehide often follows visibilitychange. The accumulator is already
         // drained by the first flush, so the second must be silent — that is the
         // deduplication, rather than a separate guard.
@@ -817,7 +838,7 @@ describe('NgGa4Service', () => {
             expect(sentParams()['engagement_time_msec']).toBe(700);
         });
 
-        it('does not send when sendEngagementOnHide is false', async () => {
+        it('does not send when sendEngagementOnHide is false, but keeps the accrued time for later', async () => {
             reconfigureTestBed({ sendEngagementOnHide: false });
             await service.init();
             jasmine.clock().tick(4000);
@@ -825,6 +846,12 @@ describe('NgGa4Service', () => {
             (service as any).flushEngagement();
 
             httpMock.expectNone(() => true);
+
+            // The sendEngagementOnHide guard sits above consumeEngagementTime()
+            // precisely so a no-op flush does not drain it — the time must still
+            // be there for the next real hit to report.
+            service.trackEvent('later');
+            expect(sentParams()['engagement_time_msec']).toBe(4000);
         });
 
         it('honours a custom engagementEventName', async () => {
@@ -838,6 +865,42 @@ describe('NgGa4Service', () => {
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.body.events[0].name).toBe('dwell');
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        // engagementEventName's JSDoc says it cannot be 'user_engagement' (the
+        // Measurement Protocol reserves that name, along with these others), but
+        // nothing validated that before this spec — GA4 returns 2xx and silently
+        // drops a hit carrying a reserved or empty name, the worst failure mode.
+        it('warns and falls back to page_engagement for an empty engagementEventName', async () => {
+            spyOn(console, 'warn');
+            reconfigureTestBed({ engagementEventName: '' });
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/^\[ng-ga4\].*engagementEventName/));
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe('page_engagement');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('warns and falls back to page_engagement for each reserved Measurement Protocol event name', async () => {
+            spyOn(console, 'warn');
+            for (const reserved of ['user_engagement', 'session_start', 'first_visit', 'first_open']) {
+                reconfigureTestBed({ engagementEventName: reserved });
+                observeFlushViaXhr();
+                await service.init();
+                jasmine.clock().tick(4000);
+
+                (service as any).flushEngagement();
+
+                expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(new RegExp(`^\\[ng-ga4\\].*${reserved}`)));
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                expect(req.request.body.events[0].name).toBe('page_engagement');
+                req.flush('', { status: 204, statusText: 'No Content' });
+            }
         });
 
         it('flushes when a visibilitychange to hidden fires', async () => {

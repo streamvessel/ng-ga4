@@ -572,7 +572,7 @@ export class NgGa4Service implements OnDestroy {
             this.ensureSession();
         }
         this.sendToGA4([{
-            name: this.config.engagementEventName ?? 'page_engagement',
+            name: this.resolveEngagementEventName(),
             params: {
                 engagement_time_msec: engagementTime,
                 session_id: this.sessionId,
@@ -583,6 +583,22 @@ export class NgGa4Service implements OnDestroy {
                 ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
             }
         }], true);
+    }
+
+    // Follows resolveClientIdSource(): validated once here, not trusted verbatim.
+    // GA4 returns 2xx and silently drops a hit carrying a reserved event name —
+    // the worst failure mode, since nothing in the response reveals it happened.
+    private resolveEngagementEventName(): string {
+        const configured = this.config.engagementEventName;
+        if (configured === undefined) {
+            return 'page_engagement';
+        }
+        const reservedMpEventNames = ['user_engagement', 'session_start', 'first_visit', 'first_open'];
+        if (configured !== '' && !reservedMpEventNames.includes(configured)) {
+            return configured;
+        }
+        console.warn(`[ng-ga4] Invalid engagementEventName "${configured}", falling back to "page_engagement".`);
+        return 'page_engagement';
     }
 
     private ensureSession(): void {
