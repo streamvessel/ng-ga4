@@ -1,5 +1,6 @@
-import { PLATFORM_ID } from '@angular/core';
+import { Injector, NgZone, PLATFORM_ID } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
+import { HttpClient } from '@angular/common/http';
 import { HttpClientTestingModule, HttpTestingController, TestRequest } from '@angular/common/http/testing';
 import { Router, NavigationEnd, NavigationStart } from '@angular/router';
 import { Subject } from 'rxjs';
@@ -1194,6 +1195,40 @@ describe('NgGa4Service', () => {
             service.trackEvent('after_pageshow');
             expect(sentParams()['engagement_time_msec']).toBe(3000);
         });
+
+        // The headline documented behaviour ("a flush extends the session") had no
+        // spec proving it directly — every other flush spec asserts on the outgoing
+        // event, not on the session-freshness side effect. ga_last_activity moving
+        // forward is exactly what keeps a tab that is merely alt-tabbed between
+        // (never closed, never hit) from expiring after 30 minutes.
+        it('extends the session by writing a newer ga_last_activity on flush', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            const activityAtInit = Number(mockLocalStorage['ga_last_activity']);
+
+            jasmine.clock().tick(5000);
+            (service as any).flushEngagement();
+
+            expect(Number(mockLocalStorage['ga_last_activity'])).toBeGreaterThan(activityAtInit);
+
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+        });
+    });
+
+    // monotonicNow() is stubbed to Date.now() in every other spec (see the
+    // comment in configureTestBed) so jasmine.clock().tick() can drive it — the
+    // real performance.now() path, including the Math.round() that keeps
+    // engagement_time_msec an integer, otherwise has zero coverage anywhere.
+    describe('monotonicNow() (real implementation)', () => {
+        it('returns a non-negative integer from the real clock', () => {
+            (service as any).monotonicNow.and.callThrough();
+
+            const value = (service as any).monotonicNow();
+
+            expect(Number.isInteger(value)).toBe(true);
+            expect(value).toBeGreaterThanOrEqual(0);
+        });
     });
 
     // isPageEngaged() is stubbed wholesale everywhere else in this suite (see the
@@ -1426,6 +1461,52 @@ describe('NgGa4Service', () => {
             service.ngOnDestroy();
 
             expect(listeners.length).toBe(0);
+        });
+
+        // Every spec above hand-seeds mockLocalStorage to stand in for "another
+        // tab". This one builds a second, independently constructed NgGa4Service
+        // over the same mocked localStorage and lets it roll its own session for
+        // real, exercising the actual adoption mechanism two real tabs rely on
+        // rather than a stand-in for it.
+        it('adopts a session rolled by a second, real NgGa4Service instance sharing storage', async () => {
+            await service.init();
+
+            const second = Injector.create({
+                providers: [
+                    NgGa4Service,
+                    // Shares this spec's HttpClient (and therefore httpMock) rather than
+                    // standing up a second one — there is only one network to assert on.
+                    { provide: HttpClient, useValue: TestBed.inject(HttpClient) },
+                    { provide: Router, useValue: { events: new Subject<any>().asObservable() } },
+                    // 'storage' skips the _ga cookie entirely: this second instance has
+                    // no getCookieJar/setCookie spies of its own (those are only wired
+                    // onto `service` in configureTestBed), so touching the real
+                    // document.cookie here would leak between specs.
+                    { provide: NG_GA4_CONFIG, useValue: { ...defaultConfig, clientIdSource: 'storage' } },
+                    { provide: PLATFORM_ID, useValue: 'browser' },
+                    { provide: NgZone, useValue: TestBed.inject(NgZone) }
+                ]
+            }).get(NgGa4Service);
+
+            await second.init();
+            // Both instances now hold the same session read from shared storage.
+            // Advance past the timeout so second's own roll, below, is a real one.
+            jasmine.clock().tick(31 * 60 * 1000);
+            second.trackEvent('tab_b_rolls');
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            service.trackEvent('tab_a_after_roll');
+            const params = sentParams();
+            expect(params['session_id']).toBe((second as any).sessionId);
+            expect(params['session_number']).toBe((second as any).sessionNumber);
+
+            // Cleanup: `second` registered its own visibilitychange/focus/blur/
+            // pageshow/pagehide listeners on the real document/window (unlike
+            // `service`, it isn't destroyed by the top-level afterEach), which would
+            // otherwise leak into later specs the same way the afterEach comment
+            // above warns about for `service`.
+            second.ngOnDestroy();
         });
     });
 
