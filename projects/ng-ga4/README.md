@@ -113,9 +113,10 @@ when they switch tabs or close the page. That event can't be named
 gtag.js is exempt only because it posts to Google's internal `/g/collect`
 endpoint, not the Measurement Protocol — so it ships as an ordinary custom
 event, `engagementEventName`, default `'page_engagement'`, visible in
-Events reports. It always goes out over `navigator.sendBeacon`, regardless
-of the configured `transport`, since an in-flight XHR is aborted on
-unload and the hit would simply be lost.
+Events reports. It always takes the unload-safe transport path regardless
+of the configured `transport` — `navigator.sendBeacon`, falling back to
+`fetch(keepalive)` and only then to XHR — because an in-flight XHR is
+aborted on unload and the hit would simply be lost.
 
 Expect these numbers to trend close to, not match exactly, a property also
 measured by gtag.js. Both are measured on the same definition of
