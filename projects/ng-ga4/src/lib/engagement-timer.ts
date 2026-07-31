@@ -6,43 +6,49 @@
 // imprecise. gtag.js measures real foreground time between hits and sends it
 // as `_et`; this measures the same thing.
 //
+// "Engaged" here means visible *and* focused — GA4 defines engagement as time
+// the page is in focus, not merely time it is visible, and stops the clock
+// the moment focus moves to another window or application even if the tab
+// itself stays visible. The caller is responsible for combining those two
+// signals; this class only tracks open/closed spans of whatever it is told.
+//
 // The clock arrives as a constructor parameter rather than being read from
 // `Date.now()` directly, so tests can advance it between calls to simulate
 // a live, controllable clock — the only way to unit-test interval accumulation.
 
 export class EngagementTimer {
     private accumulated = 0;
-    private visibleSince: number | null;
+    private engagedSince: number | null;
 
-    constructor(private readonly now: () => number, visible: boolean) {
-        this.visibleSince = visible ? now() : null;
+    constructor(private readonly now: () => number, engaged: boolean) {
+        this.engagedSince = engaged ? now() : null;
     }
 
-    setVisible(visible: boolean): void {
-        if (visible) {
+    setEngaged(engaged: boolean): void {
+        if (engaged) {
             // Guard against a redundant call: restarting the interval would
             // silently discard the time accrued since it opened.
-            if (this.visibleSince === null) {
-                this.visibleSince = this.now();
+            if (this.engagedSince === null) {
+                this.engagedSince = this.now();
             }
             return;
         }
-        if (this.visibleSince !== null) {
-            this.accumulated += this.elapsedSince(this.visibleSince);
-            this.visibleSince = null;
+        if (this.engagedSince !== null) {
+            this.accumulated += this.elapsedSince(this.engagedSince);
+            this.engagedSince = null;
         }
     }
 
     /**
-     * Milliseconds visible since the last call. Resets, and reopens the interval
-     * when still visible, so no time is double-counted or lost across hits.
+     * Milliseconds engaged since the last call. Resets, and reopens the interval
+     * when still engaged, so no time is double-counted or lost across hits.
      */
     consume(): number {
         let total = this.accumulated;
         this.accumulated = 0;
-        if (this.visibleSince !== null) {
-            total += this.elapsedSince(this.visibleSince);
-            this.visibleSince = this.now();
+        if (this.engagedSince !== null) {
+            total += this.elapsedSince(this.engagedSince);
+            this.engagedSince = this.now();
         }
         return total;
     }

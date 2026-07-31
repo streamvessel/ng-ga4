@@ -33,6 +33,8 @@ export class NgGa4Service implements OnDestroy {
     private routerSubscription: Subscription;
     private visibilityListener?: () => void;
     private pagehideListener?: () => void;
+    private focusListener?: () => void;
+    private blurListener?: () => void;
     private chromeStorageListener?: (changes: Record<string, { newValue?: unknown }>, areaName: string) => void;
     // The hide-time event has no page path of its own — it names the page the
     // trailing time was accrued on, which is whatever page_view fired last.
@@ -70,7 +72,7 @@ export class NgGa4Service implements OnDestroy {
 
         // Created here rather than in the constructor: the constructor also runs
         // on the server, where `document` does not exist.
-        this.engagement = new EngagementTimer(() => Date.now(), this.isPageVisible());
+        this.engagement = new EngagementTimer(() => Date.now(), this.isPageEngaged());
 
         const clientId = await this.loadOrCreateClientId();
         this.sessionNumber = await this.loadSessionNumber();
@@ -100,6 +102,12 @@ export class NgGa4Service implements OnDestroy {
         }
         if (this.pagehideListener && typeof window !== 'undefined') {
             window.removeEventListener('pagehide', this.pagehideListener);
+        }
+        if (this.focusListener && typeof window !== 'undefined') {
+            window.removeEventListener('focus', this.focusListener);
+        }
+        if (this.blurListener && typeof window !== 'undefined') {
+            window.removeEventListener('blur', this.blurListener);
         }
         if (this.chromeStorageListener && chrome?.storage?.onChanged) {
             chrome.storage.onChanged.removeListener(this.chromeStorageListener);
@@ -331,8 +339,18 @@ export class NgGa4Service implements OnDestroy {
         return typeof window !== 'undefined' && window.location ? window.location.protocol : '';
     }
 
-    private isPageVisible(): boolean {
-        return typeof document === 'undefined' || document.visibilityState !== 'hidden';
+    // GA4 counts engagement as time the page is *in focus*, not merely visible —
+    // a tab left visible behind another window is not engaged. Both signals are
+    // needed: visibilitychange alone misses window and application switches.
+    private isPageEngaged(): boolean {
+        if (typeof document === 'undefined') {
+            return true;
+        }
+        const visible = document.visibilityState !== 'hidden';
+        // hasFocus() is unavailable in some embedded contexts; assume focused
+        // rather than silently reporting zero engagement everywhere.
+        const focused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+        return visible && focused;
     }
 
     private logHttpError(err: any): void {
@@ -469,24 +487,33 @@ export class NgGa4Service implements OnDestroy {
         if (typeof document === 'undefined' || typeof window === 'undefined') {
             return;
         }
-        this.visibilityListener = () => {
-            const visible = this.isPageVisible();
-            this.engagement?.setVisible(visible);
-            if (!visible) {
+        // visibilitychange, focus and blur all bear on the same question — is the
+        // page engaged right now — so they share one handler. visibilitychange
+        // alone would miss a window/application switch that leaves this tab
+        // visible but not focused; focus/blur alone would miss a tab switch.
+        const onEngagementChange = () => {
+            const engaged = this.isPageEngaged();
+            this.engagement?.setEngaged(engaged);
+            if (!engaged) {
                 this.flushEngagement();
             }
         };
+        this.visibilityListener = onEngagementChange;
+        this.focusListener = onEngagementChange;
+        this.blurListener = onEngagementChange;
         // pagehide covers cross-document navigation and tab close, where a hidden
         // visibilitychange may not be delivered. unload/beforeunload would be the
         // obvious fallback for that, but iOS Safari drops those too, which is why
-        // pagehide is what's actually wired here. setVisible(false) closes the
+        // pagehide is what's actually wired here. setEngaged(false) closes the
         // interval before flushing so a bfcache restore minutes later can't have
         // that dead time reopened and counted as foreground time.
         this.pagehideListener = () => {
-            this.engagement?.setVisible(false);
+            this.engagement?.setEngaged(false);
             this.flushEngagement();
         };
         document.addEventListener('visibilitychange', this.visibilityListener);
+        window.addEventListener('focus', this.focusListener);
+        window.addEventListener('blur', this.blurListener);
         window.addEventListener('pagehide', this.pagehideListener);
     }
 

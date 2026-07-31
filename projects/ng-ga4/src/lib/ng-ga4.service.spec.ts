@@ -40,6 +40,7 @@ describe('NgGa4Service', () => {
     let writtenCookies: string[];
     let cookieAcceptsDomain: (domain: string) => boolean;
     let cookiesEnabled: boolean;
+    let pageEngaged: boolean;
 
     function configureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
         // Reset here, not just in the top-level beforeEach, so a reconfigureTestBed()
@@ -49,6 +50,12 @@ describe('NgGa4Service', () => {
         writtenCookies = [];
         cookieAcceptsDomain = () => true;
         cookiesEnabled = true;
+        // Headless Chrome (as Karma runs it) reports document.hasFocus() === false,
+        // which would otherwise start every timer disengaged and make the whole
+        // engagement suite depend on window focus the CI runner never has. Stubbed
+        // via a controllable flag, not a one-off spyOn, so individual specs can flip
+        // it (Jasmine forbids spying on an already-spied method) to exercise blur.
+        pageEngaged = true;
 
         routerEvents$ = new Subject<any>();
 
@@ -71,6 +78,11 @@ describe('NgGa4Service', () => {
 
         service = TestBed.inject(NgGa4Service);
         httpMock = TestBed.inject(HttpTestingController);
+
+        // See the pageEngaged comment above: real hasFocus() is not controllable
+        // (or even reliably true) under headless Karma, so the seam is stubbed here
+        // for every spec, the same way getCookieJar/setCookie are below.
+        spyOn(service as any, 'isPageEngaged').and.callFake(() => pageEngaged);
 
         // The service reads and writes cookies through seams precisely so tests can
         // stub them; mutating document.cookie for real would leak between specs and
@@ -160,12 +172,13 @@ describe('NgGa4Service', () => {
     });
 
     afterEach(() => {
-        // Specs that call init() register a visibilitychange/pagehide listener pair
-        // on the real document/window. Without this, ~120 specs' worth of listeners
-        // accumulate across the Karma page, each retaining a dead service and its
-        // injector — benign under headless Chrome (always visibilityState:
-        // 'visible') but a leak that would flush through un-spied transports and
-        // fire real requests at google-analytics.com in a headed or backgrounded run.
+        // Specs that call init() register visibilitychange/pagehide/focus/blur
+        // listeners on the real document/window. Without this, ~120 specs' worth of
+        // listeners accumulate across the Karma page, each retaining a dead service
+        // and its injector — benign under headless Chrome (isPageEngaged is stubbed,
+        // see pageEngaged above) but a leak that would flush through un-spied
+        // transports and fire real requests at google-analytics.com in a headed or
+        // backgrounded run.
         service?.ngOnDestroy();
         httpMock.verify();
         jasmine.clock().uninstall();
@@ -776,12 +789,58 @@ describe('NgGa4Service', () => {
             await service.init();
             jasmine.clock().tick(6000);
 
-            spyOn(service as any, 'isPageVisible').and.returnValue(false);
+            pageEngaged = false;
             document.dispatchEvent(new Event('visibilitychange'));
 
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.body.events[0].params.engagement_time_msec).toBe(6000);
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        // Switching to another window or application leaves this tab visible but
+        // unfocused — visibilitychange never fires, so this is the case that
+        // motivates isPageEngaged() combining both signals in the first place.
+        it('does not accrue time while the window is blurred', async () => {
+            pageEngaged = false;
+            await service.init();
+
+            jasmine.clock().tick(9000);
+            service.trackEvent('after_blur');
+
+            expect(sentParams()['engagement_time_msec']).toBe(0);
+        });
+
+        it('flushes the accrued engagement time when a blur event fires', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(8000);
+
+            pageEngaged = false;
+            window.dispatchEvent(new Event('blur'));
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe('page_engagement');
+            expect(req.request.body.events[0].params.engagement_time_msec).toBe(8000);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('resumes accumulation when a focus event follows a blur', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(2000);
+
+            pageEngaged = false;
+            window.dispatchEvent(new Event('blur'));
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            jasmine.clock().tick(4000);   // blurred — must not count
+            pageEngaged = true;
+            window.dispatchEvent(new Event('focus'));
+            jasmine.clock().tick(3000);   // engaged again
+
+            service.trackEvent('after_focus');
+            expect(sentParams()['engagement_time_msec']).toBe(3000);
         });
 
         it('forces the beacon transport for the hide flush even under transport: xhr', async () => {
@@ -861,6 +920,8 @@ describe('NgGa4Service', () => {
 
             expect(documentRemove).toHaveBeenCalledWith('visibilitychange', (service as any).visibilityListener);
             expect(windowRemove).toHaveBeenCalledWith('pagehide', (service as any).pagehideListener);
+            expect(windowRemove).toHaveBeenCalledWith('focus', (service as any).focusListener);
+            expect(windowRemove).toHaveBeenCalledWith('blur', (service as any).blurListener);
         });
     });
 

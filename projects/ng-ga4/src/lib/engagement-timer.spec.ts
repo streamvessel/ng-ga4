@@ -8,27 +8,27 @@ describe('EngagementTimer', () => {
         now = 1000;
     });
 
-    it('accumulates time while visible', () => {
+    it('accumulates time while engaged', () => {
         const timer = new EngagementTimer(clock, true);
         now = 4000;
 
         expect(timer.consume()).toBe(3000);
     });
 
-    it('accumulates nothing when constructed hidden', () => {
+    it('accumulates nothing when constructed disengaged', () => {
         const timer = new EngagementTimer(clock, false);
         now = 4000;
 
         expect(timer.consume()).toBe(0);
     });
 
-    it('stops accumulating while hidden and resumes when shown', () => {
+    it('stops accumulating while disengaged and resumes when engaged', () => {
         const timer = new EngagementTimer(clock, true);
         now = 3000;
-        timer.setVisible(false);
-        now = 9000;              // hidden for 6s — must not count
-        timer.setVisible(true);
-        now = 11000;             // visible again for 2s
+        timer.setEngaged(false);
+        now = 9000;              // disengaged for 6s — must not count
+        timer.setEngaged(true);
+        now = 11000;             // engaged again for 2s
 
         expect(timer.consume()).toBe(4000);
     });
@@ -36,7 +36,7 @@ describe('EngagementTimer', () => {
     // consume() resets, so the next hit reports time since the previous hit —
     // the same semantic as gtag's _et. A running total would multiply-count the
     // same seconds across every event in a session.
-    it('resets on consume and keeps counting when still visible', () => {
+    it('resets on consume and keeps counting when still engaged', () => {
         const timer = new EngagementTimer(clock, true);
         now = 3000;
         expect(timer.consume()).toBe(2000);
@@ -53,31 +53,31 @@ describe('EngagementTimer', () => {
         expect(timer.consume()).toBe(0);
     });
 
-    it('folds the open interval in when hidden, and consume after that adds nothing', () => {
+    it('folds the open interval in when disengaged, and consume after that adds nothing', () => {
         const timer = new EngagementTimer(clock, true);
         now = 2500;
-        timer.setVisible(false);
+        timer.setEngaged(false);
         now = 8000;
 
         expect(timer.consume()).toBe(1500);
         expect(timer.consume()).toBe(0);
     });
 
-    it('ignores a redundant setVisible(true)', () => {
+    it('ignores a redundant setEngaged(true)', () => {
         const timer = new EngagementTimer(clock, true);
         now = 2000;
-        timer.setVisible(true);   // already visible — must not restart the interval
+        timer.setEngaged(true);   // already engaged — must not restart the interval
         now = 3000;
 
         expect(timer.consume()).toBe(2000);
     });
 
-    it('ignores a redundant setVisible(false)', () => {
+    it('ignores a redundant setEngaged(false)', () => {
         const timer = new EngagementTimer(clock, true);
         now = 2000;
-        timer.setVisible(false);
+        timer.setEngaged(false);
         now = 5000;
-        timer.setVisible(false);
+        timer.setEngaged(false);
 
         expect(timer.consume()).toBe(1000);
     });
@@ -91,18 +91,18 @@ describe('EngagementTimer', () => {
         expect(timer.consume()).toBe(0);
     });
 
-    // Real visibilitychange traffic is not one clean hide/show pair — a user
+    // Real engagement traffic is not one clean disengage/engage pair — a user
     // alt-tabbing repeatedly produces several spans before the next hit.
-    it('sums several visible spans before a single consume', () => {
+    it('sums several engaged spans before a single consume', () => {
         const timer = new EngagementTimer(clock, true);
-        now = 2000;               // visible 1000→2000, +1000
-        timer.setVisible(false);
+        now = 2000;               // engaged 1000→2000, +1000
+        timer.setEngaged(false);
         now = 3000;
-        timer.setVisible(true);   // visible 3000→4000, +1000
+        timer.setEngaged(true);   // engaged 3000→4000, +1000
         now = 4000;
-        timer.setVisible(false);
+        timer.setEngaged(false);
         now = 5000;
-        timer.setVisible(true);   // visible 5000→6000, +1000
+        timer.setEngaged(true);   // engaged 5000→6000, +1000
         now = 6000;
 
         expect(timer.consume()).toBe(3000);
