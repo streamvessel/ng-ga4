@@ -1137,6 +1137,24 @@ describe('NgGa4Service', () => {
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
+        // lastPagePath used to default to '/', so with siteUrl configured and no
+        // router-driven page_view — an extension popup, a non-routed app,
+        // initialNavigation: 'disabled' — every hide-time event was attributed to
+        // siteUrl + '/', a page nobody actually visited. It now starts null and
+        // falls back to window.location.href instead, the same as the no-siteUrl path.
+        it('falls back to window.location.href when no page_view has fired yet, even with siteUrl configured', async () => {
+            reconfigureTestBed({ siteUrl: 'https://example.com' });
+            observeFlushViaXhr();
+            await service.init();
+
+            jasmine.clock().tick(5000);
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.page_location).toBe(window.location.href);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
         it('removes its listeners on destroy', async () => {
             await service.init();
             const documentRemove = spyOn(document, 'removeEventListener').and.callThrough();
@@ -1148,6 +1166,33 @@ describe('NgGa4Service', () => {
             expect(windowRemove).toHaveBeenCalledWith('pagehide', (service as any).pagehideListener);
             expect(windowRemove).toHaveBeenCalledWith('focus', (service as any).focusListener);
             expect(windowRemove).toHaveBeenCalledWith('blur', (service as any).blurListener);
+            expect(windowRemove).toHaveBeenCalledWith('pageshow', (service as any).pageshowListener);
+        });
+
+        // bfcache restore: pagehide already closed the interval on the way out.
+        // pageshow is the dedicated restore signal, wired to the same handler as
+        // focus, so a browser that fires pageshow but not focus/visibilitychange on
+        // restore still resumes accumulation rather than reporting zero engagement
+        // for the rest of the document's life — reopening depended entirely on
+        // visibilitychange or focus firing before this, and neither is guaranteed on
+        // every bfcache restore path.
+        it('resumes accumulation on pageshow after a pagehide, without focus or visibilitychange firing', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            window.dispatchEvent(new Event('pagehide'));
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            jasmine.clock().tick(10000);   // hidden — nothing has reopened it yet
+
+            pageEngaged = true;
+            window.dispatchEvent(new Event('pageshow'));
+            jasmine.clock().tick(3000);   // engaged again after the bfcache restore
+
+            service.trackEvent('after_pageshow');
+            expect(sentParams()['engagement_time_msec']).toBe(3000);
         });
     });
 

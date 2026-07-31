@@ -1,4 +1,4 @@
-import { Inject, Injectable, OnDestroy, PLATFORM_ID } from '@angular/core';
+import { Inject, Injectable, NgZone, OnDestroy, PLATFORM_ID } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { isPlatformBrowser } from '@angular/common';
 import { NavigationEnd, Router } from '@angular/router';
@@ -35,14 +35,17 @@ export class NgGa4Service implements OnDestroy {
     private pagehideListener?: () => void;
     private focusListener?: () => void;
     private blurListener?: () => void;
+    private pageshowListener?: () => void;
     private chromeStorageListener?: (changes: Record<string, { newValue?: unknown }>, areaName: string) => void;
-    // Only read when siteUrl is configured: flushEngagement() then joins it
-    // onto siteUrl for the hide-time event's page_location, since that event
-    // has no page path of its own — this names the page the trailing time was
-    // accrued on, which is whatever page_view fired last. Without siteUrl,
-    // flushEngagement() uses window.location.href directly instead, and this
-    // field is never read.
-    private lastPagePath = '/';
+    // Only read when siteUrl is configured: flushEngagement() then joins it onto
+    // siteUrl for the hide-time event's page_location, since that event has no
+    // page path of its own — this names the page the trailing time was accrued
+    // on, which is whatever page_view fired last. Null until the first page_view
+    // — an extension popup, a non-routed app, or `initialNavigation: 'disabled'`
+    // may never fire one at all — so engagement is never attributed to a page
+    // nobody visited; flushEngagement() falls back to window.location.href in
+    // that case, the same fallback the no-siteUrl path already uses.
+    private lastPagePath: string | null = null;
     private device: Ga4Device | null = null;
     private userLocation: Ga4UserLocation | null = null;
     private pendingCalls: Array<() => void> = [];
@@ -77,6 +80,7 @@ export class NgGa4Service implements OnDestroy {
     constructor(
         private http: HttpClient,
         private router: Router,
+        private zone: NgZone,
         @Inject(NG_GA4_CONFIG) private config: NgGa4Config,
         @Inject(PLATFORM_ID) platformId: object
     ) {
@@ -141,6 +145,9 @@ export class NgGa4Service implements OnDestroy {
         }
         if (this.blurListener && typeof window !== 'undefined') {
             window.removeEventListener('blur', this.blurListener);
+        }
+        if (this.pageshowListener && typeof window !== 'undefined') {
+            window.removeEventListener('pageshow', this.pageshowListener);
         }
         if (this.chromeStorageListener && chrome?.storage?.onChanged) {
             chrome.storage.onChanged.removeListener(this.chromeStorageListener);
@@ -550,44 +557,63 @@ export class NgGa4Service implements OnDestroy {
         if (typeof document === 'undefined' || typeof window === 'undefined') {
             return;
         }
-        // visibilitychange closes the interval and flushes on disengagement — a
-        // hidden tab is a real end of the visit-so-far, worth a network hit.
-        this.visibilityListener = () => {
-            const engaged = this.isPageEngaged();
-            this.engagement?.setEngaged(engaged);
-            if (!engaged) {
+        // init() is an APP_INITIALIZER, which runs inside the Angular zone — with no
+        // NgZone escape, zone.js would patch all five handlers below and trigger a
+        // full ApplicationRef.tick() on every focus, blur, visibilitychange and
+        // pageshow, with a synchronous sendBeacon inside it. Real, uninvited jank on
+        // alt-tab in a large consumer app. Safe to run outside Angular: every handler
+        // here only mutates this service's own state and fires a beacon: nothing here
+        // touches a template or reads/writes anything change detection cares about.
+        this.zone.runOutsideAngular(() => {
+            // visibilitychange closes the interval and flushes on disengagement — a
+            // hidden tab is a real end of the visit-so-far, worth a network hit.
+            this.visibilityListener = () => {
+                const engaged = this.isPageEngaged();
+                this.engagement?.setEngaged(engaged);
+                if (!engaged) {
+                    this.flushEngagement();
+                }
+            };
+            // blur stops the clock but deliberately does not flush. MIN_ENGAGEMENT_FLUSH_MS
+            // is a floor on *accrued time*, not on flush rate, so it only suppresses window
+            // switches faster than a second of focused time — ten alt-tab cycles still
+            // measured ten network hits before this. The time is not lost: it stays in the
+            // accumulator and rides out on the next hit, or on the eventual hide/pagehide,
+            // which still fires on tab close. Sending per blur would be an event per window
+            // switch for no extra data.
+            this.blurListener = () => {
+                this.engagement?.setEngaged(false);
+            };
+            // Re-engage on refocus; shared with pageshow below since both mean the same
+            // thing — the page is back in front of the user. Nothing to flush here
+            // either, since neither event ever closes the interval, only opens it.
+            const onFocusLike = () => {
+                this.engagement?.setEngaged(this.isPageEngaged());
+            };
+            this.focusListener = onFocusLike;
+            // bfcache restore: pagehide closed the interval on the way out, and
+            // reopening it otherwise depends on visibilitychange or focus firing on
+            // the way back in. If a browser delivers neither on a particular bfcache
+            // restore path, that document would silently report zero engagement for
+            // the rest of its life — pageshow is the dedicated signal for exactly
+            // this restore, so it is not left to chance.
+            this.pageshowListener = onFocusLike;
+            // pagehide covers cross-document navigation and tab close, where a hidden
+            // visibilitychange may not be delivered. unload/beforeunload would be the
+            // obvious fallback for that, but iOS Safari drops those too, which is why
+            // pagehide is what's actually wired here. setEngaged(false) closes the
+            // interval before flushing so a bfcache restore minutes later can't have
+            // that dead time reopened and counted as foreground time.
+            this.pagehideListener = () => {
+                this.engagement?.setEngaged(false);
                 this.flushEngagement();
-            }
-        };
-        // blur stops the clock but deliberately does not flush. MIN_ENGAGEMENT_FLUSH_MS
-        // is a floor on *accrued time*, not on flush rate, so it only suppresses window
-        // switches faster than a second of focused time — ten alt-tab cycles still
-        // measured ten network hits before this. The time is not lost: it stays in the
-        // accumulator and rides out on the next hit, or on the eventual hide/pagehide,
-        // which still fires on tab close. Sending per blur would be an event per window
-        // switch for no extra data.
-        this.blurListener = () => {
-            this.engagement?.setEngaged(false);
-        };
-        // The counterpart to blur: re-engage on refocus, nothing to flush here either
-        // since focus only ever opens the interval, never closes it.
-        this.focusListener = () => {
-            this.engagement?.setEngaged(this.isPageEngaged());
-        };
-        // pagehide covers cross-document navigation and tab close, where a hidden
-        // visibilitychange may not be delivered. unload/beforeunload would be the
-        // obvious fallback for that, but iOS Safari drops those too, which is why
-        // pagehide is what's actually wired here. setEngaged(false) closes the
-        // interval before flushing so a bfcache restore minutes later can't have
-        // that dead time reopened and counted as foreground time.
-        this.pagehideListener = () => {
-            this.engagement?.setEngaged(false);
-            this.flushEngagement();
-        };
-        document.addEventListener('visibilitychange', this.visibilityListener);
-        window.addEventListener('focus', this.focusListener);
-        window.addEventListener('blur', this.blurListener);
-        window.addEventListener('pagehide', this.pagehideListener);
+            };
+            document.addEventListener('visibilitychange', this.visibilityListener);
+            window.addEventListener('focus', this.focusListener);
+            window.addEventListener('blur', this.blurListener);
+            window.addEventListener('pageshow', this.pageshowListener);
+            window.addEventListener('pagehide', this.pagehideListener);
+        });
     }
 
     // The trailing chunk of foreground time is otherwise lost: for a visit that
@@ -623,7 +649,12 @@ export class NgGa4Service implements OnDestroy {
                 engagement_time_msec: engagementTime,
                 session_id: this.sessionId,
                 session_number: this.sessionNumber,
-                page_location: this.config.siteUrl
+                // lastPagePath is null until a page_view has actually fired (or when
+                // none ever does — an extension popup, a non-routed app,
+                // initialNavigation: 'disabled') — falls back to window.location.href
+                // exactly as the no-siteUrl branch already does, rather than
+                // attributing this event to siteUrl + '/', a page nobody visited.
+                page_location: this.config.siteUrl && this.lastPagePath !== null
                     ? this.joinSiteUrl(this.config.siteUrl, this.lastPagePath)
                     : window.location.href,
                 ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
@@ -842,10 +873,13 @@ export class NgGa4Service implements OnDestroy {
                 return;
             }
             if (areaName === 'local') {
-                const number = changes['ga_session_number']?.newValue;
-                if (number !== undefined) {
-                    this.adoptSessionNumber(this.parseIntSafe(number));
-                }
+                // No `!== undefined` guard needed here, unlike the 'session' branch
+                // above: a missing key makes parseIntSafe() yield 0, and
+                // adoptSessionNumber()'s own monotonic guard (candidate > current)
+                // already no-ops on that — session numbers only ever count up from 1,
+                // so 0 can never look newer. The 'session' branch's guard is load-bearing
+                // (it gates adopting a stale id, not just a number) in a way this isn't.
+                this.adoptSessionNumber(this.parseIntSafe(changes['ga_session_number']?.newValue));
             }
         };
         chrome.storage.onChanged.addListener(this.chromeStorageListener);
