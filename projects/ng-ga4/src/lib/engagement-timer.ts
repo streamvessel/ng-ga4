@@ -53,6 +53,15 @@ export class EngagementTimer {
         return total;
     }
 
+    /** Milliseconds accrued so far, without resetting. */
+    pending(): number {
+        let total = this.accumulated;
+        if (this.engagedSince !== null) {
+            total += this.elapsedSince(this.engagedSince);
+        }
+        return total;
+    }
+
     // A clock that jumps backwards would otherwise yield a negative engagement
     // time, which GA4 has no sensible way to store.
     private elapsedSince(start: number): number {

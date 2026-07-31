@@ -84,6 +84,15 @@ describe('NgGa4Service', () => {
         // for every spec, the same way getCookieJar/setCookie are below.
         spyOn(service as any, 'isPageEngaged').and.callFake(() => pageEngaged);
 
+        // The engagement timer is built from monotonicNow() (performance.now() in
+        // production), not Date.now(), so it keeps ticking across an OS suspend —
+        // see the comment on monotonicNow(). jasmine.clock().tick() only advances
+        // the mocked Date.now(), so every engagement spec would otherwise measure
+        // 0 ms. Stubbed here, before any spec calls init() (EngagementTimer reads
+        // the clock immediately in its constructor when started engaged), so
+        // jasmine.clock().tick() keeps driving the existing specs unchanged.
+        spyOn(service as any, 'monotonicNow').and.callFake(() => Date.now());
+
         // The service reads and writes cookies through seams precisely so tests can
         // stub them; mutating document.cookie for real would leak between specs and
         // make results depend on what the Karma browser already holds on localhost.
@@ -721,6 +730,23 @@ describe('NgGa4Service', () => {
             expect(sentParams()['engagement_time_msec']).toBe(42);
         });
 
+        // The spec above only proves 42 is what gets sent, which passes even if
+        // the measured 5000ms were drained and thrown away in the same call —
+        // consumeEngagementTime() unconditionally drains the accumulator to zero,
+        // and ...params only overwrites what gets sent this hit, not what happens
+        // to the accumulator. This is the part that actually catches the bug: the
+        // measured time must survive for a later, unoverridden hit to report.
+        it('keeps the measured time when a caller overrides engagement_time_msec', async () => {
+            await service.init();
+
+            jasmine.clock().tick(5000);
+            service.trackEvent('video_progress', { engagement_time_msec: 42 });
+            expect(sentParams()['engagement_time_msec']).toBe(42);
+
+            service.trackEvent('later');
+            expect(sentParams()['engagement_time_msec']).toBe(5000);
+        });
+
         it('sends the engagement event when the page hides', async () => {
             observeFlushViaXhr();
             await service.init();
@@ -759,6 +785,36 @@ describe('NgGa4Service', () => {
             (service as any).flushEngagement();
 
             httpMock.expectNone(() => true);
+        });
+
+        // A blur/hide flush below MIN_ENGAGEMENT_FLUSH_MS is noise — someone
+        // alt-tabbing dozens of times would otherwise emit an event per switch —
+        // but the time itself must not be discarded: it stays in the accumulator
+        // and rides out on the next flush or hit.
+        it('does not flush a blur below the one-second floor', async () => {
+            await service.init();
+            jasmine.clock().tick(500);
+
+            pageEngaged = false;
+            window.dispatchEvent(new Event('blur'));
+
+            httpMock.expectNone(() => true);
+        });
+
+        it('preserves sub-floor time for a later hit instead of discarding it', async () => {
+            await service.init();
+            jasmine.clock().tick(500);
+
+            pageEngaged = false;
+            window.dispatchEvent(new Event('blur'));
+            httpMock.expectNone(() => true);
+
+            pageEngaged = true;
+            window.dispatchEvent(new Event('focus'));
+            jasmine.clock().tick(200);
+
+            service.trackEvent('after_short_blur');
+            expect(sentParams()['engagement_time_msec']).toBe(700);
         });
 
         it('does not send when sendEngagementOnHide is false', async () => {
@@ -922,6 +978,63 @@ describe('NgGa4Service', () => {
             expect(windowRemove).toHaveBeenCalledWith('pagehide', (service as any).pagehideListener);
             expect(windowRemove).toHaveBeenCalledWith('focus', (service as any).focusListener);
             expect(windowRemove).toHaveBeenCalledWith('blur', (service as any).blurListener);
+        });
+    });
+
+    // isPageEngaged() is stubbed wholesale everywhere else in this suite (see the
+    // pageEngaged comment in configureTestBed) because headless Chrome always
+    // reports document.hasFocus() === false, which would otherwise start every
+    // timer disengaged. That leaves the real predicate with zero coverage
+    // anywhere else, so it is exercised here directly — via callThrough(), which
+    // restores the spy's original implementation — against a fake document.
+    describe('isPageEngaged() (real implementation)', () => {
+        function fakeDocument(overrides: { visibilityState?: string; hasFocus?: () => boolean }): Document {
+            return {
+                visibilityState: overrides.visibilityState ?? 'visible',
+                ...(overrides.hasFocus ? { hasFocus: overrides.hasFocus } : {})
+            } as unknown as Document;
+        }
+
+        beforeEach(() => {
+            (service as any).isPageEngaged.and.callThrough();
+        });
+
+        it('is engaged when visible and focused', () => {
+            spyOn(service as any, 'getDocument').and.returnValue(
+                fakeDocument({ visibilityState: 'visible', hasFocus: () => true })
+            );
+
+            expect((service as any).isPageEngaged()).toBe(true);
+        });
+
+        it('is not engaged when visible but unfocused', () => {
+            spyOn(service as any, 'getDocument').and.returnValue(
+                fakeDocument({ visibilityState: 'visible', hasFocus: () => false })
+            );
+
+            expect((service as any).isPageEngaged()).toBe(false);
+        });
+
+        it('is not engaged when hidden, even if focused', () => {
+            spyOn(service as any, 'getDocument').and.returnValue(
+                fakeDocument({ visibilityState: 'hidden', hasFocus: () => true })
+            );
+
+            expect((service as any).isPageEngaged()).toBe(false);
+        });
+
+        it('assumes engaged when hasFocus is unavailable', () => {
+            spyOn(service as any, 'getDocument').and.returnValue(
+                fakeDocument({ visibilityState: 'visible' })
+            );
+
+            expect((service as any).isPageEngaged()).toBe(true);
+        });
+
+        it('assumes engaged when getDocument() returns undefined', () => {
+            spyOn(service as any, 'getDocument').and.returnValue(undefined);
+
+            expect((service as any).isPageEngaged()).toBe(true);
         });
     });
 

@@ -107,4 +107,35 @@ describe('EngagementTimer', () => {
 
         expect(timer.consume()).toBe(3000);
     });
+
+    describe('pending()', () => {
+        it('reports what consume() would return', () => {
+            const timer = new EngagementTimer(clock, true);
+            now = 2500;
+
+            expect(timer.pending()).toBe(1500);
+            // Still engaged and the accumulator is still empty, so consume()
+            // computes the exact same span pending() just reported.
+            expect(timer.consume()).toBe(1500);
+        });
+
+        it('does not reset any state', () => {
+            const timer = new EngagementTimer(clock, true);
+            now = 2000;
+            timer.setEngaged(false);
+            now = 5000;   // disengaged — must not count
+
+            timer.pending();
+
+            expect(timer.consume()).toBe(1000);
+        });
+
+        it('returns the same answer on repeated calls', () => {
+            const timer = new EngagementTimer(clock, true);
+            now = 3000;
+
+            expect(timer.pending()).toBe(2000);
+            expect(timer.pending()).toBe(2000);
+        });
+    });
 });

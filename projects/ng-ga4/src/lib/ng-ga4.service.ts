@@ -44,6 +44,10 @@ export class NgGa4Service implements OnDestroy {
     private pendingCalls: Array<() => void> = [];
     private engagement: EngagementTimer | null = null;
     private readonly SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+    // Below this, a flush is noise: alt-tabbing would otherwise emit an event per
+    // switch. The time is not discarded — it stays in the accumulator and rides
+    // out on the next flush or hit.
+    private readonly MIN_ENGAGEMENT_FLUSH_MS = 1000;
     // gtag.js's own default _ga lifetime.
     private readonly GA_COOKIE_MAX_AGE_SECONDS = 63072000;
     private readonly GA4_ENDPOINT = 'https://www.google-analytics.com/mp/collect';
@@ -72,7 +76,7 @@ export class NgGa4Service implements OnDestroy {
 
         // Created here rather than in the constructor: the constructor also runs
         // on the server, where `document` does not exist.
-        this.engagement = new EngagementTimer(() => Date.now(), this.isPageEngaged());
+        this.engagement = new EngagementTimer(() => this.monotonicNow(), this.isPageEngaged());
 
         const clientId = await this.loadOrCreateClientId();
         this.sessionNumber = await this.loadSessionNumber();
@@ -158,10 +162,17 @@ export class NgGa4Service implements OnDestroy {
 
         this.ensureSession();
 
+        // consumeEngagementTime() drains the accumulator to zero. If the caller
+        // already supplied engagement_time_msec, the ...params spread below would
+        // overwrite that drained value anyway — so the measured time must never be
+        // consumed in the first place, or it is lost for good rather than merely
+        // unused on this hit.
+        const callerSuppliedEngagement = params !== undefined && 'engagement_time_msec' in params;
+
         this.sendToGA4([{
             name,
             params: {
-                engagement_time_msec: this.consumeEngagementTime(),
+                ...(callerSuppliedEngagement ? {} : { engagement_time_msec: this.consumeEngagementTime() }),
                 session_id: this.sessionId,
                 session_number: this.sessionNumber,
                 ...params,
@@ -343,14 +354,30 @@ export class NgGa4Service implements OnDestroy {
     // a tab left visible behind another window is not engaged. Both signals are
     // needed: visibilitychange alone misses window and application switches.
     private isPageEngaged(): boolean {
-        if (typeof document === 'undefined') {
+        const doc = this.getDocument();
+        if (!doc) {
             return true;
         }
-        const visible = document.visibilityState !== 'hidden';
+        const visible = doc.visibilityState !== 'hidden';
         // hasFocus() is unavailable in some embedded contexts; assume focused
         // rather than silently reporting zero engagement everywhere.
-        const focused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+        const focused = typeof doc.hasFocus === 'function' ? doc.hasFocus() : true;
         return visible && focused;
+    }
+
+    private getDocument(): Document | undefined {
+        return typeof document !== 'undefined' ? document : undefined;
+    }
+
+    // Date.now() advances while the OS is suspended, so a closed laptop lid
+    // would report hours of "engagement" — no blur or visibilitychange fires to
+    // close the span while the machine sleeps. performance.now() is monotonic
+    // and generally does not advance across suspend. Rounded because it is
+    // fractional, and consumers of this timer deal in whole milliseconds.
+    private monotonicNow(): number {
+        return typeof performance !== 'undefined' && typeof performance.now === 'function'
+            ? Math.round(performance.now())
+            : Date.now();
     }
 
     private logHttpError(err: any): void {
@@ -524,12 +551,15 @@ export class NgGa4Service implements OnDestroy {
         if (this.config.sendEngagementOnHide === false || !this.clientId) {
             return;
         }
-        const engagementTime = this.consumeEngagementTime();
-        // Non-zero only. This is also what deduplicates the visibilitychange and
-        // pagehide listeners: whichever fires second finds nothing to send.
-        if (engagementTime <= 0) {
+        // Read without draining: below the floor, the time must stay in the
+        // accumulator rather than being discarded, so it rides out on the next
+        // flush or hit. This is also still what deduplicates the visibilitychange
+        // and pagehide listeners — whichever fires second finds a drained
+        // accumulator, which reports 0 via pending(), well below the floor.
+        if ((this.engagement?.pending() ?? 0) < this.MIN_ENGAGEMENT_FLUSH_MS) {
             return;
         }
+        const engagementTime = this.consumeEngagementTime();
         // Adopt before judging expiry: the in-memory timestamp can go stale while
         // this tab sits visible and idle, and judging against that stale value
         // would treat a session another tab kept alive as dead.
