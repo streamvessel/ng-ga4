@@ -47,15 +47,30 @@ export class NgGa4Service implements OnDestroy {
     private userLocation: Ga4UserLocation | null = null;
     private pendingCalls: Array<() => void> = [];
     private engagement: EngagementTimer | null = null;
+    // Resolved once, in init(), by resolveEngagementEventName() — validating on
+    // every flush would warn on every window switch for a misconfigured name.
+    private engagementEventName = 'page_engagement';
     private readonly SESSION_TIMEOUT_MS = 30 * 60 * 1000;
-    // Below this, a flush is noise: alt-tabbing would otherwise emit an event per
-    // switch. The time is not discarded — it stays in the accumulator and rides
-    // out on the next flush or hit.
+    // Below this, a flush is noise: repeated hide/show cycles would otherwise emit
+    // an event per cycle. The time is not discarded — it stays in the accumulator
+    // and rides out on the next flush or hit. Blur never reaches this at all: it
+    // does not flush regardless of how much time accrued (see registerEngagementListeners).
     private readonly MIN_ENGAGEMENT_FLUSH_MS = 1000;
     // gtag.js's own default _ga lifetime.
     private readonly GA_COOKIE_MAX_AGE_SECONDS = 63072000;
     private readonly GA4_ENDPOINT = 'https://www.google-analytics.com/mp/collect';
     private readonly GA4_DEBUG_ENDPOINT = 'https://www.google-analytics.com/debug/mp/collect';
+    // The Measurement Protocol's reserved automatically-collected/recommended event
+    // names: sending a custom event under one of these is accepted with 2xx and
+    // silently dropped. Not exhaustive of every reserved name Google documents, but
+    // covers the ones a consumer could plausibly type as an engagementEventName.
+    private readonly RESERVED_MP_EVENT_NAMES = new Set([
+        'user_engagement', 'session_start', 'first_visit', 'first_open', 'error',
+        'in_app_purchase', 'os_update', 'app_remove', 'app_update', 'app_clear_data',
+        'ad_click', 'ad_impression', 'ad_query', 'ad_exposure', 'adunit_exposure',
+        'notification_dismiss', 'notification_foreground', 'notification_open',
+        'notification_receive', 'screen_view'
+    ]);
 
     private readonly isBrowser: boolean;
 
@@ -81,6 +96,17 @@ export class NgGa4Service implements OnDestroy {
         // Created here rather than in the constructor: the constructor also runs
         // on the server, where `document` does not exist.
         this.engagement = new EngagementTimer(() => this.monotonicNow(), this.isPageEngaged());
+        // Registered immediately, not after the awaits below: collectContext()
+        // alone awaits getHighEntropyValues(), which a slow or stalled browser can
+        // hold open for a long time. A blur during that window previously had
+        // nothing observing it — no listener existed yet — so the timer kept
+        // ticking as "engaged" the whole time, one measured case reaching 120s of
+        // phantom engagement on a blurred window. flushEngagement() already guards
+        // on `!this.clientId`, so it's safe to have listeners live before clientId
+        // (and device/location context) are ready — see resolveEngagementEventName()
+        // for the one thing that must still be resolved before any flush can fire.
+        this.registerEngagementListeners();
+        this.engagementEventName = this.resolveEngagementEventName();
 
         const clientId = await this.loadOrCreateClientId();
         this.sessionNumber = await this.loadSessionNumber();
@@ -99,7 +125,6 @@ export class NgGa4Service implements OnDestroy {
                 this.trackPageView(event.urlAfterRedirects);
             });
 
-        this.registerEngagementListeners();
         this.registerSessionSyncListener();
     }
 
@@ -360,11 +385,18 @@ export class NgGa4Service implements OnDestroy {
     private isPageEngaged(): boolean {
         const doc = this.getDocument();
         if (!doc) {
-            return true;
+            // Without a document there is no visibilitychange, focus or blur target
+            // — no signal that could ever close the span. Starting "engaged" here
+            // would run the clock forever, since registerEngagementListeners() bails
+            // out in exactly this case too: nothing is watching to stop it. Narrow in
+            // practice, but this library explicitly targets MV3 service workers.
+            return false;
         }
         const visible = doc.visibilityState !== 'hidden';
         // hasFocus() is unavailable in some embedded contexts; assume focused
-        // rather than silently reporting zero engagement everywhere.
+        // rather than silently reporting zero engagement everywhere. Safe unlike
+        // the missing-document case above: visibilitychange still fires here, so
+        // there remains a signal that can end the span.
         const focused = typeof doc.hasFocus === 'function' ? doc.hasFocus() : true;
         return visible && focused;
     }
@@ -518,20 +550,30 @@ export class NgGa4Service implements OnDestroy {
         if (typeof document === 'undefined' || typeof window === 'undefined') {
             return;
         }
-        // visibilitychange, focus and blur all bear on the same question — is the
-        // page engaged right now — so they share one handler. visibilitychange
-        // alone would miss a window/application switch that leaves this tab
-        // visible but not focused; focus/blur alone would miss a tab switch.
-        const onEngagementChange = () => {
+        // visibilitychange closes the interval and flushes on disengagement — a
+        // hidden tab is a real end of the visit-so-far, worth a network hit.
+        this.visibilityListener = () => {
             const engaged = this.isPageEngaged();
             this.engagement?.setEngaged(engaged);
             if (!engaged) {
                 this.flushEngagement();
             }
         };
-        this.visibilityListener = onEngagementChange;
-        this.focusListener = onEngagementChange;
-        this.blurListener = onEngagementChange;
+        // blur stops the clock but deliberately does not flush. MIN_ENGAGEMENT_FLUSH_MS
+        // is a floor on *accrued time*, not on flush rate, so it only suppresses window
+        // switches faster than a second of focused time — ten alt-tab cycles still
+        // measured ten network hits before this. The time is not lost: it stays in the
+        // accumulator and rides out on the next hit, or on the eventual hide/pagehide,
+        // which still fires on tab close. Sending per blur would be an event per window
+        // switch for no extra data.
+        this.blurListener = () => {
+            this.engagement?.setEngaged(false);
+        };
+        // The counterpart to blur: re-engage on refocus, nothing to flush here either
+        // since focus only ever opens the interval, never closes it.
+        this.focusListener = () => {
+            this.engagement?.setEngaged(this.isPageEngaged());
+        };
         // pagehide covers cross-document navigation and tab close, where a hidden
         // visibilitychange may not be delivered. unload/beforeunload would be the
         // obvious fallback for that, but iOS Safari drops those too, which is why
@@ -576,7 +618,7 @@ export class NgGa4Service implements OnDestroy {
             this.ensureSession();
         }
         this.sendToGA4([{
-            name: this.resolveEngagementEventName(),
+            name: this.engagementEventName,
             params: {
                 engagement_time_msec: engagementTime,
                 session_id: this.sessionId,
@@ -589,20 +631,37 @@ export class NgGa4Service implements OnDestroy {
         }], true);
     }
 
-    // Follows resolveClientIdSource(): validated once here, not trusted verbatim.
-    // GA4 returns 2xx and silently drops a hit carrying a reserved event name —
-    // the worst failure mode, since nothing in the response reveals it happened.
+    // Follows resolveClientIdSource(): validated once here, not trusted verbatim,
+    // and only once — called from init(), not from flushEngagement(), so a
+    // misconfigured name warns once rather than on every window switch. GA4
+    // returns 2xx and silently drops a hit carrying an invalid or reserved event
+    // name — the worst failure mode, since nothing in the response reveals it
+    // happened. Real Measurement Protocol rules, not a guess: `ga_dwell`,
+    // `my event`, `9lives`, a 60-character name and `_x` all used to pass the old
+    // four-name blocklist and get silently dropped by GA4.
     private resolveEngagementEventName(): string {
         const configured = this.config.engagementEventName;
         if (configured === undefined) {
             return 'page_engagement';
         }
-        const reservedMpEventNames = ['user_engagement', 'session_start', 'first_visit', 'first_open'];
-        if (configured !== '' && !reservedMpEventNames.includes(configured)) {
+        if (this.isValidGa4EventName(configured)) {
             return configured;
         }
         console.warn(`[ng-ga4] Invalid engagementEventName "${configured}", falling back to "page_engagement".`);
         return 'page_engagement';
+    }
+
+    // Mirrors the Measurement Protocol's actual event-name constraints: starts
+    // with a letter, letters/digits/underscores only, at most 40 characters, not
+    // one of the three reserved prefixes, and not a reserved event name outright.
+    private isValidGa4EventName(name: string): boolean {
+        if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(name)) {
+            return false;
+        }
+        if (/^(ga_|google_|firebase_)/.test(name)) {
+            return false;
+        }
+        return !this.RESERVED_MP_EVENT_NAMES.has(name);
     }
 
     private ensureSession(): void {

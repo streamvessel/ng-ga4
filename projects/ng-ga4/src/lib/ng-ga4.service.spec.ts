@@ -808,16 +808,18 @@ describe('NgGa4Service', () => {
             httpMock.expectNone(() => true);
         });
 
-        // A blur/hide flush below MIN_ENGAGEMENT_FLUSH_MS is noise — someone
-        // alt-tabbing dozens of times would otherwise emit an event per switch —
-        // but the time itself must not be discarded: it stays in the accumulator
-        // and rides out on the next flush or hit.
-        it('does not flush a blur below the one-second floor', async () => {
+        // MIN_ENGAGEMENT_FLUSH_MS floors a visibilitychange-driven flush — someone
+        // rapidly hiding and showing the tab would otherwise emit an event per
+        // cycle — but the time itself must not be discarded: it stays in the
+        // accumulator and rides out on the next flush or hit. Blur is not the
+        // vehicle for this any more (see below): it never flushes, whatever the
+        // accrued time, so this floor now only bites visibilitychange and pagehide.
+        it('does not flush a visibilitychange below the one-second floor', async () => {
             await service.init();
             jasmine.clock().tick(500);
 
             pageEngaged = false;
-            window.dispatchEvent(new Event('blur'));
+            document.dispatchEvent(new Event('visibilitychange'));
 
             httpMock.expectNone(() => true);
         });
@@ -827,14 +829,14 @@ describe('NgGa4Service', () => {
             jasmine.clock().tick(500);
 
             pageEngaged = false;
-            window.dispatchEvent(new Event('blur'));
+            document.dispatchEvent(new Event('visibilitychange'));
             httpMock.expectNone(() => true);
 
             pageEngaged = true;
-            window.dispatchEvent(new Event('focus'));
+            document.dispatchEvent(new Event('visibilitychange'));
             jasmine.clock().tick(200);
 
-            service.trackEvent('after_short_blur');
+            service.trackEvent('after_short_hide');
             expect(sentParams()['engagement_time_msec']).toBe(700);
         });
 
@@ -888,7 +890,10 @@ describe('NgGa4Service', () => {
 
         it('warns and falls back to page_engagement for each reserved Measurement Protocol event name', async () => {
             spyOn(console, 'warn');
-            for (const reserved of ['user_engagement', 'session_start', 'first_visit', 'first_open']) {
+            // A sample of the widened reserved list, not just the original four —
+            // 'error' and 'screen_view' in particular are names a consumer could
+            // plausibly reach for without realising GA4 reserves them.
+            for (const reserved of ['user_engagement', 'session_start', 'first_visit', 'first_open', 'error', 'screen_view']) {
                 reconfigureTestBed({ engagementEventName: reserved });
                 observeFlushViaXhr();
                 await service.init();
@@ -901,6 +906,105 @@ describe('NgGa4Service', () => {
                 expect(req.request.body.events[0].name).toBe('page_engagement');
                 req.flush('', { status: 204, statusText: 'No Content' });
             }
+        });
+
+        // The old validation only checked a four-name blocklist and let everything
+        // else through verbatim. A reviewer confirmed GA4 accepts and silently
+        // drops every one of these — 2xx, no error, hit just gone.
+        it('rejects a name with the ga_ prefix', async () => {
+            spyOn(console, 'warn');
+            reconfigureTestBed({ engagementEventName: 'ga_dwell' });
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/^\[ng-ga4\].*ga_dwell/));
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe('page_engagement');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('rejects a name containing a space', async () => {
+            spyOn(console, 'warn');
+            reconfigureTestBed({ engagementEventName: 'my event' });
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe('page_engagement');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('rejects a name starting with a digit', async () => {
+            spyOn(console, 'warn');
+            reconfigureTestBed({ engagementEventName: '9lives' });
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe('page_engagement');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('rejects a name longer than 40 characters', async () => {
+            spyOn(console, 'warn');
+            reconfigureTestBed({ engagementEventName: 'a'.repeat(41) });
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe('page_engagement');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('accepts a name exactly 40 characters long', async () => {
+            spyOn(console, 'warn');
+            const name = 'a'.repeat(40);
+            reconfigureTestBed({ engagementEventName: name });
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            expect(console.warn).not.toHaveBeenCalled();
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe(name);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        // Validation runs once, in init(), not on every flush — otherwise a
+        // misconfigured name would warn on every window switch.
+        it('warns once for an invalid engagementEventName, not once per flush', async () => {
+            spyOn(console, 'warn');
+            reconfigureTestBed({ engagementEventName: 'ga_dwell' });
+            observeFlushViaXhr();
+            await service.init();
+
+            jasmine.clock().tick(4000);
+            (service as any).flushEngagement();
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            jasmine.clock().tick(4000);
+            (service as any).flushEngagement();
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            const engagementNameWarnings = (console.warn as jasmine.Spy).calls.allArgs()
+                .filter(args => /engagementEventName/.test(String(args[0])));
+            expect(engagementNameWarnings.length).toBe(1);
         });
 
         it('flushes when a visibilitychange to hidden fires', async () => {
@@ -929,29 +1033,30 @@ describe('NgGa4Service', () => {
             expect(sentParams()['engagement_time_msec']).toBe(0);
         });
 
-        it('flushes the accrued engagement time when a blur event fires', async () => {
-            observeFlushViaXhr();
+        // Inverts the old expectation: a blur used to flush immediately, which
+        // measured as ten network hits for ten alt-tab cycles. Blur now only stops
+        // the clock — the accrued time is retained in the accumulator, not sent,
+        // and shows up on whatever hit comes next.
+        it('accrues time on blur but sends nothing, until the next trackEvent', async () => {
             await service.init();
             jasmine.clock().tick(8000);
 
             pageEngaged = false;
             window.dispatchEvent(new Event('blur'));
 
-            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
-            expect(req.request.body.events[0].name).toBe('page_engagement');
-            expect(req.request.body.events[0].params.engagement_time_msec).toBe(8000);
-            req.flush('', { status: 204, statusText: 'No Content' });
+            httpMock.expectNone(() => true);
+
+            service.trackEvent('after_blur');
+            expect(sentParams()['engagement_time_msec']).toBe(8000);
         });
 
-        it('resumes accumulation when a focus event follows a blur', async () => {
-            observeFlushViaXhr();
+        it('resumes accumulation when a focus event follows a blur, keeping the pre-blur time too', async () => {
             await service.init();
             jasmine.clock().tick(2000);
 
             pageEngaged = false;
             window.dispatchEvent(new Event('blur'));
-            httpMock.expectOne((r) => r.url.includes('mp/collect'))
-                .flush('', { status: 204, statusText: 'No Content' });
+            httpMock.expectNone(() => true);   // blur never flushes — see above
 
             jasmine.clock().tick(4000);   // blurred — must not count
             pageEngaged = true;
@@ -959,7 +1064,9 @@ describe('NgGa4Service', () => {
             jasmine.clock().tick(3000);   // engaged again
 
             service.trackEvent('after_focus');
-            expect(sentParams()['engagement_time_msec']).toBe(3000);
+            // The 2000ms accrued before the blur was never flushed away, so it
+            // rides out on this hit alongside the 3000ms accrued after refocusing.
+            expect(sentParams()['engagement_time_msec']).toBe(5000);
         });
 
         it('forces the beacon transport for the hide flush even under transport: xhr', async () => {
@@ -1094,10 +1201,16 @@ describe('NgGa4Service', () => {
             expect((service as any).isPageEngaged()).toBe(true);
         });
 
-        it('assumes engaged when getDocument() returns undefined', () => {
+        // Inverted from the old expectation: starting "engaged" with no document
+        // meant nothing could ever close the span (registerEngagementListeners()
+        // bails out in exactly this case, so no listener would ever fire
+        // setEngaged(false)) — one measured case reached pending() === 300000 after
+        // five idle minutes. Without a document there is no signal that could ever
+        // end the span, so this must read as not engaged.
+        it('is not engaged when getDocument() returns undefined', () => {
             spyOn(service as any, 'getDocument').and.returnValue(undefined);
 
-            expect((service as any).isPageEngaged()).toBe(true);
+            expect((service as any).isPageEngaged()).toBe(false);
         });
     });
 
