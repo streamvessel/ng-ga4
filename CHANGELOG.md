@@ -55,21 +55,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written back out under this option, in any configuration — doing so would
   resurrect an identifier a user, or their consent tool, had deleted.
   ([#13](https://github.com/streamvessel/ng-ga4/issues/13))
-- `sendEngagementOnHide` option, default `true`, to send an event when the page
-  hides, carrying the engagement time accrued since the last hit. Without it, a
-  visit that fires only the initial `page_view` reports ~0 ms of engagement
-  however long the user actually stayed, so it never counts as an engaged
-  session and reads as a bounce — gtag.js sends its own `user_engagement` hit
-  for exactly this reason. Set it to `false` to opt out, at the cost of
-  under-reporting engagement.
+- `sendEngagementOnHide` option, default `true`: sends an event when the page
+  hides, carrying the engagement time accrued since the last hit, so a
+  single-page visit no longer reports ~0 ms of engagement and reads as a
+  bounce. Set `false` to opt out.
   ([#15](https://github.com/streamvessel/ng-ga4/issues/15))
 - `engagementEventName` option, default `'page_engagement'`, to rename that
-  hide-time event. It can't be `user_engagement`: the Measurement Protocol
-  reserves that name (along with `session_start`, `first_visit` and
-  `first_open`) and rejects it, unlike gtag.js, which is free to use it
-  because it posts to Google's internal `/g/collect` endpoint rather than the
-  Measurement Protocol — so this event arrives as an ordinary custom event and
-  appears in Events reports.
+  event. Can't be `user_engagement` — the Measurement Protocol reserves it —
+  so it appears as an ordinary custom event in Events reports. An invalid or
+  reserved name falls back to the default with a console warning.
   ([#15](https://github.com/streamvessel/ng-ga4/issues/15))
 
 ### Fixed
@@ -91,29 +85,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `(not set)`. A dependency-free user-agent parser now fills any field Client Hints
   did not supply. ([#11](https://github.com/streamvessel/ng-ga4/issues/11))
 - `engagement_time_msec` reflects real engaged time instead of a constant
-  `100` on every hit. GA4 derives average engagement time, engaged sessions,
-  engagement rate and therefore bounce rate from this field, so every one of
-  those metrics was wrong, not merely imprecise. Each hit now reports the time
-  elapsed since the previous hit, not a running total — the same interval
-  gtag.js tracks as `_et` — accrued only while the page is both visible and
-  focused, matching GA4's own definition of engagement: switching to another
-  window or application stops the clock even though the tab itself stays
-  visible.
+  `100` on every hit, so average engagement time, engaged sessions, engagement
+  rate and bounce rate are no longer wrong — see "Engagement measurement" in
+  the README.
   ([#14](https://github.com/streamvessel/ng-ga4/issues/14))
-- The trailing chunk of engagement time is no longer lost. A visit that fired
-  only the initial `page_view` reported ~0 ms of engagement however long the
-  user actually stayed, so it never counted as engaged and read as a bounce.
-  An event now fires when the page hides, carrying the time accrued since the
-  last hit (see the `sendEngagementOnHide` and `engagementEventName` options
-  above). ([#15](https://github.com/streamvessel/ng-ga4/issues/15))
-- Two tabs no longer disagree about the session forever. Session state was
-  read once at `init()` and cached in memory, so once one tab rolled to a new
-  session, every other open tab kept sending the dead session indefinitely.
-  Every hit path now re-reads persisted session state first and adopts
-  anything newer — synchronously from `localStorage` on web, and via a
-  `chrome.storage.onChanged` listener on extensions, where `chrome.storage`
-  cannot be read synchronously. Session number itself never decreases for a
-  client ID, so a stale or missing read can't roll it backwards.
+- A visit that fires only the initial `page_view` no longer reports ~0 ms of
+  engagement and reads as a bounce; the trailing time is now flushed on hide
+  (see the `sendEngagementOnHide` and `engagementEventName` options above).
+  ([#15](https://github.com/streamvessel/ng-ga4/issues/15))
+- Two tabs no longer disagree about the session forever. Session state used
+  to be cached in memory at `init()`, so once one tab rolled to a new
+  session, every other open tab kept sending the dead one indefinitely. Every
+  hit now re-reads persisted session state first and adopts anything newer
+  (see "Cross-tab session sync" in the README).
   ([#16](https://github.com/streamvessel/ng-ga4/issues/16))
 
 ### Changed
@@ -123,14 +107,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Validation responses are reported with `console.warn` only when
   `validationMessages` is non-empty. Previously every response was logged with
   `console.log`, which made a clean payload and a rejected one look alike.
-- The `sendEngagementOnHide` event now also fires when the page merely loses
-  focus (e.g. alt-tab to another window or application), not only when it
-  hides, and always goes out over the unload-safe transport chain
-  (`navigator.sendBeacon`, `fetch(keepalive)`, then XHR) regardless of the
-  configured `transport` — an in-flight XHR is aborted on unload and the hit
-  would otherwise be lost. A consumer on `transport: 'xhr'` will find this one
-  event class bypassing their `HttpClient` interceptors, since it never goes
-  through `HttpClient` at all.
+- The `sendEngagementOnHide` event always goes out over the unload-safe
+  transport chain (`navigator.sendBeacon`, `fetch(keepalive)`, then XHR)
+  regardless of the configured `transport`, since an in-flight XHR is aborted
+  on unload. A consumer on `transport: 'xhr'` will find this one event class
+  bypassing their `HttpClient` interceptors.
 
 ## [0.1.0] - 2026-07-28
 

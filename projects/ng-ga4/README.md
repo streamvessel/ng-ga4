@@ -80,85 +80,47 @@ bootstrapApplication(AppComponent, {
 | `debug` | `boolean` | No | Tag events with `debug_mode` so they appear in GA4 DebugView, and log validation problems to the console. Events are still recorded. |
 | `clientIdSource` | `'auto' \| 'cookie' \| 'storage'` | No | Where the client ID comes from on web. `'auto'` (default) reads the `_ga` cookie when present and well-formed, else `localStorage` — set `'storage'` if you don't want this library reading `_ga` at all, since doing so is itself consent-relevant, not only writing one. `'cookie'` treats `_ga` as authoritative and mints one if absent. `'storage'` is the previous behaviour. An unrecognised value logs a console warning and falls back to `'auto'`. Ignored for extensions. |
 | `writeGaCookie` | `boolean \| NgGa4CookieOptions` | No | Write `_ga` when absent or unreadable, using the client ID already on hand, on the registrable domain, with `SameSite=Lax` and (on HTTPS) `Secure` by default. Pass `{}` to write with every default, or an `NgGa4CookieOptions` object to override `domain`, `flags`, or `maxAgeSeconds` — see "Interop with gtag.js" below. Off by default. Implied by `clientIdSource: 'cookie'`; ignored for `'storage'` and extensions. |
-| `sendEngagementOnHide` | `boolean` | No | Send an event when the page hides (or is torn down via `pagehide`), carrying the engagement time accrued since the last hit — without it, a visit that only fires the initial `page_view` reports ~0 ms of engagement however long the user actually stayed, and reads as a bounce. Losing focus alone (e.g. an alt-tab) stops the clock the same way but does not trigger this event; see "Engagement measurement" below. Default `true`. |
-| `engagementEventName` | `string` | No | Event name for the hide-time event above. Default `'page_engagement'`. Validated once at startup against the Measurement Protocol's actual naming rules — see "Engagement measurement" below — since GA4 answers `2xx` and silently drops a hit with an invalid name. Can't be `user_engagement` — the Measurement Protocol reserves that name — so it arrives as an ordinary custom event and appears in Events reports. An invalid or reserved name logs a console warning once and falls back to the default. |
+| `sendEngagementOnHide` | `boolean` | No | Send an event when the page hides or is torn down (`pagehide`), carrying the engagement time accrued since the last hit. Default `true`. See "Engagement measurement" below. |
+| `engagementEventName` | `string` | No | Event name for the hide-time event above. Default `'page_engagement'`; can't be `user_engagement`. An invalid or reserved value falls back to the default with a console warning. See "Engagement measurement" below. |
 
 ### Engagement measurement
 
-`engagement_time_msec` drives GA4's average engagement time, engaged
-sessions, engagement rate and, by extension, bounce rate. This library
-measures real engaged time between hits: each `page_view` or custom event
-reports the time elapsed since the previous hit, not a running total —
-the same interval gtag.js tracks as `_et`.
+`engagement_time_msec` drives GA4's average engagement time, engaged sessions,
+engagement rate and bounce rate. Each hit reports the time elapsed *since the
+previous hit*, not a running total — the interval gtag.js tracks as `_et`.
 
-Time only accrues while the page is both visible *and* focused, matching
-how GA4 itself defines user engagement: "the amount of time someone
-spends with your web page in focus." Switching tabs, switching to another
-window or application, and minimising the browser all stop the clock —
-even a window switch that leaves this tab visible in the background, which
-`visibilitychange` alone would never catch. Switching back to the tab and
-refocusing it resumes accumulation.
+Time accrues only while the page is visible *and* focused, matching GA4's own
+definition of engagement: switching tabs or windows, or minimising the
+browser, stops the clock even though the tab may stay visible; refocusing
+resumes it. An unfocused iframe accrues zero engagement, since
+`document.hasFocus()` is `false` there even while the embed is fully visible.
 
-A visit that only fires the initial `page_view` would otherwise report
-almost no engagement time, however long the user stayed, and read as a
-bounce. `sendEngagementOnHide` (default `true`) sends an event when the
-page actually hides (a tab switch or close) or is torn down (`pagehide`),
-carrying the time since the last hit; `false` opts out, at the cost of
-under-reporting engagement. Losing focus alone — an alt-tab to another
-window or application — stops the clock the same way hiding does, but does
-**not** send anything: the accrued time simply stays in the accumulator
-and rides out on the next real hit, or on the eventual hide/`pagehide`,
-which still fires on tab close. Sending on every loss of focus would mean
-a network hit per window switch for no extra data — ten alt-tab cycles
-would otherwise be ten hits. A flush that does fire is additionally
-floored at about a second of accrued time and silently skipped below it,
-so a burst of rapid hide/show cycles doesn't emit an event per cycle
-either; as above, that time is never discarded, only deferred to the next
-flush or hit. That event can't be named `user_engagement` — the
-Measurement Protocol reserves that name, and gtag.js is exempt only
-because it posts to Google's internal `/g/collect` endpoint, not the
-Measurement Protocol — so it ships as an ordinary custom event,
-`engagementEventName`, default `'page_engagement'`, validated once at
-startup against the Measurement Protocol's actual naming rules (must start
-with a letter, letters/digits/underscores only, at most 40 characters, not
-one of the `ga_`/`google_`/`firebase_` prefixes, and not a reserved event
-name); an invalid or reserved name logs a console warning once and falls
-back to the default. It always takes the unload-safe transport path
-regardless of the configured `transport` — `navigator.sendBeacon`, falling
-back to `fetch(keepalive)` and only then to XHR — because an in-flight XHR
-is aborted on unload and the hit would simply be lost.
+Losing focus alone stops the clock but sends nothing; the accrued time stays
+in the accumulator and rides out on the next hit or the eventual hide.
+`sendEngagementOnHide` (default `true`, set `false` to disable) sends an
+event when the page actually hides or is torn down (`pagehide`), carrying
+that time — without it, a visit that only fires the initial `page_view`
+reports ~0 ms of engagement and reads as a bounce.
 
-Inside an unfocused iframe, `document.hasFocus()` is `false` even while the
-embed is fully visible and being read, so an embedded app a user looks at but
-never clicks into accrues zero engagement time. That is correct per GA4's own
-"in focus" definition, but it is a real change in direction for consumers who
-embed this library in an iframe and expect scroll or dwell time alone to
-count.
+That event can't be named `user_engagement`, which the Measurement Protocol
+reserves, so it ships as an ordinary custom event, `engagementEventName`
+(default `'page_engagement'`), visible in Events reports. The name is
+validated at startup and falls back to the default with a console warning if
+invalid, since GA4 answers `2xx` and silently drops a hit with a bad name.
+The flush always takes the unload-safe transport chain (`sendBeacon` →
+`fetch(keepalive)` → XHR), overriding a configured `transport: 'xhr'`, since
+an in-flight XHR is aborted on unload and the hit would be lost.
 
-Any flush — the hide event above, or an ordinary hit — also calls the same
-session-freshness logic as every other hit, which extends a live GA4
-session. In practice that means a tab left open and merely alt-tabbed between
-keeps its session alive indefinitely, where previously it would expire after
-30 minutes with no hits at all. This matches gtag.js, where any hit extends a
-session, but it is a real change in your session counts that is not
-documented anywhere else. One exception: a flush that fires *after* the
-session has already timed out attributes its trailing time to that expired
-session rather than rolling a new one — landing the trailing time on a
-session with no page view, and bumping session_number for a session that
-never really happened, is worse — so GA4 will show that particular session
-running longer than 30 minutes.
+Any flush — the hide event or an ordinary hit — extends a live session like
+any other hit, except one that fires after the session has already timed
+out: that trailing time is attributed to the expired session rather than
+rolling a new one, so GA4 may show it running longer than 30 minutes.
 
 Expect these numbers to trend close to, not match exactly, a property also
-measured by gtag.js. This library measures visible-*and*-focused time, per
-GA4's own definition of engagement. gtag.js is closed-source, but public
-observation of its behaviour suggests it keys off Page Visibility alone and
-does not install focus/blur handlers of its own — if that holds, a property
-instrumented with gtag.js would not stop its clock on a window switch the
-way this library does, which would make this library read systematically
-*lower*, particularly on multi-monitor and side-by-side-window setups. That
-is not a guarantee, only the likely shape of any gap, alongside the reserved
-`user_engagement` event name above being out of reach for this library
-either way.
+measured by gtag.js — and possibly read lower, since this library stops its
+clock on a plain window switch that leaves the tab visible. gtag.js is
+closed-source; public observation suggests it does not, but that is the
+likely shape of a gap, not an assertion about what it does internally.
 
 ### Interop with gtag.js
 

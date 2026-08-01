@@ -37,14 +37,8 @@ export class NgGa4Service implements OnDestroy {
     private blurListener?: () => void;
     private pageshowListener?: () => void;
     private chromeStorageListener?: (changes: Record<string, { newValue?: unknown }>, areaName: string) => void;
-    // Only read when siteUrl is configured: flushEngagement() then joins it onto
-    // siteUrl for the hide-time event's page_location, since that event has no
-    // page path of its own — this names the page the trailing time was accrued
-    // on, which is whatever page_view fired last. Null until the first page_view
-    // — an extension popup, a non-routed app, or `initialNavigation: 'disabled'`
-    // may never fire one at all — so engagement is never attributed to a page
-    // nobody visited; flushEngagement() falls back to window.location.href in
-    // that case, the same fallback the no-siteUrl path already uses.
+    // Set by trackPageView(); read by flushEngagement() to attribute the
+    // hide-time event's page_location (see flushEngagement for the null case).
     private lastPagePath: string | null = null;
     private device: Ga4Device | null = null;
     private userLocation: Ga4UserLocation | null = null;
@@ -54,19 +48,15 @@ export class NgGa4Service implements OnDestroy {
     // every flush would warn on every window switch for a misconfigured name.
     private engagementEventName = 'page_engagement';
     private readonly SESSION_TIMEOUT_MS = 30 * 60 * 1000;
-    // Below this, a flush is noise: repeated hide/show cycles would otherwise emit
-    // an event per cycle. The time is not discarded — it stays in the accumulator
-    // and rides out on the next flush or hit. Blur never reaches this at all: it
-    // does not flush regardless of how much time accrued (see registerEngagementListeners).
+    // Below this, a flush is noise — the time is not discarded, it rides out on
+    // the next flush or hit. Blur never reaches this check (see registerEngagementListeners).
     private readonly MIN_ENGAGEMENT_FLUSH_MS = 1000;
     // gtag.js's own default _ga lifetime.
     private readonly GA_COOKIE_MAX_AGE_SECONDS = 63072000;
     private readonly GA4_ENDPOINT = 'https://www.google-analytics.com/mp/collect';
     private readonly GA4_DEBUG_ENDPOINT = 'https://www.google-analytics.com/debug/mp/collect';
-    // The Measurement Protocol's reserved automatically-collected/recommended event
-    // names: sending a custom event under one of these is accepted with 2xx and
-    // silently dropped. Not exhaustive of every reserved name Google documents, but
-    // covers the ones a consumer could plausibly type as an engagementEventName.
+    // Reserved automatically-collected/recommended event names — sending a custom
+    // event under one of these is accepted with 2xx and silently dropped.
     private readonly RESERVED_MP_EVENT_NAMES = new Set([
         'user_engagement', 'session_start', 'first_visit', 'first_open', 'error',
         'in_app_purchase', 'os_update', 'app_remove', 'app_update', 'app_clear_data',
@@ -97,18 +87,15 @@ export class NgGa4Service implements OnDestroy {
         }
         this.initialized = true;
 
-        // Created here rather than in the constructor: the constructor also runs
-        // on the server, where `document` does not exist.
+        // Created here, not in the constructor: the constructor also runs on
+        // the server, where `document` does not exist.
         this.engagement = new EngagementTimer(() => this.monotonicNow(), this.isPageEngaged());
-        // Registered immediately, not after the awaits below: collectContext()
-        // alone awaits getHighEntropyValues(), which a slow or stalled browser can
-        // hold open for a long time. A blur during that window previously had
-        // nothing observing it — no listener existed yet — so the timer kept
-        // ticking as "engaged" the whole time, one measured case reaching 120s of
-        // phantom engagement on a blurred window. flushEngagement() already guards
-        // on `!this.clientId`, so it's safe to have listeners live before clientId
-        // (and device/location context) are ready — see resolveEngagementEventName()
-        // for the one thing that must still be resolved before any flush can fire.
+        // Registered before the awaits below: collectContext() awaits
+        // getHighEntropyValues(), which a slow browser can hold open for a
+        // while, and a blur during that wait would otherwise have no listener
+        // to observe it, leaving the timer ticking as "engaged" throughout.
+        // flushEngagement() already guards on `!this.clientId`, so it's safe
+        // for listeners to be live before clientId is ready.
         this.registerEngagementListeners();
         this.engagementEventName = this.resolveEngagementEventName();
 
@@ -205,14 +192,11 @@ export class NgGa4Service implements OnDestroy {
         this.sendToGA4([{
             name,
             params: {
-                // Consumed unconditionally, even though ...params below may override
-                // what gets reported: a sent hit closes the engagement interval
-                // regardless of the value it carries. Skipping the consume when the
-                // caller supplies its own engagement_time_msec would leave the
-                // accumulator open across this hit, so the *next* hit would report
-                // time since two hits ago instead of one — and a caller who overrides
-                // routinely would inflate their session total by the sum of every
-                // override.
+                // Consumed unconditionally, even though ...params below may override what
+                // gets reported: a sent hit closes the interval regardless of the value it
+                // carries. Skipping this when the caller overrides engagement_time_msec
+                // would leave the accumulator open, so the *next* hit reports time since
+                // two hits ago instead of one.
                 engagement_time_msec: this.consumeEngagementTime(),
                 session_id: this.sessionId,
                 session_number: this.sessionNumber,
@@ -267,10 +251,8 @@ export class NgGa4Service implements OnDestroy {
             this.sendForValidation(body);
         }
 
-        // forceBeacon is for sends that happen as the page goes away, where XHR is
-        // aborted and the hit is simply lost. Overriding an explicit transport
-        // choice is deliberate: losing the event outright is worse than skipping
-        // the consumer's HTTP interceptors for it.
+        // forceBeacon is for sends as the page goes away, where XHR would be aborted
+        // and the hit lost — losing the event outright is worse than skipping interceptors.
         if (this.config.transport === 'xhr' && !forceBeacon) {
             this.sendViaXhr(url, body);
             return;
@@ -391,24 +373,21 @@ export class NgGa4Service implements OnDestroy {
         return typeof window !== 'undefined' && window.location ? window.location.protocol : '';
     }
 
-    // GA4 counts engagement as time the page is *in focus*, not merely visible —
-    // a tab left visible behind another window is not engaged. Both signals are
-    // needed: visibilitychange alone misses window and application switches.
+    // GA4 counts engagement as time the page is *in focus*, not merely visible;
+    // visibilitychange alone would miss a window/app switch that leaves the tab visible.
     private isPageEngaged(): boolean {
         const doc = this.getDocument();
         if (!doc) {
-            // Without a document there is no visibilitychange, focus or blur target
-            // — no signal that could ever close the span. Starting "engaged" here
-            // would run the clock forever, since registerEngagementListeners() bails
-            // out in exactly this case too: nothing is watching to stop it. Narrow in
-            // practice, but this library explicitly targets MV3 service workers.
+            // No document means no visibilitychange/focus/blur target — nothing
+            // could ever close the span, so starting "engaged" would run the
+            // clock forever. Narrow in practice, but this library explicitly
+            // targets MV3 service workers, which have no document.
             return false;
         }
         const visible = doc.visibilityState !== 'hidden';
         // hasFocus() is unavailable in some embedded contexts; assume focused
-        // rather than silently reporting zero engagement everywhere. Safe unlike
-        // the missing-document case above: visibilitychange still fires here, so
-        // there remains a signal that can end the span.
+        // rather than silently reporting zero engagement everywhere — unlike
+        // the missing-document case above, visibilitychange still fires here.
         const focused = typeof doc.hasFocus === 'function' ? doc.hasFocus() : true;
         return visible && focused;
     }
@@ -417,11 +396,10 @@ export class NgGa4Service implements OnDestroy {
         return typeof document !== 'undefined' ? document : undefined;
     }
 
-    // Date.now() advances while the OS is suspended, so a closed laptop lid
-    // would report hours of "engagement" — no blur or visibilitychange fires to
-    // close the span while the machine sleeps. performance.now() is monotonic
-    // and generally does not advance across suspend. Rounded because it is
-    // fractional, and consumers of this timer deal in whole milliseconds.
+    // Date.now() advances while the OS is suspended, so a closed laptop lid would
+    // report hours of "engagement" — no blur or visibilitychange fires to close
+    // the span while the machine sleeps. performance.now() is monotonic and
+    // generally does not advance across suspend; rounded since it's fractional.
     private monotonicNow(): number {
         return typeof performance !== 'undefined' && typeof performance.now === 'function'
             ? Math.round(performance.now())
@@ -552,8 +530,8 @@ export class NgGa4Service implements OnDestroy {
         return typeof navigator !== 'undefined' ? navigator.userAgent : undefined;
     }
 
-    // engagement is always constructed before clientId is set, so the callers'
-    // !this.clientId guard makes this unreachable today—fallback exists if that changes.
+    // Unreachable today — engagement is constructed before clientId is set —
+    // but the fallback exists in case that ordering ever changes.
     private consumeEngagementTime(): number {
         return this.engagement?.consume() ?? 0;
     }
@@ -565,10 +543,9 @@ export class NgGa4Service implements OnDestroy {
         // init() is an APP_INITIALIZER, which runs inside the Angular zone — with no
         // NgZone escape, zone.js would patch all five handlers below and trigger a
         // full ApplicationRef.tick() on every focus, blur, visibilitychange and
-        // pageshow, with a synchronous sendBeacon inside it. Real, uninvited jank on
-        // alt-tab in a large consumer app. Safe to run outside Angular: every handler
-        // here only mutates this service's own state and fires a beacon: nothing here
-        // touches a template or reads/writes anything change detection cares about.
+        // pageshow, with a synchronous sendBeacon inside each. Safe to run outside
+        // Angular: every handler here only mutates this service's own state and
+        // fires a beacon — nothing touches a template or anything change detection cares about.
         this.zone.runOutsideAngular(() => {
             // visibilitychange closes the interval and flushes on disengagement — a
             // hidden tab is a real end of the visit-so-far, worth a network hit.
@@ -579,36 +556,28 @@ export class NgGa4Service implements OnDestroy {
                     this.flushEngagement();
                 }
             };
-            // blur stops the clock but deliberately does not flush. MIN_ENGAGEMENT_FLUSH_MS
-            // is a floor on *accrued time*, not on flush rate, so it only suppresses window
-            // switches faster than a second of focused time — ten alt-tab cycles still
-            // measured ten network hits before this. The time is not lost: it stays in the
-            // accumulator and rides out on the next hit, or on the eventual hide/pagehide,
-            // which still fires on tab close. Sending per blur would be an event per window
-            // switch for no extra data.
+            // blur stops the clock but deliberately does not flush: sending on every
+            // blur would be a network hit per window switch for no extra data. The
+            // time is not lost — it stays in the accumulator and rides out on the
+            // next hit, or on the eventual hide/pagehide, which still fires on tab close.
             this.blurListener = () => {
                 this.engagement?.setEngaged(false);
             };
-            // Re-engage on refocus; shared with pageshow below since both mean the same
-            // thing — the page is back in front of the user. Nothing to flush here
-            // either, since neither event ever closes the interval, only opens it.
+            // Shared with pageshow below — both just mean "back in front of the
+            // user." Never flushes: neither event closes the interval, only opens it.
             const onFocusLike = () => {
                 this.engagement?.setEngaged(this.isPageEngaged());
             };
             this.focusListener = onFocusLike;
-            // bfcache restore: pagehide closed the interval on the way out, and
-            // reopening it otherwise depends on visibilitychange or focus firing on
-            // the way back in. If a browser delivers neither on a particular bfcache
-            // restore path, that document would silently report zero engagement for
-            // the rest of its life — pageshow is the dedicated signal for exactly
-            // this restore, so it is not left to chance.
+            // bfcache restore: pagehide closed the interval on the way out; reopening
+            // it otherwise depends on visibilitychange or focus firing on the way back
+            // in. Not every browser delivers either, in which case the document would
+            // silently report zero engagement forever — pageshow is the dedicated signal.
             this.pageshowListener = onFocusLike;
-            // pagehide covers cross-document navigation and tab close, where a hidden
-            // visibilitychange may not be delivered. unload/beforeunload would be the
-            // obvious fallback for that, but iOS Safari drops those too, which is why
-            // pagehide is what's actually wired here. setEngaged(false) closes the
-            // interval before flushing so a bfcache restore minutes later can't have
-            // that dead time reopened and counted as foreground time.
+            // Covers cross-document navigation and tab close, where visibilitychange may
+            // not fire. unload/beforeunload would be the obvious fallback, but iOS Safari
+            // drops those too. setEngaged(false) closes the interval before flushing so a
+            // bfcache restore minutes later can't have that dead time recounted.
             this.pagehideListener = () => {
                 this.engagement?.setEngaged(false);
                 this.flushEngagement();
@@ -621,25 +590,23 @@ export class NgGa4Service implements OnDestroy {
         });
     }
 
-    // The trailing chunk of foreground time is otherwise lost: for a visit that
-    // fires only the initial page_view, that is the entire visit, which is why
-    // engagement metrics read as ~0 without this.
+    // Flushes the trailing chunk of foreground time a page_view-only visit
+    // would otherwise never report.
     private flushEngagement(): void {
         if (this.config.sendEngagementOnHide === false || !this.clientId) {
             return;
         }
-        // Read without draining: below the floor, the time must stay in the
-        // accumulator rather than being discarded, so it rides out on the next
-        // flush or hit. This is also still what deduplicates the visibilitychange
-        // and pagehide listeners — whichever fires second finds a drained
-        // accumulator, which reports 0 via pending(), well below the floor.
+        // Read without draining: below the floor, the time stays in the accumulator
+        // and rides out on the next flush or hit. This also deduplicates the
+        // visibilitychange/pagehide pair — whichever fires second finds a drained
+        // accumulator, reporting 0 via pending(), well below the floor.
         if ((this.engagement?.pending() ?? 0) < this.MIN_ENGAGEMENT_FLUSH_MS) {
             return;
         }
         const engagementTime = this.consumeEngagementTime();
-        // Adopt before judging expiry: the in-memory timestamp can go stale while
-        // this tab sits visible and idle, and judging against that stale value
-        // would treat a session another tab kept alive as dead.
+        // Adopt before judging expiry — the in-memory timestamp can go stale while
+        // this tab sits idle, and a stale value would wrongly treat a session
+        // another tab kept alive as dead.
         this.adoptPersistedSessionIfNewer();
         // The user is leaving. Rolling an already-expired session here would land
         // the trailing time in a session that never had a page view, and bump
@@ -654,11 +621,9 @@ export class NgGa4Service implements OnDestroy {
                 engagement_time_msec: engagementTime,
                 session_id: this.sessionId,
                 session_number: this.sessionNumber,
-                // lastPagePath is null until a page_view has actually fired (or when
-                // none ever does — an extension popup, a non-routed app,
-                // initialNavigation: 'disabled') — falls back to window.location.href
-                // exactly as the no-siteUrl branch already does, rather than
-                // attributing this event to siteUrl + '/', a page nobody visited.
+                // Falls back to window.location.href when no page_view has fired yet
+                // (or ever will — an extension popup, a non-routed app), so this event
+                // is never attributed to siteUrl + '/', a page nobody visited.
                 page_location: this.config.siteUrl && this.lastPagePath !== null
                     ? this.joinSiteUrl(this.config.siteUrl, this.lastPagePath)
                     : window.location.href,
@@ -667,14 +632,10 @@ export class NgGa4Service implements OnDestroy {
         }], true);
     }
 
-    // Follows resolveClientIdSource(): validated once here, not trusted verbatim,
-    // and only once — called from init(), not from flushEngagement(), so a
-    // misconfigured name warns once rather than on every window switch. GA4
-    // returns 2xx and silently drops a hit carrying an invalid or reserved event
-    // name — the worst failure mode, since nothing in the response reveals it
-    // happened. Real Measurement Protocol rules, not a guess: `ga_dwell`,
-    // `my event`, `9lives`, a 60-character name and `_x` all used to pass the old
-    // four-name blocklist and get silently dropped by GA4.
+    // Validated once here, in init(), not in flushEngagement(): a misconfigured
+    // name would otherwise warn on every window switch. GA4 returns 2xx and
+    // silently drops a hit carrying an invalid or reserved event name — the
+    // worst failure mode, since nothing in the response reveals it happened.
     private resolveEngagementEventName(): string {
         const configured = this.config.engagementEventName;
         if (configured === undefined) {
@@ -687,9 +648,7 @@ export class NgGa4Service implements OnDestroy {
         return 'page_engagement';
     }
 
-    // Mirrors the Measurement Protocol's actual event-name constraints: starts
-    // with a letter, letters/digits/underscores only, at most 40 characters, not
-    // one of the three reserved prefixes, and not a reserved event name outright.
+    // Mirrors the Measurement Protocol's actual event-name naming rules.
     private isValidGa4EventName(name: string): boolean {
         if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(name)) {
             return false;
@@ -701,7 +660,6 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private ensureSession(): void {
-        // Adopt whatever another tab wrote most recently before deciding anything.
         // Without this, in-memory state read once at init() goes stale the moment
         // any other tab rolls, and this tab sends the dead session forever.
         this.adoptPersistedSessionIfNewer();
@@ -713,10 +671,9 @@ export class NgGa4Service implements OnDestroy {
         this.saveSessionState();
     }
 
-    // Adopt whatever another tab wrote most recently. Split out of ensureSession()
-    // because the hide-time flush needs to adopt without rolling: it must decide
-    // expiry against fresh state, not against a timestamp that went stale while
-    // this tab sat visible and idle.
+    // Split out of ensureSession(): the hide-time flush needs to adopt without
+    // rolling, deciding expiry against fresh state rather than a timestamp that
+    // went stale while this tab sat visible and idle.
     private adoptPersistedSessionIfNewer(): void {
         const persisted = this.readPersistedSessionSync();
         if (!persisted || persisted.lastActivityTimestamp <= this.lastActivityTimestamp) {
@@ -746,13 +703,12 @@ export class NgGa4Service implements OnDestroy {
     }
 
     // this.sessionNumber++ is only correct because sessionNumber was refreshed
-    // immediately before each call site, not read stale. From restoreOrStartSession()
-    // it's whatever loadSessionNumber() just read at init(). From ensureSession() it's
-    // whatever adoptPersistedSessionIfNewer() just adopted synchronously on the web
-    // path — or, on the extension path, whatever the last chrome.storage.onChanged
-    // push already landed (a weaker, eventually-consistent guarantee; see
-    // registerSessionSyncListener). Easy to "simplify" back into the cross-tab bug
-    // from #16 by incrementing a value that was never refreshed.
+    // immediately before each call site, not read stale: restoreOrStartSession()
+    // just read it via loadSessionNumber(); ensureSession() just adopted it via
+    // adoptPersistedSessionIfNewer() (web) or the last chrome.storage.onChanged
+    // push (extension — weaker, eventually-consistent; see
+    // registerSessionSyncListener). Easy to "simplify" back into the cross-tab
+    // bug from #16 by incrementing a value that was never refreshed.
     private startNewSession(): void {
         this.sessionId = Math.floor(Date.now() / 1000).toString();
         this.sessionNumber++;
@@ -832,11 +788,10 @@ export class NgGa4Service implements OnDestroy {
         return null;
     }
 
-    // Synchronous counterpart to loadSessionState, for the hit path.
-    //
-    // Returns null on the extension path: chrome.storage is async, so there is
-    // nothing to read synchronously there — freshness comes from the
-    // chrome.storage.onChanged listener instead.
+    // Synchronous counterpart to loadSessionState, for the hit path. Returns null
+    // on the extension path: chrome.storage is async, so there is nothing to read
+    // synchronously there — freshness comes from the chrome.storage.onChanged
+    // listener instead.
     private readPersistedSessionSync(): { sessionId: string; sessionNumber: number; lastActivityTimestamp: number } | null {
         if (this.config.isExtension && chrome?.storage?.session) {
             return null;
@@ -865,10 +820,9 @@ export class NgGa4Service implements OnDestroy {
             if (areaName === 'session') {
                 const id = changes['ga_session_id']?.newValue;
                 const activity = this.parseIntSafe(changes['ga_last_activity']?.newValue);
-                // Both fields gated on the same freshness signal — Chrome only reports
-                // keys that actually changed, so a push carrying ga_session_id without
-                // ga_last_activity must not adopt the id on no signal at all, and two
-                // contexts rolling in the same second must not each adopt the other's id.
+                // Both fields gated on the same freshness signal — Chrome only reports keys
+                // that actually changed, so a push missing ga_last_activity must not adopt
+                // the id, and two contexts rolling in the same second must not adopt each other's.
                 if (activity > this.lastActivityTimestamp) {
                     if (typeof id === 'string' && id) {
                         this.sessionId = id;
@@ -878,12 +832,9 @@ export class NgGa4Service implements OnDestroy {
                 return;
             }
             if (areaName === 'local') {
-                // No `!== undefined` guard needed here, unlike the 'session' branch
-                // above: a missing key makes parseIntSafe() yield 0, and
-                // adoptSessionNumber()'s own monotonic guard (candidate > current)
-                // already no-ops on that — session numbers only ever count up from 1,
-                // so 0 can never look newer. The 'session' branch's guard is load-bearing
-                // (it gates adopting a stale id, not just a number) in a way this isn't.
+                // No `!== undefined` guard needed here, unlike 'session' above: a missing
+                // key yields 0 from parseIntSafe(), and adoptSessionNumber()'s monotonic
+                // guard already no-ops on that, since session numbers only count up from 1.
                 this.adoptSessionNumber(this.parseIntSafe(changes['ga_session_number']?.newValue));
             }
         };
@@ -893,19 +844,12 @@ export class NgGa4Service implements OnDestroy {
     // Anything another context wrote during init()'s awaits arrived before the
     // listener existed, and chrome.storage.onChanged does not replay. On the
     // extension path the synchronous read returns null by design, so without this
-    // one catch-up read a session rolled during that window would be missed
-    // entirely — and then overwritten by this instance's next saveSessionState().
-    //
-    // The id/timestamp pair and the session number are adopted independently,
-    // not gated on the same check: this mirrors registerSessionSyncListener's own
-    // 'session' vs 'local' handling, where the number has no freshness gate
-    // beyond adoptSessionNumber()'s own monotonic guard.
-    //
-    // Not wrapped in try/catch: loadSessionState() and loadSessionNumber() already
-    // catch their own chrome.storage failures internally and fall back to
-    // localStorage (see their implementations), the same convention
-    // restoreOrStartSession() and init() itself already rely on — an APP_INITIALIZER
-    // must not throw, but these loaders already guarantee that.
+    // catch-up read a session rolled during that window would be missed entirely
+    // — and then overwritten by this instance's next saveSessionState(). The
+    // id/timestamp pair and the session number are adopted independently,
+    // mirroring registerSessionSyncListener's own 'session' vs 'local' split. Not
+    // wrapped in try/catch: loadSessionState() and loadSessionNumber() already
+    // catch their own chrome.storage failures and fall back to localStorage.
     private async catchUpSessionState(): Promise<void> {
         const state = await this.loadSessionState();
         if (state && state.lastActivityTimestamp > this.lastActivityTimestamp) {

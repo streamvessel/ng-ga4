@@ -89,44 +89,25 @@ export interface NgGa4Config {
     /**
      * Send an event when the page actually hides (a tab switch or close) or is
      * torn down (`pagehide`), carrying the engagement time accrued since the
-     * last hit. Default `true`.
+     * last hit — without it, a single-page visit reports ~0 ms of engagement
+     * and reads as a bounce. Default `true`.
      *
-     * Without this, a visit that fires only the initial `page_view` reports ~0 ms
-     * of engagement however long the user actually stayed — so it never counts as
-     * an engaged session and reads as a bounce. gtag.js sends its own
-     * `user_engagement` hit for exactly this reason.
-     *
-     * Losing focus alone (e.g. alt-tab to another window or application) stops
-     * the engagement clock the same way hiding does, but does *not* send this
-     * event — only an actual hide (`visibilitychange` to hidden) or `pagehide`
-     * does. The accrued time from a mere focus loss is not lost: it stays in
-     * the accumulator and rides out on the next hit or the eventual
-     * hide/`pagehide`. Sending on every focus loss would mean a network hit
-     * per window switch for no extra data. This event always takes the
-     * unload-safe transport (`navigator.sendBeacon`, falling back to
-     * `fetch(keepalive)` then XHR) regardless of the configured `transport`,
-     * since an in-flight XHR is aborted on unload and the hit would simply be
-     * lost. A consumer on `transport: 'xhr'` should expect this one event
-     * class to bypass their `HttpClient` interceptors.
+     * Losing focus alone (e.g. alt-tab) stops the clock the same way but does
+     * not send this event; the accrued time rides out on the next hit or the
+     * eventual hide. Always sent over the unload-safe transport chain
+     * (`sendBeacon` → `fetch(keepalive)` → XHR), regardless of the configured
+     * `transport`. See "Engagement measurement" in the README for the full
+     * reasoning.
      */
     sendEngagementOnHide?: boolean;
 
     /**
      * Event name used for that hide-time event. Default `'page_engagement'`.
-     *
-     * Validated once, at startup, against the Measurement Protocol's actual
-     * naming rules: must start with a letter, contain only letters/digits/
-     * underscores, be at most 40 characters, not start with `ga_`, `google_`
-     * or `firebase_`, and not be a reserved event name — including but not
-     * limited to `user_engagement` (along with `session_start`, `first_visit`
-     * and `first_open`), which the Measurement Protocol reserves and rejects.
-     * gtag.js is not bound by that because it posts to Google's internal
-     * `/g/collect` rather than the Measurement Protocol. GA4 answers `2xx` and
-     * silently drops a hit carrying an invalid name, so an invalid or reserved
-     * value here logs a console warning once and falls back to the default
-     * rather than being sent verbatim. The consequence of choosing a valid,
-     * non-reserved name is that ours arrives as an ordinary custom event and
-     * appears in Events reports.
+     * Can't be `user_engagement` — the Measurement Protocol reserves it — so
+     * it appears as an ordinary custom event in Events reports. Validated at
+     * startup against the Measurement Protocol's naming rules; an invalid or
+     * reserved value logs a console warning and falls back to the default.
+     * See "Engagement measurement" in the README for the full reasoning.
      */
     engagementEventName?: string;
 }
