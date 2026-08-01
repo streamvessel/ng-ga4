@@ -1468,6 +1468,56 @@ describe('NgGa4Service', () => {
             expect(listeners.length).toBe(0);
         });
 
+        // The gap catchUpSessionState() closes: init()'s own awaits
+        // (loadOrCreateClientId, collectContext's getHighEntropyValues, etc.) all
+        // run before registerSessionSyncListener() exists, so a session rolled by
+        // another extension context during that window is never delivered —
+        // chrome.storage.onChanged does not replay past changes to a listener
+        // registered after the fact. Exercised by mutating the mock's backing
+        // store directly (not via onChanged, which is exactly what can't cover
+        // this) and invoking the catch-up path once init() has finished — the
+        // same effect a mutation landing mid-await would have.
+        it('catches up on a session rolled in chrome.storage during init()', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const chromeLocal: Record<string, any> = { ga_client_id: 'ext-id', ga_session_number: '3' };
+            const chromeSession: Record<string, any> = { ga_session_id: 'S1', ga_last_activity: String(MOCK_TIMESTAMP) };
+            setupChromeMock(chromeLocal, chromeSession);
+
+            await service.init();
+
+            // Another context rolls the session while nothing was yet listening.
+            chromeSession['ga_session_id'] = 'S2';
+            chromeSession['ga_last_activity'] = String(MOCK_TIMESTAMP + 60000);
+            chromeLocal['ga_session_number'] = '4';
+
+            await (service as any).catchUpSessionState();
+
+            service.trackEvent('after_catch_up');
+            const params = sentParams();
+            expect(params['session_id']).toBe('S2');
+            expect(params['session_number']).toBe(4);
+        });
+
+        // adoptSessionNumber()'s own monotonic guard applies during catch-up just
+        // as it does for registerSessionSyncListener's 'local' branch: session
+        // numbers only ever count up, so a stale or corrupted read must not
+        // clobber a known-good in-memory value.
+        it('does not lower the session number during catch-up', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const chromeLocal: Record<string, any> = { ga_client_id: 'ext-id', ga_session_number: '3' };
+            const chromeSession: Record<string, any> = { ga_session_id: 'S1', ga_last_activity: String(MOCK_TIMESTAMP) };
+            setupChromeMock(chromeLocal, chromeSession);
+
+            await service.init();
+
+            chromeLocal['ga_session_number'] = '1';
+
+            await (service as any).catchUpSessionState();
+
+            service.trackEvent('after_catch_up');
+            expect(sentParams()['session_number']).toBe(3);
+        });
+
         // Every spec above hand-seeds mockLocalStorage to stand in for "another
         // tab". This one builds a second, independently constructed NgGa4Service
         // over the same mocked localStorage and lets it roll its own session for

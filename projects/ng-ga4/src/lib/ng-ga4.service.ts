@@ -130,6 +130,10 @@ export class NgGa4Service implements OnDestroy {
             });
 
         this.registerSessionSyncListener();
+        // Closes the gap between "another context wrote during the awaits above"
+        // and "the listener just registered above can observe it" — see
+        // catchUpSessionState() for why this can't simply be moved earlier instead.
+        await this.catchUpSessionState();
     }
 
     ngOnDestroy(): void {
@@ -884,6 +888,31 @@ export class NgGa4Service implements OnDestroy {
             }
         };
         chrome.storage.onChanged.addListener(this.chromeStorageListener);
+    }
+
+    // Anything another context wrote during init()'s awaits arrived before the
+    // listener existed, and chrome.storage.onChanged does not replay. On the
+    // extension path the synchronous read returns null by design, so without this
+    // one catch-up read a session rolled during that window would be missed
+    // entirely — and then overwritten by this instance's next saveSessionState().
+    //
+    // The id/timestamp pair and the session number are adopted independently,
+    // not gated on the same check: this mirrors registerSessionSyncListener's own
+    // 'session' vs 'local' handling, where the number has no freshness gate
+    // beyond adoptSessionNumber()'s own monotonic guard.
+    //
+    // Not wrapped in try/catch: loadSessionState() and loadSessionNumber() already
+    // catch their own chrome.storage failures internally and fall back to
+    // localStorage (see their implementations), the same convention
+    // restoreOrStartSession() and init() itself already rely on — an APP_INITIALIZER
+    // must not throw, but these loaders already guarantee that.
+    private async catchUpSessionState(): Promise<void> {
+        const state = await this.loadSessionState();
+        if (state && state.lastActivityTimestamp > this.lastActivityTimestamp) {
+            this.sessionId = state.sessionId;
+            this.lastActivityTimestamp = state.lastActivityTimestamp;
+        }
+        this.adoptSessionNumber(await this.loadSessionNumber());
     }
 
     private saveSessionState(): void {
