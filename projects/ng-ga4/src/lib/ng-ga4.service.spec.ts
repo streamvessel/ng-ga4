@@ -731,21 +731,26 @@ describe('NgGa4Service', () => {
             expect(sentParams()['engagement_time_msec']).toBe(42);
         });
 
-        // The spec above only proves 42 is what gets sent, which passes even if
-        // the measured 5000ms were drained and thrown away in the same call —
-        // consumeEngagementTime() unconditionally drains the accumulator to zero,
-        // and ...params only overwrites what gets sent this hit, not what happens
-        // to the accumulator. This is the part that actually catches the bug: the
-        // measured time must survive for a later, unoverridden hit to report.
-        it('keeps the measured time when a caller overrides engagement_time_msec', async () => {
+        // The spec above only proves 42 is what gets sent, which passes whether or
+        // not the measured 5000ms was also drained. This is the part that actually
+        // catches the bug: a sent hit closes the engagement interval no matter what
+        // value it reports, so the override hit must still consume the accumulator.
+        // If it didn't, the interval would stay open across it, and this later,
+        // unoverridden hit would report time since *two* hits ago (42's hit plus
+        // this one) instead of just the time since the override — silently
+        // inflating the session total by the sum of every override a caller makes.
+        it('consumes the measured time even when the caller overrides the reported value', async () => {
             await service.init();
 
             jasmine.clock().tick(5000);
             service.trackEvent('video_progress', { engagement_time_msec: 42 });
             expect(sentParams()['engagement_time_msec']).toBe(42);
 
+            // No time ticks here: the override hit already closed the interval, so
+            // this immediate next hit has accrued nothing since it and must report 0
+            // — not the stale 5000ms the accumulator held before the override.
             service.trackEvent('later');
-            expect(sentParams()['engagement_time_msec']).toBe(5000);
+            expect(sentParams()['engagement_time_msec']).toBe(0);
         });
 
         it('sends the engagement event when the page hides', async () => {

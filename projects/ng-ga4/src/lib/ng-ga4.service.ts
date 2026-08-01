@@ -198,17 +198,18 @@ export class NgGa4Service implements OnDestroy {
 
         this.ensureSession();
 
-        // consumeEngagementTime() drains the accumulator to zero. If the caller
-        // already supplied engagement_time_msec, the ...params spread below would
-        // overwrite that drained value anyway — so the measured time must never be
-        // consumed in the first place, or it is lost for good rather than merely
-        // unused on this hit.
-        const callerSuppliedEngagement = params !== undefined && 'engagement_time_msec' in params;
-
         this.sendToGA4([{
             name,
             params: {
-                ...(callerSuppliedEngagement ? {} : { engagement_time_msec: this.consumeEngagementTime() }),
+                // Consumed unconditionally, even though ...params below may override
+                // what gets reported: a sent hit closes the engagement interval
+                // regardless of the value it carries. Skipping the consume when the
+                // caller supplies its own engagement_time_msec would leave the
+                // accumulator open across this hit, so the *next* hit would report
+                // time since two hits ago instead of one — and a caller who overrides
+                // routinely would inflate their session total by the sum of every
+                // override.
+                engagement_time_msec: this.consumeEngagementTime(),
                 session_id: this.sessionId,
                 session_number: this.sessionNumber,
                 ...params,
