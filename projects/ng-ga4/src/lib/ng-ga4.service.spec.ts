@@ -1,5 +1,6 @@
-import { PLATFORM_ID } from '@angular/core';
+import { Injector, NgZone, PLATFORM_ID } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
+import { HttpClient } from '@angular/common/http';
 import { HttpClientTestingModule, HttpTestingController, TestRequest } from '@angular/common/http/testing';
 import { Router, NavigationEnd, NavigationStart } from '@angular/router';
 import { Subject } from 'rxjs';
@@ -40,6 +41,7 @@ describe('NgGa4Service', () => {
     let writtenCookies: string[];
     let cookieAcceptsDomain: (domain: string) => boolean;
     let cookiesEnabled: boolean;
+    let pageEngaged: boolean;
 
     function configureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
         // Reset here, not just in the top-level beforeEach, so a reconfigureTestBed()
@@ -49,6 +51,12 @@ describe('NgGa4Service', () => {
         writtenCookies = [];
         cookieAcceptsDomain = () => true;
         cookiesEnabled = true;
+        // Headless Chrome (as Karma runs it) reports document.hasFocus() === false,
+        // which would otherwise start every timer disengaged and make the whole
+        // engagement suite depend on window focus the CI runner never has. Stubbed
+        // via a controllable flag, not a one-off spyOn, so individual specs can flip
+        // it (Jasmine forbids spying on an already-spied method) to exercise blur.
+        pageEngaged = true;
 
         routerEvents$ = new Subject<any>();
 
@@ -71,6 +79,20 @@ describe('NgGa4Service', () => {
 
         service = TestBed.inject(NgGa4Service);
         httpMock = TestBed.inject(HttpTestingController);
+
+        // See the pageEngaged comment above: real hasFocus() is not controllable
+        // (or even reliably true) under headless Karma, so the seam is stubbed here
+        // for every spec, the same way getCookieJar/setCookie are below.
+        spyOn(service as any, 'isPageEngaged').and.callFake(() => pageEngaged);
+
+        // The engagement timer is built from monotonicNow() (performance.now() in
+        // production), not Date.now(), so it keeps ticking across an OS suspend —
+        // see the comment on monotonicNow(). jasmine.clock().tick() only advances
+        // the mocked Date.now(), so every engagement spec would otherwise measure
+        // 0 ms. Stubbed here, before any spec calls init() (EngagementTimer reads
+        // the clock immediately in its constructor when started engaged), so
+        // jasmine.clock().tick() keeps driving the existing specs unchanged.
+        spyOn(service as any, 'monotonicNow').and.callFake(() => Date.now());
 
         // The service reads and writes cookies through seams precisely so tests can
         // stub them; mutating document.cookie for real would leak between specs and
@@ -108,6 +130,10 @@ describe('NgGa4Service', () => {
         httpMock.verify();
         jasmine.clock().install();
         jasmine.clock().mockDate(new Date(MOCK_TIMESTAMP));
+        // The outgoing instance's listeners (visibilitychange/pagehide) would
+        // otherwise dangle on document/window past this reconfigure — see the
+        // afterEach below for why that matters.
+        service?.ngOnDestroy();
         configureTestBed(config, platformId);
     }
 
@@ -156,6 +182,14 @@ describe('NgGa4Service', () => {
     });
 
     afterEach(() => {
+        // Specs that call init() register visibilitychange/pagehide/focus/blur
+        // listeners on the real document/window. Without this, ~120 specs' worth of
+        // listeners accumulate across the Karma page, each retaining a dead service
+        // and its injector — benign under headless Chrome (isPageEngaged is stubbed,
+        // see pageEngaged above) but a leak that would flush through un-spied
+        // transports and fire real requests at google-analytics.com in a headed or
+        // backgrounded run.
+        service?.ngOnDestroy();
         httpMock.verify();
         jasmine.clock().uninstall();
         clearChromeMock();
@@ -636,6 +670,901 @@ describe('NgGa4Service', () => {
         });
     });
 
+    // --- engagement time ---
+
+    describe('engagement time', () => {
+        function sentParams(): Record<string, any> {
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const params = req.request.body.events[0].params;
+            req.flush('', { status: 204, statusText: 'No Content' });
+            return params;
+        }
+
+        // The hide flush forces the beacon transport so it survives unload, which
+        // means it never reaches HttpClient and HttpTestingController cannot see it.
+        // Neutralise both beacon and fetch(keepalive) so the send falls through to
+        // XHR, where the suite can assert on the payload. That the flush really does
+        // force the beacon is covered separately by its own spec.
+        function observeFlushViaXhr(): void {
+            spyOn(service as any, 'getNavigator').and.returnValue({});
+            spyOn(service as any, 'getFetch').and.returnValue(undefined);
+        }
+
+        it('reports the foreground time accrued before a page view', async () => {
+            await service.init();
+
+            jasmine.clock().tick(5000);
+            service.trackPageView('/test');
+
+            expect(sentParams()['engagement_time_msec']).toBe(5000);
+        });
+
+        it('reports the foreground time accrued before a custom event', async () => {
+            await service.init();
+
+            jasmine.clock().tick(2500);
+            service.trackEvent('cta_click');
+
+            expect(sentParams()['engagement_time_msec']).toBe(2500);
+        });
+
+        // Time since the previous hit, as gtag's _et reports — not a running
+        // total, which would multiply-count the same seconds.
+        it('reports only the time since the previous hit', async () => {
+            await service.init();
+
+            jasmine.clock().tick(3000);
+            service.trackEvent('first');
+            expect(sentParams()['engagement_time_msec']).toBe(3000);
+
+            jasmine.clock().tick(1000);
+            service.trackEvent('second');
+            expect(sentParams()['engagement_time_msec']).toBe(1000);
+        });
+
+        it('lets an explicit caller value override the measurement', async () => {
+            await service.init();
+
+            jasmine.clock().tick(5000);
+            service.trackEvent('video_progress', { engagement_time_msec: 42 });
+
+            expect(sentParams()['engagement_time_msec']).toBe(42);
+        });
+
+        // The spec above only proves 42 is what gets sent, which passes whether or
+        // not the measured 5000ms was also drained. This is the part that actually
+        // catches the bug: a sent hit closes the engagement interval no matter what
+        // value it reports, so the override hit must still consume the accumulator.
+        // If it didn't, the interval would stay open across it, and this later,
+        // unoverridden hit would report time since *two* hits ago (42's hit plus
+        // this one) instead of just the time since the override — silently
+        // inflating the session total by the sum of every override a caller makes.
+        it('consumes the measured time even when the caller overrides the reported value', async () => {
+            await service.init();
+
+            jasmine.clock().tick(5000);
+            service.trackEvent('video_progress', { engagement_time_msec: 42 });
+            expect(sentParams()['engagement_time_msec']).toBe(42);
+
+            // No time ticks here: the override hit already closed the interval, so
+            // this immediate next hit has accrued nothing since it and must report 0
+            // — not the stale 5000ms the accumulator held before the override.
+            service.trackEvent('later');
+            expect(sentParams()['engagement_time_msec']).toBe(0);
+        });
+
+        it('sends the engagement event when the page hides', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(7000);
+
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const event = req.request.body.events[0];
+            expect(event.name).toBe('page_engagement');
+            expect(event.params.engagement_time_msec).toBe(7000);
+            expect(event.params.session_id).toBeDefined();
+            expect(event.params.page_location).toBeDefined();
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        // pagehide's listener calls setEngaged(false) before flushing — the
+        // bfcache guard — so a bfcache restore minutes later can't have that
+        // dead time reopened and counted as foreground time. Nothing else in
+        // this suite dispatches pagehide, so nothing else exercises that call.
+        it('closes the engaged interval on pagehide so time afterwards does not count', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            window.dispatchEvent(new Event('pagehide'));
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            // Simulates a bfcache restore: time passes with the interval already
+            // closed by setEngaged(false), and nothing re-engaged it.
+            jasmine.clock().tick(10000);
+
+            service.trackEvent('after_pagehide');
+            expect(sentParams()['engagement_time_msec']).toBe(0);
+        });
+
+        // pagehide often follows visibilitychange. The accumulator is already
+        // drained by the first flush, so the second must be silent — that is the
+        // deduplication, rather than a separate guard.
+        it('sends nothing on a second flush with no time accrued', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(3000);
+
+            (service as any).flushEngagement();
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            (service as any).flushEngagement();
+            httpMock.expectNone(() => true);
+        });
+
+        it('sends nothing when no time has accrued at all', async () => {
+            await service.init();
+
+            (service as any).flushEngagement();
+
+            httpMock.expectNone(() => true);
+        });
+
+        // MIN_ENGAGEMENT_FLUSH_MS floors a visibilitychange-driven flush — someone
+        // rapidly hiding and showing the tab would otherwise emit an event per
+        // cycle — but the time itself must not be discarded: it stays in the
+        // accumulator and rides out on the next flush or hit. Blur is not the
+        // vehicle for this any more (see below): it never flushes, whatever the
+        // accrued time, so this floor now only bites visibilitychange and pagehide.
+        it('does not flush a visibilitychange below the one-second floor', async () => {
+            await service.init();
+            jasmine.clock().tick(500);
+
+            pageEngaged = false;
+            document.dispatchEvent(new Event('visibilitychange'));
+
+            httpMock.expectNone(() => true);
+        });
+
+        it('preserves sub-floor time for a later hit instead of discarding it', async () => {
+            await service.init();
+            jasmine.clock().tick(500);
+
+            pageEngaged = false;
+            document.dispatchEvent(new Event('visibilitychange'));
+            httpMock.expectNone(() => true);
+
+            pageEngaged = true;
+            document.dispatchEvent(new Event('visibilitychange'));
+            jasmine.clock().tick(200);
+
+            service.trackEvent('after_short_hide');
+            expect(sentParams()['engagement_time_msec']).toBe(700);
+        });
+
+        it('does not send when sendEngagementOnHide is false, but keeps the accrued time for later', async () => {
+            reconfigureTestBed({ sendEngagementOnHide: false });
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            httpMock.expectNone(() => true);
+
+            // The sendEngagementOnHide guard sits above consumeEngagementTime()
+            // precisely so a no-op flush does not drain it — the time must still
+            // be there for the next real hit to report.
+            service.trackEvent('later');
+            expect(sentParams()['engagement_time_msec']).toBe(4000);
+        });
+
+        it('honours a custom engagementEventName', async () => {
+            reconfigureTestBed({ engagementEventName: 'dwell' });
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe('dwell');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        // engagementEventName's JSDoc says it cannot be 'user_engagement' (the
+        // Measurement Protocol reserves that name, along with these others), but
+        // nothing validated that before this spec — GA4 returns 2xx and silently
+        // drops a hit carrying a reserved or empty name, the worst failure mode.
+        it('warns and falls back to page_engagement for an empty engagementEventName', async () => {
+            spyOn(console, 'warn');
+            reconfigureTestBed({ engagementEventName: '' });
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/^\[ng-ga4\].*engagementEventName/));
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe('page_engagement');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('warns and falls back to page_engagement for each reserved Measurement Protocol event name', async () => {
+            spyOn(console, 'warn');
+            // A sample of the widened reserved list, not just the original four —
+            // 'error' and 'screen_view' in particular are names a consumer could
+            // plausibly reach for without realising GA4 reserves them.
+            for (const reserved of ['user_engagement', 'session_start', 'first_visit', 'first_open', 'error', 'screen_view']) {
+                reconfigureTestBed({ engagementEventName: reserved });
+                observeFlushViaXhr();
+                await service.init();
+                jasmine.clock().tick(4000);
+
+                (service as any).flushEngagement();
+
+                expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(new RegExp(`^\\[ng-ga4\\].*${reserved}`)));
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                expect(req.request.body.events[0].name).toBe('page_engagement');
+                req.flush('', { status: 204, statusText: 'No Content' });
+            }
+        });
+
+        // The old validation only checked a four-name blocklist and let everything
+        // else through verbatim. A reviewer confirmed GA4 accepts and silently
+        // drops every one of these — 2xx, no error, hit just gone.
+        it('rejects a name with the ga_ prefix', async () => {
+            spyOn(console, 'warn');
+            reconfigureTestBed({ engagementEventName: 'ga_dwell' });
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/^\[ng-ga4\].*ga_dwell/));
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe('page_engagement');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('rejects a name containing a space', async () => {
+            spyOn(console, 'warn');
+            reconfigureTestBed({ engagementEventName: 'my event' });
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe('page_engagement');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('rejects a name starting with a digit', async () => {
+            spyOn(console, 'warn');
+            reconfigureTestBed({ engagementEventName: '9lives' });
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe('page_engagement');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('rejects a name longer than 40 characters', async () => {
+            spyOn(console, 'warn');
+            reconfigureTestBed({ engagementEventName: 'a'.repeat(41) });
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe('page_engagement');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('accepts a name exactly 40 characters long', async () => {
+            spyOn(console, 'warn');
+            const name = 'a'.repeat(40);
+            reconfigureTestBed({ engagementEventName: name });
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            (service as any).flushEngagement();
+
+            expect(console.warn).not.toHaveBeenCalled();
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].name).toBe(name);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        // Validation runs once, in init(), not on every flush — otherwise a
+        // misconfigured name would warn on every window switch.
+        it('warns once for an invalid engagementEventName, not once per flush', async () => {
+            spyOn(console, 'warn');
+            reconfigureTestBed({ engagementEventName: 'ga_dwell' });
+            observeFlushViaXhr();
+            await service.init();
+
+            jasmine.clock().tick(4000);
+            (service as any).flushEngagement();
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            jasmine.clock().tick(4000);
+            (service as any).flushEngagement();
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            const engagementNameWarnings = (console.warn as jasmine.Spy).calls.allArgs()
+                .filter(args => /engagementEventName/.test(String(args[0])));
+            expect(engagementNameWarnings.length).toBe(1);
+        });
+
+        it('flushes when a visibilitychange to hidden fires', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(6000);
+
+            pageEngaged = false;
+            document.dispatchEvent(new Event('visibilitychange'));
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.engagement_time_msec).toBe(6000);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        // Switching to another window or application leaves this tab visible but
+        // unfocused — visibilitychange never fires, so this is the case that
+        // motivates isPageEngaged() combining both signals in the first place.
+        it('does not accrue time while the window is blurred', async () => {
+            pageEngaged = false;
+            await service.init();
+
+            jasmine.clock().tick(9000);
+            service.trackEvent('after_blur');
+
+            expect(sentParams()['engagement_time_msec']).toBe(0);
+        });
+
+        // Inverts the old expectation: a blur used to flush immediately, which
+        // measured as ten network hits for ten alt-tab cycles. Blur now only stops
+        // the clock — the accrued time is retained in the accumulator, not sent,
+        // and shows up on whatever hit comes next.
+        it('accrues time on blur but sends nothing, until the next trackEvent', async () => {
+            await service.init();
+            jasmine.clock().tick(8000);
+
+            pageEngaged = false;
+            window.dispatchEvent(new Event('blur'));
+
+            httpMock.expectNone(() => true);
+
+            service.trackEvent('after_blur');
+            expect(sentParams()['engagement_time_msec']).toBe(8000);
+        });
+
+        it('resumes accumulation when a focus event follows a blur, keeping the pre-blur time too', async () => {
+            await service.init();
+            jasmine.clock().tick(2000);
+
+            pageEngaged = false;
+            window.dispatchEvent(new Event('blur'));
+            httpMock.expectNone(() => true);   // blur never flushes — see above
+
+            jasmine.clock().tick(4000);   // blurred — must not count
+            pageEngaged = true;
+            window.dispatchEvent(new Event('focus'));
+            jasmine.clock().tick(3000);   // engaged again
+
+            service.trackEvent('after_focus');
+            // The 2000ms accrued before the blur was never flushed away, so it
+            // rides out on this hit alongside the 3000ms accrued after refocusing.
+            expect(sentParams()['engagement_time_msec']).toBe(5000);
+        });
+
+        it('forces the beacon transport for the hide flush even under transport: xhr', async () => {
+            await service.init();
+            jasmine.clock().tick(3000);
+            const beaconSpy = spyOn(service as any, 'trySendBeacon').and.returnValue(true);
+
+            (service as any).flushEngagement();
+
+            expect(beaconSpy).toHaveBeenCalled();
+            expect(JSON.parse(beaconSpy.calls.mostRecent().args[1] as string).events[0].name).toBe('page_engagement');
+            httpMock.expectNone(() => true);
+        });
+
+        it('does not roll the session when flushing after the timeout', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            const before = (service as any).sessionNumber;
+
+            jasmine.clock().tick(31 * 60 * 1000);
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.session_number).toBe(before);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        // The hide path is the one hit path the #16 adoption fix didn't reach: the
+        // expiry guard below used to be evaluated against the pre-adoption in-memory
+        // timestamp, so a tab sitting idle-but-visible past the timeout would skip
+        // adoption entirely and emit page_engagement for a session another tab had
+        // already rolled past — even though storage held a perfectly live one.
+        it('adopts a newer session from storage before judging expiry on flush', async () => {
+            mockLocalStorage['ga_session_id'] = 'S1';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP);
+            mockLocalStorage['ga_session_number'] = '3';
+            observeFlushViaXhr();
+            await service.init();
+
+            jasmine.clock().tick(31 * 60 * 1000);
+            // Another tab rolled 5 minutes ago: live from "now", even though this
+            // tab's own in-memory timestamp (still MOCK_TIMESTAMP) is 31 min stale.
+            mockLocalStorage['ga_session_id'] = 'S2';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP + 26 * 60 * 1000);
+            mockLocalStorage['ga_session_number'] = '4';
+
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.session_id).toBe('S2');
+            expect(req.request.body.events[0].params.session_number).toBe(4);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('attributes the engagement event to the last tracked page', async () => {
+            reconfigureTestBed({ siteUrl: 'https://example.com' });
+            observeFlushViaXhr();
+            await service.init();
+            service.trackPageView('/pricing');
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            jasmine.clock().tick(5000);
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.page_location).toBe('https://example.com/pricing');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        // lastPagePath used to default to '/', so with siteUrl configured and no
+        // router-driven page_view — an extension popup, a non-routed app,
+        // initialNavigation: 'disabled' — every hide-time event was attributed to
+        // siteUrl + '/', a page nobody actually visited. It now starts null and
+        // falls back to window.location.href instead, the same as the no-siteUrl path.
+        it('falls back to window.location.href when no page_view has fired yet, even with siteUrl configured', async () => {
+            reconfigureTestBed({ siteUrl: 'https://example.com' });
+            observeFlushViaXhr();
+            await service.init();
+
+            jasmine.clock().tick(5000);
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.page_location).toBe(window.location.href);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('removes its listeners on destroy', async () => {
+            await service.init();
+            const documentRemove = spyOn(document, 'removeEventListener').and.callThrough();
+            const windowRemove = spyOn(window, 'removeEventListener').and.callThrough();
+
+            service.ngOnDestroy();
+
+            expect(documentRemove).toHaveBeenCalledWith('visibilitychange', (service as any).visibilityListener);
+            expect(windowRemove).toHaveBeenCalledWith('pagehide', (service as any).pagehideListener);
+            expect(windowRemove).toHaveBeenCalledWith('focus', (service as any).focusListener);
+            expect(windowRemove).toHaveBeenCalledWith('blur', (service as any).blurListener);
+            expect(windowRemove).toHaveBeenCalledWith('pageshow', (service as any).pageshowListener);
+        });
+
+        // bfcache restore: pagehide already closed the interval on the way out.
+        // pageshow is the dedicated restore signal, wired to the same handler as
+        // focus, so a browser that fires pageshow but not focus/visibilitychange on
+        // restore still resumes accumulation rather than reporting zero engagement
+        // for the rest of the document's life — reopening depended entirely on
+        // visibilitychange or focus firing before this, and neither is guaranteed on
+        // every bfcache restore path.
+        it('resumes accumulation on pageshow after a pagehide, without focus or visibilitychange firing', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(4000);
+
+            window.dispatchEvent(new Event('pagehide'));
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            jasmine.clock().tick(10000);   // hidden — nothing has reopened it yet
+
+            pageEngaged = true;
+            window.dispatchEvent(new Event('pageshow'));
+            jasmine.clock().tick(3000);   // engaged again after the bfcache restore
+
+            service.trackEvent('after_pageshow');
+            expect(sentParams()['engagement_time_msec']).toBe(3000);
+        });
+
+        // The headline documented behaviour ("a flush extends the session") had no
+        // spec proving it directly — every other flush spec asserts on the outgoing
+        // event, not on the session-freshness side effect. ga_last_activity moving
+        // forward is exactly what keeps a tab that is merely alt-tabbed between
+        // (never closed, never hit) from expiring after 30 minutes.
+        it('extends the session by writing a newer ga_last_activity on flush', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            const activityAtInit = Number(mockLocalStorage['ga_last_activity']);
+
+            jasmine.clock().tick(5000);
+            (service as any).flushEngagement();
+
+            expect(Number(mockLocalStorage['ga_last_activity'])).toBeGreaterThan(activityAtInit);
+
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+        });
+    });
+
+    // monotonicNow() is stubbed to Date.now() in every other spec (see the
+    // comment in configureTestBed) so jasmine.clock().tick() can drive it — the
+    // real performance.now() path, including the Math.round() that keeps
+    // engagement_time_msec an integer, otherwise has zero coverage anywhere.
+    describe('monotonicNow() (real implementation)', () => {
+        it('returns a non-negative integer from the real clock', () => {
+            (service as any).monotonicNow.and.callThrough();
+
+            const value = (service as any).monotonicNow();
+
+            expect(Number.isInteger(value)).toBe(true);
+            expect(value).toBeGreaterThanOrEqual(0);
+        });
+    });
+
+    // isPageEngaged() is stubbed wholesale everywhere else in this suite (see the
+    // pageEngaged comment in configureTestBed) because headless Chrome always
+    // reports document.hasFocus() === false, which would otherwise start every
+    // timer disengaged. That leaves the real predicate with zero coverage
+    // anywhere else, so it is exercised here directly — via callThrough(), which
+    // restores the spy's original implementation — against a fake document.
+    describe('isPageEngaged() (real implementation)', () => {
+        function fakeDocument(overrides: { visibilityState?: string; hasFocus?: () => boolean }): Document {
+            return {
+                visibilityState: overrides.visibilityState ?? 'visible',
+                ...(overrides.hasFocus ? { hasFocus: overrides.hasFocus } : {})
+            } as unknown as Document;
+        }
+
+        beforeEach(() => {
+            (service as any).isPageEngaged.and.callThrough();
+        });
+
+        it('is engaged when visible and focused', () => {
+            spyOn(service as any, 'getDocument').and.returnValue(
+                fakeDocument({ visibilityState: 'visible', hasFocus: () => true })
+            );
+
+            expect((service as any).isPageEngaged()).toBe(true);
+        });
+
+        it('is not engaged when visible but unfocused', () => {
+            spyOn(service as any, 'getDocument').and.returnValue(
+                fakeDocument({ visibilityState: 'visible', hasFocus: () => false })
+            );
+
+            expect((service as any).isPageEngaged()).toBe(false);
+        });
+
+        it('is not engaged when hidden, even if focused', () => {
+            spyOn(service as any, 'getDocument').and.returnValue(
+                fakeDocument({ visibilityState: 'hidden', hasFocus: () => true })
+            );
+
+            expect((service as any).isPageEngaged()).toBe(false);
+        });
+
+        it('assumes engaged when hasFocus is unavailable', () => {
+            spyOn(service as any, 'getDocument').and.returnValue(
+                fakeDocument({ visibilityState: 'visible' })
+            );
+
+            expect((service as any).isPageEngaged()).toBe(true);
+        });
+
+        // Inverted from the old expectation: starting "engaged" with no document
+        // meant nothing could ever close the span (registerEngagementListeners()
+        // bails out in exactly this case, so no listener would ever fire
+        // setEngaged(false)) — one measured case reached pending() === 300000 after
+        // five idle minutes. Without a document there is no signal that could ever
+        // end the span, so this must read as not engaged.
+        it('is not engaged when getDocument() returns undefined', () => {
+            spyOn(service as any, 'getDocument').and.returnValue(undefined);
+
+            expect((service as any).isPageEngaged()).toBe(false);
+        });
+    });
+
+    // --- cross-tab session state ---
+
+    describe('cross-tab session state', () => {
+        // Bracket notation throughout: the repo's tsconfig sets
+        // noPropertyAccessFromIndexSignature, so dot access on a Record<string, any>
+        // is a compile error, not a style preference.
+        function sentParams(): Record<string, any> {
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const params = req.request.body.events[0].params;
+            req.flush('', { status: 204, statusText: 'No Content' });
+            return params;
+        }
+
+        // The interleaving from #16: two tabs start together, one rolls, and the
+        // other must adopt rather than keep sending the session it started with.
+        it('adopts a session another tab rolled', async () => {
+            mockLocalStorage['ga_session_id'] = 'S1';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP);
+            mockLocalStorage['ga_session_number'] = '3';
+            await service.init();
+
+            // Another tab rolls: newer activity, new id, incremented number.
+            jasmine.clock().tick(60000);
+            mockLocalStorage['ga_session_id'] = 'S2';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP + 60000);
+            mockLocalStorage['ga_session_number'] = '4';
+
+            service.trackEvent('tab_a_event');
+
+            const params = sentParams();
+            expect(params['session_id']).toBe('S2');
+            expect(params['session_number']).toBe(4);
+        });
+
+        // Equal timestamp, different id: the only seeding that discriminates `>`
+        // from `>=`. An older timestamp fails both comparisons, so it would pass
+        // whichever operator adoption used.
+        it('keeps its own session when storage is not newer', async () => {
+            mockLocalStorage['ga_session_id'] = 'S1';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP);
+            mockLocalStorage['ga_session_number'] = '3';
+            await service.init();
+
+            mockLocalStorage['ga_session_id'] = 'S_EQUAL';
+
+            service.trackEvent('same_tab');
+
+            expect(sentParams()['session_id']).toBe('S1');
+        });
+
+        // The roll must take the number from storage, not from the value read at
+        // init(): otherwise two tabs increment independently and diverge forever.
+        it('increments the session number from storage when rolling', async () => {
+            mockLocalStorage['ga_session_id'] = 'S1';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP);
+            mockLocalStorage['ga_session_number'] = '3';
+            await service.init();
+
+            // Another tab advanced the number, then everyone went idle past the timeout.
+            mockLocalStorage['ga_session_number'] = '7';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP + 1000);
+            jasmine.clock().tick(31 * 60 * 1000);
+
+            service.trackEvent('after_idle');
+
+            expect(sentParams()['session_number']).toBe(8);
+        });
+
+        // session_number is monotonically non-decreasing for a client id. A cleared
+        // ga_session_number (plausible: it's written only on a roll, while
+        // ga_session_id/ga_last_activity are written on every hit) must not clobber
+        // a known-good in-memory count down to 0 — parseIntSafe(undefined) is 0, and
+        // 0 is not a valid GA4 session ordinal.
+        it('does not drop the session number when storage has no ga_session_number', async () => {
+            mockLocalStorage['ga_session_id'] = 'S1';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP);
+            mockLocalStorage['ga_session_number'] = '3';
+            await service.init();
+
+            jasmine.clock().tick(60000);
+            mockLocalStorage['ga_session_id'] = 'S2';
+            mockLocalStorage['ga_last_activity'] = String(MOCK_TIMESTAMP + 60000);
+            delete mockLocalStorage['ga_session_number'];
+
+            service.trackEvent('after_number_cleared');
+
+            expect(sentParams()['session_number']).toBe(3);
+        });
+
+        it('adopts session changes pushed by chrome.storage.onChanged', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const listeners: Array<(changes: any, area: string) => void> = [];
+            setupChromeMock(
+                { ga_client_id: 'ext-id', ga_session_number: '3' },
+                { ga_session_id: 'S1', ga_last_activity: String(MOCK_TIMESTAMP) }
+            );
+            (window as any).chrome.storage.onChanged = {
+                addListener: (fn: any) => listeners.push(fn),
+                removeListener: (fn: any) => {
+                    const i = listeners.indexOf(fn);
+                    if (i >= 0) listeners.splice(i, 1);
+                }
+            };
+
+            await service.init();
+
+            jasmine.clock().tick(60000);
+            listeners.forEach(fn => fn({
+                ga_session_id: { newValue: 'S2' },
+                ga_last_activity: { newValue: String(MOCK_TIMESTAMP + 60000) }
+            }, 'session'));
+            listeners.forEach(fn => fn({ ga_session_number: { newValue: '4' } }, 'local'));
+
+            service.trackEvent('ext_event');
+
+            const params = sentParams();
+            expect(params['session_id']).toBe('S2');
+            expect(params['session_number']).toBe(4);
+        });
+
+        // Chrome only reports keys whose value actually changed, so a push can carry
+        // ga_session_id alone, with no ga_last_activity at all. Adopting the id on no
+        // freshness signal would also let two contexts rolling within the same second
+        // each adopt the other's id (millisecond-distinct ids, no ordering between
+        // them) — both fields must be gated on the same signal.
+        it('does not adopt a pushed session id with no accompanying activity change', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const listeners: Array<(changes: any, area: string) => void> = [];
+            setupChromeMock(
+                { ga_client_id: 'ext-id', ga_session_number: '3' },
+                { ga_session_id: 'S1', ga_last_activity: String(MOCK_TIMESTAMP) }
+            );
+            (window as any).chrome.storage.onChanged = {
+                addListener: (fn: any) => listeners.push(fn),
+                removeListener: (fn: any) => {
+                    const i = listeners.indexOf(fn);
+                    if (i >= 0) listeners.splice(i, 1);
+                }
+            };
+
+            await service.init();
+
+            listeners.forEach(fn => fn({ ga_session_id: { newValue: 'S_STALE' } }, 'session'));
+
+            service.trackEvent('ext_event');
+
+            expect(sentParams()['session_id']).toBe('S1');
+        });
+
+        it('removes the chrome.storage.onChanged listener on destroy', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const listeners: Array<any> = [];
+            setupChromeMock({ ga_client_id: 'ext-id' }, {});
+            (window as any).chrome.storage.onChanged = {
+                addListener: (fn: any) => listeners.push(fn),
+                removeListener: (fn: any) => {
+                    const i = listeners.indexOf(fn);
+                    if (i >= 0) listeners.splice(i, 1);
+                }
+            };
+
+            await service.init();
+            expect(listeners.length).toBe(1);
+
+            service.ngOnDestroy();
+
+            expect(listeners.length).toBe(0);
+        });
+
+        // The gap catchUpSessionState() closes: init()'s own awaits
+        // (loadOrCreateClientId, collectContext's getHighEntropyValues, etc.) all
+        // run before registerSessionSyncListener() exists, so a session rolled by
+        // another extension context during that window is never delivered —
+        // chrome.storage.onChanged does not replay past changes to a listener
+        // registered after the fact. Exercised by mutating the mock's backing
+        // store directly (not via onChanged, which is exactly what can't cover
+        // this) and invoking the catch-up path once init() has finished — the
+        // same effect a mutation landing mid-await would have.
+        it('catches up on a session rolled in chrome.storage during init()', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const chromeLocal: Record<string, any> = { ga_client_id: 'ext-id', ga_session_number: '3' };
+            const chromeSession: Record<string, any> = { ga_session_id: 'S1', ga_last_activity: String(MOCK_TIMESTAMP) };
+            setupChromeMock(chromeLocal, chromeSession);
+
+            await service.init();
+
+            // Another context rolls the session while nothing was yet listening.
+            chromeSession['ga_session_id'] = 'S2';
+            chromeSession['ga_last_activity'] = String(MOCK_TIMESTAMP + 60000);
+            chromeLocal['ga_session_number'] = '4';
+
+            await (service as any).catchUpSessionState();
+
+            service.trackEvent('after_catch_up');
+            const params = sentParams();
+            expect(params['session_id']).toBe('S2');
+            expect(params['session_number']).toBe(4);
+        });
+
+        // adoptSessionNumber()'s own monotonic guard applies during catch-up just
+        // as it does for registerSessionSyncListener's 'local' branch: session
+        // numbers only ever count up, so a stale or corrupted read must not
+        // clobber a known-good in-memory value.
+        it('does not lower the session number during catch-up', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const chromeLocal: Record<string, any> = { ga_client_id: 'ext-id', ga_session_number: '3' };
+            const chromeSession: Record<string, any> = { ga_session_id: 'S1', ga_last_activity: String(MOCK_TIMESTAMP) };
+            setupChromeMock(chromeLocal, chromeSession);
+
+            await service.init();
+
+            chromeLocal['ga_session_number'] = '1';
+
+            await (service as any).catchUpSessionState();
+
+            service.trackEvent('after_catch_up');
+            expect(sentParams()['session_number']).toBe(3);
+        });
+
+        // Every spec above hand-seeds mockLocalStorage to stand in for "another
+        // tab". This one builds a second, independently constructed NgGa4Service
+        // over the same mocked localStorage and lets it roll its own session for
+        // real, exercising the actual adoption mechanism two real tabs rely on
+        // rather than a stand-in for it.
+        it('adopts a session rolled by a second, real NgGa4Service instance sharing storage', async () => {
+            await service.init();
+
+            const second = Injector.create({
+                providers: [
+                    NgGa4Service,
+                    // Shares this spec's HttpClient (and therefore httpMock) rather than
+                    // standing up a second one — there is only one network to assert on.
+                    { provide: HttpClient, useValue: TestBed.inject(HttpClient) },
+                    { provide: Router, useValue: { events: new Subject<any>().asObservable() } },
+                    // 'storage' skips the _ga cookie entirely: this second instance has
+                    // no getCookieJar/setCookie spies of its own (those are only wired
+                    // onto `service` in configureTestBed), so touching the real
+                    // document.cookie here would leak between specs.
+                    { provide: NG_GA4_CONFIG, useValue: { ...defaultConfig, clientIdSource: 'storage' } },
+                    { provide: PLATFORM_ID, useValue: 'browser' },
+                    { provide: NgZone, useValue: TestBed.inject(NgZone) }
+                ]
+            }).get(NgGa4Service);
+
+            await second.init();
+            // Both instances now hold the same session read from shared storage.
+            // Advance past the timeout so second's own roll, below, is a real one.
+            jasmine.clock().tick(31 * 60 * 1000);
+            second.trackEvent('tab_b_rolls');
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .flush('', { status: 204, statusText: 'No Content' });
+
+            service.trackEvent('tab_a_after_roll');
+            const params = sentParams();
+            expect(params['session_id']).toBe((second as any).sessionId);
+            expect(params['session_number']).toBe((second as any).sessionNumber);
+
+            // Cleanup: `second` registered its own visibilitychange/focus/blur/
+            // pageshow/pagehide listeners on the real document/window (unlike
+            // `service`, it isn't destroyed by the top-level afterEach), which would
+            // otherwise leak into later specs the same way the afterEach comment
+            // above warns about for `service`.
+            second.ngOnDestroy();
+        });
+    });
+
     // --- writeGaCookie options ---
 
     describe('writeGaCookie options', () => {
@@ -742,6 +1671,8 @@ describe('NgGa4Service', () => {
             expect(crypto.randomUUID).not.toHaveBeenCalled();
             expect(writtenCookies).toEqual([]);
             httpMock.expectNone(() => true);
+            expect((service as any).visibilityListener).toBeUndefined();
+            expect((service as any).chromeStorageListener).toBeUndefined();
         });
 
         it('should no-op trackEvent and trackPageView on the server', async () => {

@@ -85,6 +85,31 @@ export interface NgGa4Config {
      * minted itself.
      */
     writeGaCookie?: boolean | NgGa4CookieOptions;
+
+    /**
+     * Send an event when the page actually hides (a tab switch or close) or is
+     * torn down (`pagehide`), carrying the engagement time accrued since the
+     * last hit — without it, a single-page visit reports ~0 ms of engagement
+     * and reads as a bounce. Default `true`.
+     *
+     * Losing focus alone (e.g. alt-tab) stops the clock the same way but does
+     * not send this event; the accrued time rides out on the next hit or the
+     * eventual hide. Always sent over the unload-safe transport chain
+     * (`sendBeacon` → `fetch(keepalive)` → XHR), regardless of the configured
+     * `transport`. See "Engagement measurement" in the README for the full
+     * reasoning.
+     */
+    sendEngagementOnHide?: boolean;
+
+    /**
+     * Event name used for that hide-time event. Default `'page_engagement'`.
+     * Can't be `user_engagement` — the Measurement Protocol reserves it — so
+     * it appears as an ordinary custom event in Events reports. Validated at
+     * startup against the Measurement Protocol's naming rules; an invalid or
+     * reserved value logs a console warning and falls back to the default.
+     * See "Engagement measurement" in the README for the full reasoning.
+     */
+    engagementEventName?: string;
 }
 
 export const NG_GA4_CONFIG = new InjectionToken<NgGa4Config>('NG_GA4_CONFIG');

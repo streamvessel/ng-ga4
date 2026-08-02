@@ -55,6 +55,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written back out under this option, in any configuration — doing so would
   resurrect an identifier a user, or their consent tool, had deleted.
   ([#13](https://github.com/streamvessel/ng-ga4/issues/13))
+- `sendEngagementOnHide` option, default `true`: sends an event when the page
+  hides, carrying the engagement time accrued since the last hit, so a
+  single-page visit no longer reports ~0 ms of engagement and reads as a
+  bounce. Set `false` to opt out.
+  ([#15](https://github.com/streamvessel/ng-ga4/issues/15))
+- `engagementEventName` option, default `'page_engagement'`, to rename that
+  event. Can't be `user_engagement` — the Measurement Protocol reserves it —
+  so it appears as an ordinary custom event in Events reports. An invalid or
+  reserved name falls back to the default with a console warning.
+  ([#15](https://github.com/streamvessel/ng-ga4/issues/15))
 
 ### Fixed
 
@@ -74,6 +84,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   browser, operating system or device category, leaving those GA4 dimensions
   `(not set)`. A dependency-free user-agent parser now fills any field Client Hints
   did not supply. ([#11](https://github.com/streamvessel/ng-ga4/issues/11))
+- `engagement_time_msec` reflects real engaged time instead of a constant
+  `100` on every hit, so average engagement time, engaged sessions, engagement
+  rate and bounce rate are no longer wrong — see "Engagement measurement" in
+  the README.
+  ([#14](https://github.com/streamvessel/ng-ga4/issues/14))
+- A visit that fires only the initial `page_view` no longer reports ~0 ms of
+  engagement and reads as a bounce; the trailing time is now flushed on hide
+  (see the `sendEngagementOnHide` and `engagementEventName` options above).
+  ([#15](https://github.com/streamvessel/ng-ga4/issues/15))
+- Two tabs no longer disagree about the session forever. Session state used
+  to be cached in memory at `init()`, so once one tab rolled to a new
+  session, every other open tab kept sending the dead one indefinitely. Every
+  hit now re-reads persisted session state first and adopts anything newer
+  (see "Cross-tab session sync" in the README).
+  ([#16](https://github.com/streamvessel/ng-ga4/issues/16))
 
 ### Changed
 
@@ -82,6 +107,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Validation responses are reported with `console.warn` only when
   `validationMessages` is non-empty. Previously every response was logged with
   `console.log`, which made a clean payload and a rejected one look alike.
+- The `sendEngagementOnHide` event always goes out over the unload-safe
+  transport chain (`navigator.sendBeacon`, `fetch(keepalive)`, then XHR)
+  regardless of the configured `transport`, since an in-flight XHR is aborted
+  on unload. A consumer on `transport: 'xhr'` will find this one event class
+  bypassing their `HttpClient` interceptors.
 
 ## [0.1.0] - 2026-07-28
 

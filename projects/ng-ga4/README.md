@@ -80,6 +80,47 @@ bootstrapApplication(AppComponent, {
 | `debug` | `boolean` | No | Tag events with `debug_mode` so they appear in GA4 DebugView, and log validation problems to the console. Events are still recorded. |
 | `clientIdSource` | `'auto' \| 'cookie' \| 'storage'` | No | Where the client ID comes from on web. `'auto'` (default) reads the `_ga` cookie when present and well-formed, else `localStorage` — set `'storage'` if you don't want this library reading `_ga` at all, since doing so is itself consent-relevant, not only writing one. `'cookie'` treats `_ga` as authoritative and mints one if absent. `'storage'` is the previous behaviour. An unrecognised value logs a console warning and falls back to `'auto'`. Ignored for extensions. |
 | `writeGaCookie` | `boolean \| NgGa4CookieOptions` | No | Write `_ga` when absent or unreadable, using the client ID already on hand, on the registrable domain, with `SameSite=Lax` and (on HTTPS) `Secure` by default. Pass `{}` to write with every default, or an `NgGa4CookieOptions` object to override `domain`, `flags`, or `maxAgeSeconds` — see "Interop with gtag.js" below. Off by default. Implied by `clientIdSource: 'cookie'`; ignored for `'storage'` and extensions. |
+| `sendEngagementOnHide` | `boolean` | No | Send an event when the page hides or is torn down (`pagehide`), carrying the engagement time accrued since the last hit. Default `true`. See "Engagement measurement" below. |
+| `engagementEventName` | `string` | No | Event name for the hide-time event above. Default `'page_engagement'`; can't be `user_engagement`. An invalid or reserved value falls back to the default with a console warning. See "Engagement measurement" below. |
+
+### Engagement measurement
+
+`engagement_time_msec` drives GA4's average engagement time, engaged sessions,
+engagement rate and bounce rate. Each hit reports the time elapsed *since the
+previous hit*, not a running total — the interval gtag.js tracks as `_et`.
+
+Time accrues only while the page is visible *and* focused, matching GA4's own
+definition of engagement: switching tabs or windows, or minimising the
+browser, stops the clock even though the tab may stay visible; refocusing
+resumes it. An unfocused iframe accrues zero engagement, since
+`document.hasFocus()` is `false` there even while the embed is fully visible.
+
+Losing focus alone stops the clock but sends nothing; the accrued time stays
+in the accumulator and rides out on the next hit or the eventual hide.
+`sendEngagementOnHide` (default `true`, set `false` to disable) sends an
+event when the page actually hides or is torn down (`pagehide`), carrying
+that time — without it, a visit that only fires the initial `page_view`
+reports ~0 ms of engagement and reads as a bounce.
+
+That event can't be named `user_engagement`, which the Measurement Protocol
+reserves, so it ships as an ordinary custom event, `engagementEventName`
+(default `'page_engagement'`), visible in Events reports. The name is
+validated at startup and falls back to the default with a console warning if
+invalid, since GA4 answers `2xx` and silently drops a hit with a bad name.
+The flush always takes the unload-safe transport chain (`sendBeacon` →
+`fetch(keepalive)` → XHR), overriding a configured `transport: 'xhr'`, since
+an in-flight XHR is aborted on unload and the hit would be lost.
+
+Any flush — the hide event or an ordinary hit — extends a live session like
+any other hit, except one that fires after the session has already timed
+out: that trailing time is attributed to the expired session rather than
+rolling a new one, so GA4 may show it running longer than 30 minutes.
+
+Expect these numbers to trend close to, not match exactly, a property also
+measured by gtag.js — and possibly read lower, since this library stops its
+clock on a plain window switch that leaves the tab visible. gtag.js is
+closed-source; public observation suggests it does not, but that is the
+likely shape of a gap, not an assertion about what it does internally.
 
 ### Interop with gtag.js
 
@@ -275,6 +316,19 @@ NgGa4Module.forRoot({
 | Client ID | `_ga` cookie when present and well-formed (default), else `localStorage`; writing to the cookie is opt-in (see "Interop with gtag.js" above) | `chrome.storage.local` |
 | Session number | `localStorage` | `chrome.storage.local` |
 | Session ID + activity | `localStorage` | `chrome.storage.session` |
+
+### Cross-tab session sync
+
+Session state used to be read once at `init()` and cached in memory, so once
+one tab rolled to a new session, every other open tab kept sending the dead
+one indefinitely. Every hit path now re-reads persisted session state first
+and adopts it if it is newer before deciding whether to roll. On web that
+re-read is synchronous, straight from `localStorage`. On extensions,
+`chrome.storage` cannot be read synchronously, so freshness instead comes
+from a `chrome.storage.onChanged` listener that adopts session ID and
+activity from the `session` storage area and session number from `local` as
+they change. Session number itself only ever increases for a given client
+ID, never decreases, so a stale or missing read can't roll it backwards.
 
 ## Server-side rendering
 
