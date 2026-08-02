@@ -1,8 +1,10 @@
 // Foreground time accumulator for `engagement_time_msec`.
 //
-// GA4 derives average engagement time, engaged sessions, engagement rate and
-// bounce rate from this field. gtag.js measures real foreground time between
-// hits and sends it as `_et`; this measures the same thing.
+// GA4 derives average engagement time from this field. gtag.js measures real
+// foreground time between hits and sends it as `_et`; this measures the same
+// thing. Note it does *not* appear to drive engaged sessions — and so not
+// engagement rate or bounce rate either — on a Measurement-Protocol-only
+// property; see issue #43.
 //
 // "Engaged" here means visible *and* focused — GA4 defines engagement as time
 // the page is in focus, not merely time it is visible, and stops the clock
