@@ -2,8 +2,8 @@
 //
 // GA4 derives average engagement time from this field. gtag.js measures real
 // foreground time between hits and sends it as `_et`; this measures the same
-// thing. Whether it also drives engaged sessions on a Measurement-Protocol-only
-// property is unconfirmed — early evidence says no; see issue #43.
+// thing. It does not drive engaged sessions on a Measurement-Protocol-only
+// property, and so not engagement rate or bounce rate either; see issue #43.
 //
 // "Engaged" here means visible *and* focused — GA4 defines engagement as time
 // the page is in focus, not merely time it is visible, and stops the clock

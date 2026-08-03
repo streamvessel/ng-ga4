@@ -86,11 +86,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   did not supply. ([#11](https://github.com/streamvessel/ng-ga4/issues/11))
 - `engagement_time_msec` reflects real engaged time instead of a constant
   `100` on every hit, so **average engagement time** is no longer wrong.
-  Whether it also fixes engaged sessions, engagement rate and bounce rate is
-  unconfirmed: on a Measurement-Protocol-only property a custom event carrying
+  It does **not** fix engaged sessions, engagement rate or bounce rate: on a
+  Measurement-Protocol-only property a custom event carrying
   `engagement_time_msec` raised average engagement time while engaged sessions
-  stayed at zero, though that was read before GA4 had fully processed. See
-  "Engagement measurement" in the README and
+  stayed at zero — measured twice, thirteen hours apart, with identical
+  results. See "Engagement measurement" in the README and
   [#43](https://github.com/streamvessel/ng-ga4/issues/43).
   ([#14](https://github.com/streamvessel/ng-ga4/issues/14))
 - A visit that fires only the initial `page_view` no longer reports ~0 ms of

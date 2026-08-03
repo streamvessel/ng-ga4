@@ -89,21 +89,19 @@ bootstrapApplication(AppComponent, {
 reports the time elapsed *since the previous hit*, not a running total — the
 interval gtag.js tracks as `_et`.
 
-Whether it also drives **engaged sessions** — and so engagement rate and
-bounce rate, which derive from that classification — is **unconfirmed, and
-the early evidence is negative.** On a scratch property fed only by the
-Measurement Protocol, a custom event carrying `engagement_time_msec: 15000`
-produced a non-zero average engagement time while engaged sessions stayed at
-**0**, even though 15 s clears GA4's documented 10-second threshold. That
-reading was taken four hours after ingestion, and GA4 metrics can finish
-processing at different times, so it is not yet conclusive.
+It does **not** drive **engaged sessions**, and so does not drive engagement
+rate or bounce rate either, which both derive from that classification. On a
+scratch property fed only by the Measurement Protocol, a custom event
+carrying `engagement_time_msec: 15000` produced a non-zero average engagement
+time while engaged sessions stayed at **0**, even though 15 s clears GA4's
+documented 10-second threshold. Read twice, thirteen hours apart, with
+identical results — so this is not GA4 still processing.
 
-One plausible explanation is that engaged-session status comes from a signal
-gtag.js sets on its own collection endpoint, which the Measurement Protocol
-does not expose — in which case no value sent here would ever produce one.
-Until [#43](https://github.com/streamvessel/ng-ga4/issues/43) settles it,
-treat average engagement time as improved and the other three as unproven on
-an MP-only property.
+The likely reason is that engaged-session status comes from a signal gtag.js
+sets on its own collection endpoint, which the Measurement Protocol does not
+expose. Treat average engagement time as genuinely improved, and engaged
+sessions, engagement rate and bounce rate as out of reach on an MP-only
+property. See [#43](https://github.com/streamvessel/ng-ga4/issues/43).
 
 Time accrues only while the page is visible *and* focused, matching GA4's own
 definition of engagement: switching tabs or windows, or minimising the

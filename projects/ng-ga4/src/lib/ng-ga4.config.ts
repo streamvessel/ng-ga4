@@ -92,10 +92,9 @@ export interface NgGa4Config {
      * last hit — without it, a single-page visit reports ~0 ms of engagement
      * however long the user actually stayed. Default `true`.
      *
-     * Raises GA4's average engagement time. Whether it also affects engaged
+     * Raises GA4's average engagement time. It does not affect engaged
      * sessions, engagement rate or bounce rate on a Measurement-Protocol-only
-     * property is unconfirmed, and the early evidence is negative — see the
-     * README.
+     * property — see the README.
      *
      * Losing focus alone (e.g. alt-tab) stops the clock the same way but does
      * not send this event; the accrued time rides out on the next hit or the
