@@ -68,6 +68,8 @@ export class NgGa4Service implements OnDestroy {
 
     private readonly isBrowser: boolean;
     private readonly consent: ConsentState;
+    private enabled: boolean;
+    private initPromise: Promise<void> | null = null;
 
     constructor(
         private http: HttpClient,
@@ -78,16 +80,27 @@ export class NgGa4Service implements OnDestroy {
     ) {
         this.isBrowser = isPlatformBrowser(platformId);
         this.consent = new ConsentState(config.consent);
+        // config.enabled is only the *initial* value now: a consent banner has to be
+        // able to turn collection on after the injector is built.
+        this.enabled = config.enabled;
     }
 
-    async init(): Promise<void> {
+    init(): Promise<void> {
         // Every collection path below reads a browser-only global (localStorage,
         // crypto, screen, navigator, window.location), so on the server this must
         // be inert rather than merely quiet — an APP_INITIALIZER that throws takes
         // the whole SSR/prerender bootstrap down with it.
-        if (!this.isBrowser || !this.config.enabled || this.initialized) {
-            return;
+        if (!this.isBrowser || !this.enabled) {
+            return Promise.resolve();
         }
+        // Memoised rather than guarded by `initialized`: that flag is set
+        // synchronously before the first await, so a second caller would resolve
+        // while the first is still suspended. setEnabled(true) followed by
+        // `await init()` has to await the real thing.
+        return this.initPromise ??= this.runInit();
+    }
+
+    private async runInit(): Promise<void> {
         this.initialized = true;
 
         // Created here, not in the constructor: the constructor also runs on
@@ -135,6 +148,26 @@ export class NgGa4Service implements OnDestroy {
         this.consent.merge(consent);
     }
 
+    /**
+     * Turn collection on or off at runtime — the consent-banner switch.
+     *
+     * Enabling for the first time runs the initialisation that `enabled: false`
+     * skipped at bootstrap, so nothing — no client ID, no session, no storage
+     * write — exists before this point. `await init()` afterwards if you need to
+     * know when it has finished.
+     *
+     * This is a kill switch, not a consent withdrawal: disabling stops sending but
+     * deletes nothing. To remove stored identifiers, deny `analyticsStorage`.
+     */
+    setEnabled(enabled: boolean): void {
+        this.enabled = enabled;
+        if (!enabled || !this.isBrowser) {
+            return;
+        }
+        // init() memoises, so a repeat call is a no-op rather than a second run.
+        void this.init();
+    }
+
     ngOnDestroy(): void {
         this.routerSubscription?.unsubscribe();
         if (this.visibilityListener && typeof document !== 'undefined') {
@@ -160,7 +193,7 @@ export class NgGa4Service implements OnDestroy {
     trackPageView(pagePath: string, pageTitle?: string): void {
         // Dropped, not queued: the server has no client identity to attach a hit to,
         // and replaying queued events after hydration would double-count the view.
-        if (!this.isBrowser || !this.config.enabled) {
+        if (!this.isBrowser || !this.enabled) {
             return;
         }
         if (!this.clientId) {
@@ -189,7 +222,7 @@ export class NgGa4Service implements OnDestroy {
 
     trackEvent(name: string, params?: Record<string, any>): void {
         // See trackPageView: inert on the server, and deliberately not queued.
-        if (!this.isBrowser || !this.config.enabled) {
+        if (!this.isBrowser || !this.enabled) {
             return;
         }
         if (!this.clientId) {
@@ -613,7 +646,10 @@ export class NgGa4Service implements OnDestroy {
     // Flushes the trailing chunk of foreground time a page_view-only visit
     // would otherwise never report.
     private flushEngagement(): void {
-        if (this.config.sendEngagementOnHide === false || !this.clientId) {
+        // `enabled` is checked here too, not only in track*: this is the fourth
+        // sendToGA4 call site and fires from visibilitychange/pagehide listeners
+        // that stay registered after setEnabled(false).
+        if (!this.enabled || this.config.sendEngagementOnHide === false || !this.clientId) {
             return;
         }
         // Read without draining: below the floor, the time stays in the accumulator

@@ -2639,5 +2639,73 @@ describe('NgGa4Service', () => {
             expect(req.request.body['consent']).toEqual({ ad_user_data: 'DENIED' });
             req.flush({});
         });
+
+        it('does not initialise or mint an identifier while disabled', async () => {
+            reconfigureTestBed({ enabled: false });
+            await service.init();
+
+            expect(mockLocalStorage['ga_client_id']).toBeUndefined();
+            httpMock.expectNone(() => true);
+        });
+
+        it('starts collecting after setEnabled(true)', async () => {
+            reconfigureTestBed({ enabled: false });
+            await service.init();
+
+            service.setEnabled(true);
+            // Awaits the in-flight init started by setEnabled, not a fresh one —
+            // this only works because init() memoises its promise.
+            await service.init();
+            service.trackEvent('after_consent');
+
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(req.request.body['events'][0]['name']).toBe('after_consent');
+            req.flush({});
+        });
+
+        it('drops events fired while disabled instead of replaying them on enable', async () => {
+            reconfigureTestBed({ enabled: false });
+            await service.init();
+            service.trackEvent('lost_event');
+
+            service.setEnabled(true);
+            await service.init();
+            service.trackEvent('after_consent');
+
+            // Anchored positively: exactly one request, and it is the post-consent
+            // one. A bare expectNone would pass even if the drop logic were deleted.
+            const reqs = httpMock.match(() => true);
+            expect(reqs.length).toBe(1);
+            expect(reqs[0].request.body['events'][0]['name']).toBe('after_consent');
+            reqs[0].flush({});
+        });
+
+        it('stops sending after setEnabled(false) without deleting the identifier', async () => {
+            await service.init();
+            const stored = mockLocalStorage['ga_client_id'];
+            expect(stored).toBeDefined();
+
+            service.setEnabled(false);
+            service.trackEvent('ignored');
+
+            httpMock.expectNone(() => true);
+            // setEnabled is a kill switch, not a consent withdrawal.
+            expect(mockLocalStorage['ga_client_id']).toBe(stored);
+        });
+
+        it('does not flush engagement on hide after setEnabled(false)', async () => {
+            await service.init();
+            service.trackPageView('/page');
+            httpMock.expectOne(r => r.url.includes('/mp/collect')).flush({});
+
+            service.setEnabled(false);
+            jasmine.clock().tick(5000);
+            // forceBeacon would otherwise bypass HttpTestingController entirely.
+            (service as any).getNavigator = () => ({});
+            (service as any).getFetch = () => undefined;
+            window.dispatchEvent(new Event('pagehide'));
+
+            httpMock.expectNone(() => true);
+        });
     });
 });
