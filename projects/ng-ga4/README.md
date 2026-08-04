@@ -85,9 +85,24 @@ bootstrapApplication(AppComponent, {
 
 ### Engagement measurement
 
-`engagement_time_msec` drives GA4's average engagement time, engaged sessions,
-engagement rate and bounce rate. Each hit reports the time elapsed *since the
-previous hit*, not a running total — the interval gtag.js tracks as `_et`.
+`engagement_time_msec` drives GA4's **average engagement time**. Each hit
+reports the time elapsed *since the previous hit*, not a running total — the
+interval gtag.js tracks as `_et`.
+
+It does **not** drive **engaged sessions**, and so does not drive engagement
+rate or bounce rate either, which both derive from that classification. On a
+scratch property fed only by the Measurement Protocol, a custom event
+carrying `engagement_time_msec: 15000` produced a non-zero average engagement
+time while engaged sessions stayed at **0**, even though 15 s clears GA4's
+documented 10-second threshold. Read three times over 54 hours — past GA4's
+full processing window — with identical results, so this is not GA4 still
+catching up.
+
+The likely reason is that engaged-session status comes from a signal gtag.js
+sets on its own collection endpoint, which the Measurement Protocol does not
+expose. Treat average engagement time as genuinely improved, and engaged
+sessions, engagement rate and bounce rate as out of reach on an MP-only
+property. See [#43](https://github.com/streamvessel/ng-ga4/issues/43).
 
 Time accrues only while the page is visible *and* focused, matching GA4's own
 definition of engagement: switching tabs or windows, or minimising the
@@ -100,7 +115,7 @@ in the accumulator and rides out on the next hit or the eventual hide.
 `sendEngagementOnHide` (default `true`, set `false` to disable) sends an
 event when the page actually hides or is torn down (`pagehide`), carrying
 that time — without it, a visit that only fires the initial `page_view`
-reports ~0 ms of engagement and reads as a bounce.
+reports ~0 ms of engagement however long the user actually stayed.
 
 That event can't be named `user_engagement`, which the Measurement Protocol
 reserves, so it ships as an ordinary custom event, `engagementEventName`

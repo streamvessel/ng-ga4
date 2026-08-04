@@ -90,7 +90,11 @@ export interface NgGa4Config {
      * Send an event when the page actually hides (a tab switch or close) or is
      * torn down (`pagehide`), carrying the engagement time accrued since the
      * last hit — without it, a single-page visit reports ~0 ms of engagement
-     * and reads as a bounce. Default `true`.
+     * however long the user actually stayed. Default `true`.
+     *
+     * Raises GA4's average engagement time. It does not affect engaged
+     * sessions, engagement rate or bounce rate on a Measurement-Protocol-only
+     * property — see the README.
      *
      * Losing focus alone (e.g. alt-tab) stops the clock the same way but does
      * not send this event; the accrued time rides out on the next hit or the
