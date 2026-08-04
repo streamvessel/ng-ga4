@@ -55,6 +55,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written back out under this option, in any configuration — doing so would
   resurrect an identifier a user, or their consent tool, had deleted.
   ([#13](https://github.com/streamvessel/ng-ga4/issues/13))
+- `LIMITATIONS.md`, shipped with the package, documenting what a GA4 property
+  fed only by this library cannot report: traffic attribution, New users,
+  engaged sessions, demographics, city and region. Each claim is labelled
+  **measured**, **derived**, **inferred** or **documented**, because they are
+  not all the same kind of claim — the first three come from three readings of
+  an untagged scratch property over 54 hours, the last from Google's own
+  documentation. Summarised in both READMEs, since the point is to be visible
+  before adoption rather than after an empty report.
+  ([#33](https://github.com/streamvessel/ng-ga4/issues/33))
 - `sendEngagementOnHide` option, default `true`: sends an event when the page
   hides, carrying the engagement time accrued since the last hit, so a
   single-page visit no longer reports ~0 ms of engagement however long the

@@ -8,6 +8,8 @@ Google Analytics 4 for Angular, over the [Measurement Protocol](https://develope
 
 Extracted from the [Stream Vessel](https://streamvessel.com) frontend, where it runs in production.
 
+The same trade-off has a cost: the Measurement Protocol is designed to *augment* tagging rather than replace it, so a property fed only by this library cannot report traffic attribution, New users, or engaged sessions, and shows no demographics. That is measured, not assumed — **[LIMITATIONS.md](projects/ng-ga4/LIMITATIONS.md)** has the evidence and the full list. If your app can load a script from `googletagmanager.com`, use `gtag.js`; this library is for when it cannot.
+
 ## Install
 
 ```bash
@@ -41,6 +43,7 @@ projects/ng-ga4/          # the library — the only publishable artifact
 ├── src/lib/              #   service, module, providers, config, timezone→country map
 ├── src/public-api.ts     #   public API surface
 ├── README.md             #   the docs published to npm
+├── LIMITATIONS.md        #   what MP cannot do, with the measurements
 └── ng-package.json       #   ng-packagr config (builds to dist/ng-ga4)
 .github/workflows/        # ci.yml (lint + test + build), publish.yml (manual release)
 ```
