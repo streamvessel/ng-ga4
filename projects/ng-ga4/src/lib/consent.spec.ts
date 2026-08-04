@@ -34,11 +34,15 @@ describe('ConsentState', () => {
     });
 
     it('fails closed on an invalid ad signal rather than omitting it', () => {
-        spyOn(console, 'warn');
+        const warn = spyOn(console, 'warn');
         const consent = new ConsentState();
         consent.merge({ adUserData: 'yes' as any });
         // Omitting would let GA4 apply the property default, which may be granted.
         expect(consent.toPayload()).toEqual({ ad_user_data: 'DENIED' });
+        // Load-bearing: toPayload() coerces any non-'granted' value to 'DENIED' on
+        // its own, so the assertion above passes even with merge() unvalidated. Only
+        // the warning proves merge() actually rejected the value.
+        expect(warn).toHaveBeenCalled();
     });
 
     it('fails closed on an invalid value supplied via the constructor', () => {
