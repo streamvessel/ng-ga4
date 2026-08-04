@@ -94,8 +94,9 @@ rate or bounce rate either, which both derive from that classification. On a
 scratch property fed only by the Measurement Protocol, a custom event
 carrying `engagement_time_msec: 15000` produced a non-zero average engagement
 time while engaged sessions stayed at **0**, even though 15 s clears GA4's
-documented 10-second threshold. Read twice, thirteen hours apart, with
-identical results — so this is not GA4 still processing.
+documented 10-second threshold. Read three times over 54 hours — past GA4's
+full processing window — with identical results, so this is not GA4 still
+catching up.
 
 The likely reason is that engaged-session status comes from a signal gtag.js
 sets on its own collection endpoint, which the Measurement Protocol does not

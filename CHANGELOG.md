@@ -89,8 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It does **not** fix engaged sessions, engagement rate or bounce rate: on a
   Measurement-Protocol-only property a custom event carrying
   `engagement_time_msec` raised average engagement time while engaged sessions
-  stayed at zero — measured twice, thirteen hours apart, with identical
-  results. See "Engagement measurement" in the README and
+  stayed at zero — measured three times over 54 hours, past GA4's full
+  processing window, with identical results. See "Engagement measurement" in
+  the README and
   [#43](https://github.com/streamvessel/ng-ga4/issues/43).
   ([#14](https://github.com/streamvessel/ng-ga4/issues/14))
 - A visit that fires only the initial `page_view` no longer reports ~0 ms of
