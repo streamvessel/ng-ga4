@@ -20,6 +20,33 @@ Built according to the official [Chrome Extensions GA4 guide](https://developer.
 - SSR-safe — inert on the server, so Universal and prerendering work
 - Supports both NgModule and standalone Angular apps
 
+## What you don't get
+
+Talking to the Measurement Protocol instead of loading `gtag.js` is what makes
+this library work under a strict CSP and inside an MV3 extension. It is also why
+several GA4 reports stay empty no matter what this library does — Google
+describes the Measurement Protocol as a way to *augment* tagging, not replace
+it, and warns that "only partial reporting may be available".
+
+| GA4 report or metric | On a property fed only by this library |
+|---|---|
+| Traffic acquisition | Everything is `(direct) / (none)` |
+| Session campaign | No rows at all |
+| New users | `0`, even for brand-new client IDs |
+| Engaged sessions, engagement rate, bounce rate | `0` / unusable |
+| Demographics, interests, Ads remarketing | No data |
+| City and region | No data — country is approximated from the timezone |
+
+Events, page views, active users and average engagement time all work normally.
+
+These are measured against an untagged scratch property, not assumed — see
+[LIMITATIONS.md](LIMITATIONS.md) for the evidence, the method, and which claims
+are proven versus inferred.
+
+**If you need those reports and your app can load a script from
+`googletagmanager.com`, use `gtag.js` instead.** This library is for the case
+where it cannot.
+
 ## Installation
 
 ```bash
@@ -102,7 +129,8 @@ The likely reason is that engaged-session status comes from a signal gtag.js
 sets on its own collection endpoint, which the Measurement Protocol does not
 expose. Treat average engagement time as genuinely improved, and engaged
 sessions, engagement rate and bounce rate as out of reach on an MP-only
-property. See [#43](https://github.com/streamvessel/ng-ga4/issues/43).
+property. See [LIMITATIONS.md](LIMITATIONS.md) for the measurement and
+[#43](https://github.com/streamvessel/ng-ga4/issues/43) for the tracking issue.
 
 Time accrues only while the page is visible *and* focused, matching GA4's own
 definition of engagement: switching tabs or windows, or minimising the
