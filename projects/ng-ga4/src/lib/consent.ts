@@ -48,9 +48,28 @@ export class ConsentState {
     }
 
     merge(partial: NgGa4Consent): void {
-        // Replaced in Task 3 with validation. Left naive here only so Task 2's
-        // three specs can pass on their own.
-        this.state = { ...this.state, ...partial };
+        for (const key of ['adUserData', 'adPersonalization', 'analyticsStorage'] as const) {
+            if (!(key in partial)) {
+                continue;
+            }
+            const value = partial[key];
+            // An explicit `undefined` is a no-op, not a reset: callers spreading a
+            // partial object should not silently clear a previously granted signal.
+            if (value === undefined) {
+                continue;
+            }
+            if (value === 'granted' || value === 'denied') {
+                this.state[key] = value;
+                continue;
+            }
+            // Fail closed, for all three. storageAllowed treats anything but
+            // 'denied' as permission, and an omitted ad signal lets GA4 fall back
+            // to a property default that may be granted — so neither "ignore" nor
+            // "leave unset" is safe. TypeScript blocks this path; untyped callers
+            // and values threaded from a consent tool do not.
+            console.warn(`[ng-ga4] Invalid consent value "${value}" for "${key}" — treating as denied.`);
+            this.state[key] = 'denied';
+        }
     }
 
     /** `null` when neither ad signal is set, so the key is omitted from the body entirely. */
