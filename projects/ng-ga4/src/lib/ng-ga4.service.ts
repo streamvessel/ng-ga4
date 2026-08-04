@@ -97,7 +97,16 @@ export class NgGa4Service implements OnDestroy {
         // synchronously before the first await, so a second caller would resolve
         // while the first is still suspended. setEnabled(true) followed by
         // `await init()` has to await the real thing.
-        return this.initPromise ??= this.runInit();
+        //
+        // A rejection is deliberately NOT memoised. localStorage.setItem throws in
+        // Safari private browsing and on quota exhaustion, and caching that would
+        // poison the service for its whole lifetime — every later setEnabled(true)
+        // would hand back the same rejected promise. Clearing it lets a later call
+        // retry.
+        return this.initPromise ??= this.runInit().catch(err => {
+            this.initPromise = null;
+            throw err;
+        });
     }
 
     private async runInit(): Promise<void> {
@@ -161,11 +170,22 @@ export class NgGa4Service implements OnDestroy {
      */
     setEnabled(enabled: boolean): void {
         this.enabled = enabled;
-        if (!enabled || !this.isBrowser) {
+        if (!enabled) {
+            // Close the interval so the disabled window is not measured. Time
+            // accrued before this point was collected under consent and stays in
+            // the accumulator to ride out on a later hit.
+            this.engagement?.setEngaged(false);
             return;
         }
-        // init() memoises, so a repeat call is a no-op rather than a second run.
-        void this.init();
+        if (!this.isBrowser) {
+            return;
+        }
+        // Reopen if the page is currently engaged — the listeners were gated off
+        // while disabled, so nothing else will reopen it until the next focus.
+        this.setEngagementActive(this.isPageEngaged());
+        // Caught, not `void`ed: a storage failure during a late init would
+        // otherwise surface as an unhandled promise rejection in the host app.
+        this.init().catch(err => console.warn('[ng-ga4] init failed', err));
     }
 
     ngOnDestroy(): void {
@@ -589,6 +609,15 @@ export class NgGa4Service implements OnDestroy {
         return this.engagement?.consume() ?? 0;
     }
 
+    // Engagement only accrues while collection is enabled. The listeners below stay
+    // registered after setEnabled(false), so without this gate a focus or
+    // visibilitychange during the disabled window would reopen the interval and the
+    // first hit after re-enabling would report time the user spent while collection
+    // was supposedly off.
+    private setEngagementActive(engaged: boolean): void {
+        this.engagement?.setEngaged(engaged && this.enabled);
+    }
+
     private registerEngagementListeners(): void {
         if (typeof document === 'undefined' || typeof window === 'undefined') {
             return;
@@ -604,7 +633,7 @@ export class NgGa4Service implements OnDestroy {
             // hidden tab is a real end of the visit-so-far, worth a network hit.
             this.visibilityListener = () => {
                 const engaged = this.isPageEngaged();
-                this.engagement?.setEngaged(engaged);
+                this.setEngagementActive(engaged);
                 if (!engaged) {
                     this.flushEngagement();
                 }
@@ -614,12 +643,12 @@ export class NgGa4Service implements OnDestroy {
             // time is not lost — it stays in the accumulator and rides out on the
             // next hit, or on the eventual hide/pagehide, which still fires on tab close.
             this.blurListener = () => {
-                this.engagement?.setEngaged(false);
+                this.setEngagementActive(false);
             };
             // Shared with pageshow below — both just mean "back in front of the
             // user." Never flushes: neither event closes the interval, only opens it.
             const onFocusLike = () => {
-                this.engagement?.setEngaged(this.isPageEngaged());
+                this.setEngagementActive(this.isPageEngaged());
             };
             this.focusListener = onFocusLike;
             // bfcache restore: pagehide closed the interval on the way out; reopening
@@ -632,7 +661,7 @@ export class NgGa4Service implements OnDestroy {
             // drops those too. setEngaged(false) closes the interval before flushing so a
             // bfcache restore minutes later can't have that dead time recounted.
             this.pagehideListener = () => {
-                this.engagement?.setEngaged(false);
+                this.setEngagementActive(false);
                 this.flushEngagement();
             };
             document.addEventListener('visibilitychange', this.visibilityListener);

@@ -2707,5 +2707,42 @@ describe('NgGa4Service', () => {
 
             httpMock.expectNone(() => true);
         });
+
+        it('does not cache a rejected init, so a later call can retry', async () => {
+            let failing = true;
+            (localStorage.setItem as jasmine.Spy).and.callFake((key: string, value: string) => {
+                if (failing && key === 'ga_client_id') {
+                    throw new Error('QuotaExceededError');
+                }
+                mockLocalStorage[key] = value;
+            });
+
+            await expectAsync(service.init()).toBeRejected();
+
+            failing = false;
+            await service.init();
+
+            // A transient storage failure (Safari private browsing, quota) must not
+            // poison the service for the rest of its lifetime.
+            expect(mockLocalStorage['ga_client_id']).toBeDefined();
+        });
+
+        it('does not measure engagement while disabled', async () => {
+            await service.init();
+            service.trackPageView('/page');
+            httpMock.expectOne(r => r.url.includes('/mp/collect')).flush({});
+
+            service.setEnabled(false);
+            jasmine.clock().tick(10000);
+            service.setEnabled(true);
+            await service.init();
+
+            service.trackEvent('after');
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            // The 10s spent while collection was off must not be reported as
+            // engagement on the first hit after re-enabling.
+            expect(req.request.body['events'][0]['params']['engagement_time_msec']).toBeLessThan(1000);
+            req.flush({});
+        });
     });
 });
