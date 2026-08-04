@@ -4,6 +4,7 @@ import { isPlatformBrowser } from '@angular/common';
 import { NavigationEnd, Router } from '@angular/router';
 import { filter, Subscription } from 'rxjs';
 import { NG_GA4_CONFIG, NgGa4Config, NgGa4CookieOptions } from './ng-ga4.config';
+import { ConsentState, Ga4ConsentPayload, NgGa4Consent } from './consent';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
@@ -66,6 +67,7 @@ export class NgGa4Service implements OnDestroy {
     ]);
 
     private readonly isBrowser: boolean;
+    private readonly consent: ConsentState;
 
     constructor(
         private http: HttpClient,
@@ -75,6 +77,7 @@ export class NgGa4Service implements OnDestroy {
         @Inject(PLATFORM_ID) platformId: object
     ) {
         this.isBrowser = isPlatformBrowser(platformId);
+        this.consent = new ConsentState(config.consent);
     }
 
     async init(): Promise<void> {
@@ -121,6 +124,15 @@ export class NgGa4Service implements OnDestroy {
         // and "the listener just registered above can observe it" — see
         // catchUpSessionState() for why this can't simply be moved earlier instead.
         await this.catchUpSessionState();
+    }
+
+    /**
+     * Update consent at runtime. Merges into the current state — keys you omit are
+     * left alone. Call this on every app boot from your own consent store; this
+     * library deliberately does not persist consent itself.
+     */
+    setConsent(consent: NgGa4Consent): void {
+        this.consent.merge(consent);
     }
 
     ngOnDestroy(): void {
@@ -225,6 +237,7 @@ export class NgGa4Service implements OnDestroy {
             events: Array<{ name: string; params?: Record<string, any> }>;
             device?: Ga4Device;
             user_location?: Ga4UserLocation;
+            consent?: Ga4ConsentPayload;
         } = {
             client_id: this.clientId,
             // debug_mode has to ride on every event in the batch — DebugView only
@@ -241,6 +254,13 @@ export class NgGa4Service implements OnDestroy {
         }
         if (this.userLocation) {
             body.user_location = this.userLocation;
+        }
+        // Omitted entirely when neither ad signal is set, so GA4 applies the
+        // property's own defaults and an install that never calls setConsent()
+        // produces a byte-identical request to previous versions.
+        const consentPayload = this.consent.toPayload();
+        if (consentPayload) {
+            body.consent = consentPayload;
         }
 
         // The validation endpoint records nothing — "events sent to the validation

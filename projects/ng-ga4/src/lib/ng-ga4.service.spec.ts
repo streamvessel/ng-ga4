@@ -2607,4 +2607,37 @@ describe('NgGa4Service', () => {
             req.flush({ validationMessages: [] });
         });
     });
+
+    describe('consent', () => {
+        it('omits the consent key entirely by default', async () => {
+            await service.init();
+            service.trackEvent('test_event');
+
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            // Byte-identical to pre-consent versions: an existing install that never
+            // calls setConsent() must send exactly what it sent before.
+            expect(req.request.body['consent']).toBeUndefined();
+            req.flush({});
+        });
+
+        it('sends ad signals supplied via config', async () => {
+            reconfigureTestBed({ consent: { adUserData: 'granted', adPersonalization: 'denied' } });
+            await service.init();
+            service.trackEvent('test_event');
+
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(req.request.body['consent']).toEqual({ ad_user_data: 'GRANTED', ad_personalization: 'DENIED' });
+            req.flush({});
+        });
+
+        it('reflects a runtime setConsent() call on the next hit', async () => {
+            await service.init();
+            service.setConsent({ adUserData: 'denied' });
+            service.trackEvent('test_event');
+
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(req.request.body['consent']).toEqual({ ad_user_data: 'DENIED' });
+            req.flush({});
+        });
+    });
 });
