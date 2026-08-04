@@ -146,13 +146,15 @@ describe('NgGa4Service', () => {
                 get: (keys: string[]) => Promise.resolve(
                     keys.reduce((acc: any, k: string) => { if (chromeLocal[k] !== undefined) acc[k] = chromeLocal[k]; return acc; }, {})
                 ),
-                set: (items: any) => { Object.assign(chromeLocal, items); return Promise.resolve(); }
+                set: (items: any) => { Object.assign(chromeLocal, items); return Promise.resolve(); },
+                remove: (keys: string[]) => { for (const k of keys) { delete chromeLocal[k]; } return Promise.resolve(); }
             },
             session: {
                 get: (keys: string[]) => Promise.resolve(
                     keys.reduce((acc: any, k: string) => { if (chromeSession[k] !== undefined) acc[k] = chromeSession[k]; return acc; }, {})
                 ),
-                set: (items: any) => { Object.assign(chromeSession, items); return Promise.resolve(); }
+                set: (items: any) => { Object.assign(chromeSession, items); return Promise.resolve(); },
+                remove: (keys: string[]) => { for (const k of keys) { delete chromeSession[k]; } return Promise.resolve(); }
             }
         };
     }
@@ -172,6 +174,10 @@ describe('NgGa4Service', () => {
         mockLocalStorage = {};
         spyOn(localStorage, 'getItem').and.callFake((key: string) => mockLocalStorage[key] || null);
         spyOn(localStorage, 'setItem').and.callFake((key: string, value: string) => { mockLocalStorage[key] = value; });
+        // Deletion (consent withdrawal) is a first-class path now. Without this spy
+        // removeItem would hit the real localStorage while reads come from
+        // mockLocalStorage, so a delete would appear to silently do nothing.
+        spyOn(localStorage, 'removeItem').and.callFake((key: string) => { delete mockLocalStorage[key]; });
 
         spyOn(crypto, 'randomUUID').and.returnValue(MOCK_UUID as `${string}-${string}-${string}-${string}-${string}`);
 
