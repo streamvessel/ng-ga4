@@ -2744,5 +2744,28 @@ describe('NgGa4Service', () => {
             expect(req.request.body['events'][0]['params']['engagement_time_msec']).toBeLessThan(1000);
             req.flush({});
         });
+
+        it('does not reopen the engagement interval on focus while disabled', async () => {
+            await service.init();
+            service.trackPageView('/page');
+            httpMock.expectOne(r => r.url.includes('/mp/collect')).flush({});
+
+            service.setEnabled(false);
+            // The engagement listeners stay registered after setEnabled(false), so
+            // this is the case the gate in setEngagementActive actually exists for.
+            // The sibling spec above does not reach it: setEnabled(false) closes the
+            // interval directly, and with no event fired during the window the gate
+            // is never consulted.
+            window.dispatchEvent(new Event('focus'));
+            jasmine.clock().tick(10000);
+
+            service.setEnabled(true);
+            await service.init();
+            service.trackEvent('after');
+
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(req.request.body['events'][0]['params']['engagement_time_msec']).toBeLessThan(1000);
+            req.flush({});
+        });
     });
 });
