@@ -2839,6 +2839,11 @@ describe('NgGa4Service', () => {
 
         it('does not write probe cookies while deleting', async () => {
             reconfigureTestBed({ writeGaCookie: true });
+            // Karma's real hostname is `localhost` — a single label, which yields
+            // zero registrable-domain candidates. Under that hostname the probing
+            // and non-probing implementations behave identically, so without this
+            // stub the assertion below cannot tell them apart and passes either way.
+            spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
             await service.init();
             writtenCookies.length = 0;
 
