@@ -4,7 +4,7 @@
  * Call this from `chrome.runtime.onInstalled`, at service-worker top level:
  *
  * ```typescript
- * import { seedNgGa4ClientId } from 'ng-ga4';
+ * import { seedNgGa4ClientId } from '@stream-vessel/ng-ga4';
  *
  * chrome.runtime.onInstalled.addListener(() => seedNgGa4ClientId());
  * ```

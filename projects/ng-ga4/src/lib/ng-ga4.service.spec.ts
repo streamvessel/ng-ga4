@@ -3194,6 +3194,10 @@ describe('NgGa4Service', () => {
             await expectAsync(service.flushStorage()).toBeResolved();
         });
 
+        // Proves the writes reach storage, and nothing more. It cannot prove the
+        // flush is what got them there — setupChromeMock mutates synchronously,
+        // so this passes with runInit()'s flushStorage() deleted. The spec below
+        // is the one that pins that; keep both, but do not read this one alone.
         it('await init() implies the initial extension writes have landed', async () => {
             reconfigureTestBed({ isExtension: true });
             const chromeLocal: Record<string, any> = {};
@@ -3241,6 +3245,30 @@ describe('NgGa4Service', () => {
 
             expect(initDone).toBe(true);
             expect(mock.localStore['ga_session_number']).toBe('1');
+        });
+
+        // saveSessionState() copies sessionId and lastActivityTimestamp into
+        // locals before enqueueing rather than reading them inside the thunk.
+        // Mutation testing showed nothing detected the difference, because every
+        // existing spec leaves those fields untouched between enqueue and run.
+        it('persists the session state a queued write was issued for, not a later one', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const mock = setupDeferredChromeMock({ ga_client_id: 'ext-id' });
+
+            (service as any).sessionId = 'S1';
+            (service as any).lastActivityTimestamp = 1000;
+            (service as any).saveSessionState();
+            // Synchronously, so the thunk has not run yet: the fields move on
+            // before the write they were issued for reaches chrome.storage.
+            (service as any).sessionId = 'S2';
+            (service as any).lastActivityTimestamp = 2000;
+
+            await drainMicrotasks();
+            await mock.releaseAll();
+            await service.flushStorage();
+
+            expect(mock.sessionStore['ga_session_id']).toBe('S1');
+            expect(mock.sessionStore['ga_last_activity']).toBe('1000');
         });
 
         it('consent withdrawal removes after an in-flight write, never before', async () => {

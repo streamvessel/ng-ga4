@@ -228,6 +228,11 @@ export class NgGa4Service implements OnDestroy {
      * It is also not a guarantee against forced termination — a browser quit or
      * extension reload can drop an in-flight write whatever we do. For the client
      * ID specifically, `seedNgGa4ClientId()` removes the exposure entirely.
+     *
+     * The ordering guarantee is per service instance. A background worker and a
+     * popup each build their own injector, so each has its own chain, and Chrome
+     * still orders their writes against each other however it likes — awaiting
+     * this in one context says nothing about writes issued in another.
      */
     async flushStorage(): Promise<void> {
         let tail: Promise<void>;
@@ -337,7 +342,7 @@ export class NgGa4Service implements OnDestroy {
     private repersistIdentity(clientId: string): void {
         if (this.config.isExtension && chrome?.storage) {
             this.enqueueStorageWrite(
-                'chrome.storage.local.set',
+                'chrome.storage.local.set (repersist identity)',
                 // The inner catch recovers rather than reporting, so it must not
                 // propagate: this write failing is precisely when localStorage
                 // becomes the store, and a rejection here would be logged twice
@@ -1010,7 +1015,7 @@ export class NgGa4Service implements OnDestroy {
         }
         if (this.config.isExtension && chrome?.storage) {
             this.enqueueStorageWrite(
-                'chrome.storage.local.set',
+                'chrome.storage.local.set (session number)',
                 () => chrome.storage.local.set({ ga_session_number: sessionNumber.toString() })
             );
         } else {
@@ -1354,7 +1359,7 @@ export class NgGa4Service implements OnDestroy {
                 // Awaiting does not defeat MV3 teardown: it makes our code wait,
                 // not Chrome. seedNgGa4ClientId() is the fix that does — see #32.
                 await this.enqueueStorageWrite(
-                    'chrome.storage.local.set',
+                    'chrome.storage.local.set (mint client id)',
                     () => chrome.storage.local.set({ ga_client_id: clientId })
                 );
             }
