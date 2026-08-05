@@ -829,6 +829,9 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private saveSessionNumber(sessionNumber: number): void {
+        if (!this.consent.storageAllowed) {
+            return;
+        }
         if (this.config.isExtension && chrome?.storage) {
             chrome.storage.local.set({ ga_session_number: sessionNumber.toString() })
                 .catch(err => console.warn('[ng-ga4] chrome.storage.local.set failed', err));
@@ -945,6 +948,9 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private saveSessionState(): void {
+        if (!this.consent.storageAllowed) {
+            return;
+        }
         if (this.config.isExtension && chrome?.storage?.session) {
             chrome.storage.session.set({ ga_session_id: this.sessionId, ga_last_activity: this.lastActivityTimestamp.toString() })
                 .catch(err => console.warn('[ng-ga4] chrome.storage.session.set failed', err));
@@ -1029,6 +1035,9 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private persistGaCookie(clientId: string): void {
+        if (!this.consent.storageAllowed) {
+            return;
+        }
         const options = this.resolveCookieOptions();
         // An explicit domain bypasses discovery entirely. Strip any leading dot the
         // caller supplied — the attribute below always adds exactly one — so
@@ -1110,7 +1119,15 @@ export class NgGa4Service implements OnDestroy {
         }
     }
 
+    // Deliberately writes to localStorage even for extensions. This is the store
+    // the *fallback* path uses: loadOrCreateClientIdFromChromeStorage drops here
+    // when chrome.storage throws, and routing back to chrome.storage would write
+    // into the very store that just failed. The extension's own identity write is
+    // inline in that method and gated separately.
     private storeClientId(clientId: string): void {
+        if (!this.consent.storageAllowed) {
+            return;
+        }
         localStorage.setItem('ga_client_id', clientId);
     }
 
@@ -1137,7 +1154,14 @@ export class NgGa4Service implements OnDestroy {
                 return result['ga_client_id'];
             }
             const clientId = crypto.randomUUID();
-            await chrome.storage.local.set({ ga_client_id: clientId });
+            if (this.consent.storageAllowed) {
+                // Deliberately still awaited rather than routed through
+                // storeClientId: that method is fire-and-forget, and issue #32 is
+                // open precisely because un-awaited chrome.storage writes are lost
+                // to MV3 service-worker teardown. Do not "unify" these two by
+                // making this one fire-and-forget.
+                await chrome.storage.local.set({ ga_client_id: clientId });
+            }
             return clientId;
         } catch (err) {
             console.warn('[ng-ga4] chrome.storage.local failed, falling back to localStorage', err);

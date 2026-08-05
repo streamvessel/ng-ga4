@@ -2767,5 +2767,50 @@ describe('NgGa4Service', () => {
             expect(req.request.body['events'][0]['params']['engagement_time_msec']).toBeLessThan(1000);
             req.flush({});
         });
+
+        it('collects but persists nothing when storage is denied at startup', async () => {
+            // writeGaCookie: true is required or persistGaCookie is never reached and
+            // the cookie assertion below would pass on unmodified source.
+            reconfigureTestBed({ consent: { analyticsStorage: 'denied' }, writeGaCookie: true });
+            await service.init();
+            service.trackEvent('no_storage');
+
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(req.request.body['client_id']).toBeTruthy();
+            req.flush({});
+
+            expect(mockLocalStorage['ga_client_id']).toBeUndefined();
+            expect(mockLocalStorage['ga_session_id']).toBeUndefined();
+            expect(mockLocalStorage['ga_session_number']).toBeUndefined();
+            expect(writtenCookies.filter(c => c.startsWith('_ga=') && !/max-age=0\b/.test(c)).length).toBe(0);
+        });
+
+        it('keeps the in-memory client id stable across hits while denied', async () => {
+            reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+            await service.init();
+
+            service.trackEvent('one');
+            const first = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            const clientId = first.request.body['client_id'];
+            first.flush({});
+
+            service.trackEvent('two');
+            const second = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(second.request.body['client_id']).toBe(clientId);
+            second.flush({});
+        });
+
+        it('does not write the extension identity when storage is denied', async () => {
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal, {});
+            reconfigureTestBed({ isExtension: true, consent: { analyticsStorage: 'denied' } });
+
+            await service.init();
+
+            // The inline write in loadOrCreateClientIdFromChromeStorage bypasses
+            // storeClientId, so gating that method alone does not cover this.
+            expect(chromeLocal['ga_client_id']).toBeUndefined();
+            clearChromeMock();
+        });
     });
 });
