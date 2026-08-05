@@ -109,6 +109,7 @@ bootstrapApplication(AppComponent, {
 | `writeGaCookie` | `boolean \| NgGa4CookieOptions` | No | Write `_ga` when absent or unreadable, using the client ID already on hand, on the registrable domain, with `SameSite=Lax` and (on HTTPS) `Secure` by default. Pass `{}` to write with every default, or an `NgGa4CookieOptions` object to override `domain`, `flags`, or `maxAgeSeconds` — see "Interop with gtag.js" below. Off by default. Implied by `clientIdSource: 'cookie'`; ignored for `'storage'` and extensions. |
 | `sendEngagementOnHide` | `boolean` | No | Send an event when the page hides or is torn down (`pagehide`), carrying the engagement time accrued since the last hit. Default `true`. See "Engagement measurement" below. |
 | `engagementEventName` | `string` | No | Event name for the hide-time event above. Default `'page_engagement'`; can't be `user_engagement`. An invalid or reserved value falls back to the default with a console warning. See "Engagement measurement" below. |
+| `consent` | `NgGa4Consent` | No | Initial consent state. Default `{ analyticsStorage: 'granted' }` with both ad signals unset, which sends no `consent` field — identical to previous versions. See "Consent" below. |
 
 ### Engagement measurement
 
@@ -268,18 +269,85 @@ runs, be aware the probe is named `_ng_ga4_probe_<random>`, a fresh name on
 every attempt — worth knowing if you maintain a cookie declaration for a
 consent management platform, which typically wants a fixed name to declare.
 
-[Consent Mode](https://github.com/streamvessel/ng-ga4/issues/20) is not
-implemented yet. If you need consent before this library touches `_ga`,
-there are two things to gate on: writing and reading. Gate `writeGaCookie`
-(and `clientIdSource: 'cookie'`, which implies it) behind your own consent
-state to control writing; set `clientIdSource: 'storage'` until consent is
-granted to stop this library from reading an existing `_ga` cookie too —
-reading counts here as much as writing does.
+Consent Mode covers both directions here: denying `analyticsStorage` stops
+this library writing `_ga` and deletes any it already wrote, and
+`clientIdSource: 'storage'` stops it reading an existing `_ga` at all —
+reading counts as much as writing does. See [Consent](#consent).
 
 **Migration:** upgrading with both gtag.js and this library present will
 re-identify each returning ng-ga4 user once, merging them onto the gtag
 identity. This is the fix working as intended, but it is a real,
 one-time shift in your user counts — worth timing deliberately.
+
+## Consent
+
+Nothing changes when you upgrade: with no `consent` config and no `setConsent()`
+call, the library behaves exactly as before and sends no `consent` field, so GA4
+applies your property's own defaults.
+
+For a consent-banner flow, start disabled and enable on accept:
+
+```typescript
+NgGa4Module.forRoot({
+    measurementId: 'G-XXXXXXXXX',
+    apiSecret: 'your-api-secret',
+    enabled: false,          // nothing is collected, and no identifier is created
+    isExtension: false,
+})
+```
+
+```typescript
+constructor(private ga4: NgGa4Service) {}
+
+onBannerAccepted(): void {
+    this.ga4.setConsent({
+        analyticsStorage: 'granted',
+        adUserData: 'granted',
+        adPersonalization: 'denied',
+    });
+    this.ga4.setEnabled(true);
+}
+```
+
+While disabled, **no client ID is minted and nothing is written to storage** —
+initialisation is deferred until `setEnabled(true)`. Events fired before that
+point are dropped, not queued, so the initial page view is lost. That is
+deliberate: replaying pre-consent events on grant is what consent exists to
+prevent.
+
+### The three signals are not alike
+
+| Signal | Sent to GA4? | Effect |
+|---|---|---|
+| `adUserData` | Yes, as `consent.ad_user_data` | Declarative — GA4 acts on it |
+| `adPersonalization` | Yes, as `consent.ad_personalization` | Declarative — GA4 acts on it |
+| `analyticsStorage` | **No** | Controls whether *this library* persists identifiers |
+
+`analytics_storage` is not a Measurement Protocol field. It governs local storage
+only: denying it stops all writes to `localStorage`, `chrome.storage` and the
+`_ga` cookie, and **deletes** anything already stored — including on a fresh boot
+that starts denied, so a returning visitor's prior identifier is removed.
+Collection continues with an in-memory client ID, so a page reload starts a fresh
+identity and a fresh session.
+
+Deleting `_ga` is durable only where `gtag.js` is not also installed; gtag
+rewrites the cookie on its next hit. Under `clientIdSource: 'storage'` the cookie
+is left alone entirely, since that mode never touches it.
+
+Any invalid consent value — for any of the three signals — is treated as `denied`
+with a console warning, rather than silently reading as permission.
+
+### You own the consent state
+
+This library does not persist your users' choices. Your app already stores its
+banner result, and a second copy here would be a second source of truth that can
+disagree with it. **Call `setConsent()` on every boot** from your own store.
+
+### `setEnabled()` is a kill switch, not a withdrawal
+
+`setEnabled(false)` stops sending — including the engagement flush on tab hide,
+and engagement time stops accruing — but deletes nothing. To remove stored
+identifiers, deny `analyticsStorage`.
 
 ## Usage
 
@@ -317,8 +385,11 @@ this.analytics.trackPageView('/custom-page', 'Custom Page Title');
 | `init(): Promise<void>` | Initialize analytics. Called automatically via `APP_INITIALIZER`. |
 | `trackPageView(pagePath: string, pageTitle?: string): void` | Track a page view. Called automatically on router navigation. |
 | `trackEvent(name: string, params?: Record<string, any>): void` | Track a custom event. |
+| `setConsent(consent: NgGa4Consent): void` | Update consent at runtime. Partial merge — omitted keys are left alone. |
+| `setEnabled(enabled: boolean): void` | Turn collection on or off at runtime. Enabling for the first time runs the deferred initialisation. |
 
-All methods are no-ops when `enabled` is `false` or before initialization.
+Tracking methods are no-ops while collection is disabled — `enabled: false` in
+config, or `setEnabled(false)` at runtime — and before initialization.
 
 ## Chrome Extension Setup
 

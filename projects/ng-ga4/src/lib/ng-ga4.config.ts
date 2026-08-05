@@ -70,8 +70,9 @@ export interface NgGa4Config {
      * existing user upgrading from a version before this shape change keeps
      * their previously stored `crypto.randomUUID()` as-is; reusing rather
      * than replacing it is deliberate, to avoid re-identifying the user. Off
-     * by default: this library does not set a cookie unless asked, which
-     * matters because Consent Mode is not implemented yet. Ignored for
+     * by default: this library does not set a cookie unless asked. Denying
+     * `analyticsStorage` via `consent` suppresses this write and deletes any
+     * cookie already present. Ignored for
      * `'storage'` and for extensions; implied by `'cookie'`.
      *
      * Truthiness governs whether the cookie is written — `{}` writes with all
