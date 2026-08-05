@@ -32,7 +32,7 @@ import { NgGa4Module } from '@stream-vessel/ng-ga4';
 export class AppModule {}
 ```
 
-**[→ Full documentation](projects/ng-ga4/README.md)** — standalone (`provideNgGa4`) setup, every config option, event and page-view tracking, Chrome extension notes, debug mode, and the API-secret security model.
+**[→ Full documentation](projects/ng-ga4/README.md)** — standalone (`provideNgGa4`) setup, every config option, event and page-view tracking, Chrome extension notes including service-worker teardown, debug mode, and the API-secret security model.
 
 ## Repository layout
 
