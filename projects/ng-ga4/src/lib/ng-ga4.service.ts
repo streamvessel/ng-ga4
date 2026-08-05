@@ -275,10 +275,17 @@ export class NgGa4Service implements OnDestroy {
             return;
         }
         if (this.config.isExtension && chrome?.storage) {
-            chrome.storage.local.remove(['ga_client_id', 'ga_session_number'])
-                .catch(err => console.warn('[ng-ga4] chrome.storage.local.remove failed', err));
-            chrome.storage.session?.remove(['ga_session_id', 'ga_last_activity'])
-                .catch(err => console.warn('[ng-ga4] chrome.storage.session.remove failed', err));
+            this.enqueueStorageWrite(
+                'chrome.storage.local.remove',
+                () => chrome.storage.local.remove(['ga_client_id', 'ga_session_number'])
+            );
+            this.enqueueStorageWrite(
+                'chrome.storage.session.remove',
+                // Optional chaining yields undefined when the area is absent (MV3
+                // exposes chrome.storage.session to trusted contexts only), which
+                // enqueueStorageWrite accepts as a no-op link.
+                () => chrome.storage.session?.remove(['ga_session_id', 'ga_last_activity'])
+            );
             // Deliberately no early return. The *write* paths fall back to
             // localStorage whenever chrome.storage.session is absent (MV3 exposes it
             // to trusted contexts only), and loadOrCreateClientId falls back to
@@ -329,12 +336,19 @@ export class NgGa4Service implements OnDestroy {
     // and leaving it absent makes the next reload restart the count at 0.
     private repersistIdentity(clientId: string): void {
         if (this.config.isExtension && chrome?.storage) {
-            chrome.storage.local.set({ ga_client_id: clientId })
-                .catch(err => {
-                    console.warn('[ng-ga4] chrome.storage.local.set failed', err);
-                    // Same fallback the init path uses when chrome.storage is broken.
-                    this.storeClientId(clientId);
-                });
+            this.enqueueStorageWrite(
+                'chrome.storage.local.set',
+                // The inner catch recovers rather than reporting, so it must not
+                // propagate: this write failing is precisely when localStorage
+                // becomes the store, and a rejection here would be logged twice
+                // and recovered once.
+                () => chrome.storage.local.set({ ga_client_id: clientId })
+                    .catch(err => {
+                        console.warn('[ng-ga4] chrome.storage.local.set failed', err);
+                        // Same fallback the init path uses when chrome.storage is broken.
+                        this.storeClientId(clientId);
+                    })
+            );
         } else {
             this.storeClientId(clientId);
         }
@@ -1331,12 +1345,18 @@ export class NgGa4Service implements OnDestroy {
             }
             const clientId = crypto.randomUUID();
             if (this.consent.storageAllowed) {
-                // Deliberately still awaited rather than routed through
-                // storeClientId: that method is fire-and-forget, and issue #32 is
-                // open precisely because un-awaited chrome.storage writes are lost
-                // to MV3 service-worker teardown. Do not "unify" these two by
-                // making this one fire-and-forget.
-                await chrome.storage.local.set({ ga_client_id: clientId });
+                // Enqueued like every other write so a write issued later cannot
+                // overtake it, and awaited so a failure reaches the catch below —
+                // falling back to localStorage rather than returning an ID that was
+                // persisted nowhere. enqueueStorageWrite's returned promise keeps
+                // the rejection for exactly this reason.
+                //
+                // Awaiting does not defeat MV3 teardown: it makes our code wait,
+                // not Chrome. seedNgGa4ClientId() is the fix that does — see #32.
+                await this.enqueueStorageWrite(
+                    'chrome.storage.local.set',
+                    () => chrome.storage.local.set({ ga_client_id: clientId })
+                );
             }
             return clientId;
         } catch (err) {

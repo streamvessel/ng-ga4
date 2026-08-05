@@ -3013,9 +3013,11 @@ describe('NgGa4Service', () => {
             expect(clientId).toBeDefined();
 
             service.setConsent({ analyticsStorage: 'denied' });
+            await service.flushStorage();
             expect(chromeLocal['ga_client_id']).toBeUndefined();
 
             service.setConsent({ analyticsStorage: 'granted' });
+            await service.flushStorage();
 
             // Writing to localStorage here would leave the ID somewhere
             // loadOrCreateClientIdFromChromeStorage never reads, so the next
@@ -3040,6 +3042,7 @@ describe('NgGa4Service', () => {
             expect(chromeSession['ga_session_id']).toBeDefined();
 
             service.setConsent({ analyticsStorage: 'denied' });
+            await service.flushStorage();
 
             expect(chromeLocal['ga_client_id']).toBeUndefined();
             expect(chromeSession['ga_session_id']).toBeUndefined();
@@ -3202,6 +3205,61 @@ describe('NgGa4Service', () => {
             expect(chromeLocal['ga_client_id']).toBeDefined();
             expect(chromeLocal['ga_session_number']).toBe('1');
             expect(chromeSession['ga_session_id']).toBeDefined();
+        });
+
+        it('consent withdrawal removes after an in-flight write, never before', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const mock = setupDeferredChromeMock({ ga_client_id: 'ext-id' });
+
+            (service as any).saveSessionNumber(4);
+            // Denied while that write is still open. The remove must queue behind
+            // it — landing first would let the write resurrect the identifier.
+            service.setConsent({ analyticsStorage: 'denied' });
+            await drainMicrotasks();
+
+            expect(mock.calls).toEqual(['local.set:ga_session_number']);
+
+            await mock.releaseAll();
+            await service.flushStorage();
+
+            expect(mock.calls).toEqual([
+                'local.set:ga_session_number',
+                'local.remove:ga_client_id,ga_session_number',
+                'session.remove:ga_session_id,ga_last_activity'
+            ]);
+            expect(mock.localStore['ga_session_number']).toBeUndefined();
+            expect(mock.localStore['ga_client_id']).toBeUndefined();
+        });
+
+        // The only spec that makes enqueueStorageWrite's two-promise split
+        // load-bearing. 'should not throw when chrome.storage.local.set rejects'
+        // asserts only that init() resolves, so it passes just as happily against
+        // a version that returns an ID persisted nowhere at all.
+        it('falls back to localStorage when the client-ID write is rejected', async () => {
+            reconfigureTestBed({ isExtension: true });
+            (window as any).chrome.storage = {
+                local: {
+                    get: () => Promise.resolve({}),
+                    set: () => Promise.reject(new Error('quota exceeded')),
+                    remove: () => Promise.resolve()
+                },
+                session: {
+                    get: () => Promise.resolve({}),
+                    set: () => Promise.resolve(),
+                    remove: () => Promise.resolve()
+                }
+            };
+            spyOn(console, 'warn');
+
+            await service.init();
+
+            // The chrome.storage write failed, so the ID has to have landed in
+            // the fallback store — not merely been minted and returned.
+            expect(mockLocalStorage['ga_client_id']).toBeDefined();
+            service.trackEvent('probe');
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(req.request.body.client_id).toBe(mockLocalStorage['ga_client_id']);
+            req.flush('', { status: 204, statusText: 'No Content' });
         });
     });
 });
