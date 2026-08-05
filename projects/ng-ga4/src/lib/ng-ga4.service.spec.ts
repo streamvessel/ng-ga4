@@ -2923,5 +2923,52 @@ describe('NgGa4Service', () => {
             expect(mockLocalStorage['ga_client_id']).toBeUndefined();
             clearChromeMock();
         });
+
+        it('clears the chrome.storage identity on withdrawal', async () => {
+            const chromeLocal: Record<string, any> = {};
+            const chromeSession: Record<string, any> = {};
+            setupChromeMock(chromeLocal, chromeSession);
+            reconfigureTestBed({ isExtension: true });
+
+            await service.init();
+            service.trackEvent('seed');
+            httpMock.expectOne(r => r.url.includes('/mp/collect')).flush({});
+            // Asserted before the withdrawal so the post-condition cannot hold
+            // vacuously against state that was never written in the first place.
+            expect(chromeLocal['ga_client_id']).toBeDefined();
+            expect(chromeSession['ga_session_id']).toBeDefined();
+
+            service.setConsent({ analyticsStorage: 'denied' });
+
+            expect(chromeLocal['ga_client_id']).toBeUndefined();
+            expect(chromeSession['ga_session_id']).toBeUndefined();
+            clearChromeMock();
+        });
+
+        it('leaves the _ga cookie alone under clientIdSource: storage', async () => {
+            reconfigureTestBed({ clientIdSource: 'storage' });
+            await service.init();
+            writtenCookies.length = 0;
+
+            service.setConsent({ analyticsStorage: 'denied' });
+
+            // 'storage' is documented as "never touch the cookie". Storage deletion
+            // still happens; the cookie is not ours to remove.
+            expect(writtenCookies.length).toBe(0);
+            expect(mockLocalStorage['ga_client_id']).toBeUndefined();
+        });
+
+        it('writes nothing to storage when a session rolls while denied', async () => {
+            reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+            await service.init();
+
+            // Past the 30-minute inactivity timeout, so the next hit rolls a session.
+            jasmine.clock().tick(31 * 60 * 1000);
+            service.trackEvent('after_roll');
+            httpMock.expectOne(r => r.url.includes('/mp/collect')).flush({});
+
+            expect(mockLocalStorage['ga_session_id']).toBeUndefined();
+            expect(mockLocalStorage['ga_session_number']).toBeUndefined();
+        });
     });
 });
