@@ -146,6 +146,13 @@ export class NgGa4Service implements OnDestroy {
         // and "the listener just registered above can observe it" — see
         // catchUpSessionState() for why this can't simply be moved earlier instead.
         await this.catchUpSessionState();
+
+        // Booting denied is not a transition, so setConsent() never fires. Without
+        // this, a returning visitor whose app boots denied keeps the identifier
+        // written under a previous visit's consent, indefinitely.
+        if (!this.consent.storageAllowed) {
+            this.clearPersistedIdentity();
+        }
     }
 
     /**
@@ -154,7 +161,11 @@ export class NgGa4Service implements OnDestroy {
      * library deliberately does not persist consent itself.
      */
     setConsent(consent: NgGa4Consent): void {
+        const wasAllowed = this.consent.storageAllowed;
         this.consent.merge(consent);
+        if (wasAllowed && !this.consent.storageAllowed) {
+            this.clearPersistedIdentity();
+        }
     }
 
     /**
@@ -186,6 +197,56 @@ export class NgGa4Service implements OnDestroy {
         // Caught, not `void`ed: a storage failure during a late init would
         // otherwise surface as an unhandled promise rejection in the host app.
         this.init().catch(err => console.warn('[ng-ga4] init failed', err));
+    }
+
+    // A withdrawal that leaves the identifier on disk is not a withdrawal. Note this
+    // ignores provenance: an ID adopted from an existing _ga is deleted too. #13's
+    // rule is that we never *write back* an adopted ID; a user withdrawing consent
+    // is withdrawing it for the identifier, not for our authorship of it.
+    private clearPersistedIdentity(): void {
+        if (!this.isBrowser) {
+            return;
+        }
+        if (this.config.isExtension && chrome?.storage) {
+            chrome.storage.local.remove(['ga_client_id', 'ga_session_number'])
+                .catch(err => console.warn('[ng-ga4] chrome.storage.local.remove failed', err));
+            chrome.storage.session?.remove(['ga_session_id', 'ga_last_activity'])
+                .catch(err => console.warn('[ng-ga4] chrome.storage.session.remove failed', err));
+            // Deliberately no early return. The *write* paths fall back to
+            // localStorage whenever chrome.storage.session is absent (MV3 exposes it
+            // to trusted contexts only), and loadOrCreateClientId falls back to
+            // localStorage if chrome.storage throws. Removing a key that was never
+            // written costs nothing; missing one leaks the whole point of this method.
+        }
+        localStorage.removeItem('ga_client_id');
+        localStorage.removeItem('ga_session_id');
+        localStorage.removeItem('ga_last_activity');
+        localStorage.removeItem('ga_session_number');
+        this.deleteGaCookie();
+    }
+
+    private deleteGaCookie(): void {
+        // 'storage' is documented as "never touch the cookie". We never read or wrote
+        // _ga under it, so deleting it would break an explicit configuration contract
+        // to remove something that was never ours.
+        if (this.resolveClientIdSource() === 'storage') {
+            return;
+        }
+        const options = this.resolveCookieOptions();
+        const explicit = options.domain?.replace(/^\.+/, '');
+        // NOT discoverCookieDomain(): that probes by writing cookies. Fanning out
+        // across every candidate is both safer and more thorough — deletion is
+        // idempotent, cannot create a cookie, and this also clears a host-only _ga
+        // that discovery would miss.
+        const domains = explicit ? [explicit] : registrableDomainCandidates(this.getHostname());
+        // Reuse the caller's flags: a cookie written with 'SameSite=None; Secure'
+        // for a cross-site iframe is rejected — and so not deleted — by a write
+        // that silently defaults back to SameSite=Lax.
+        const flags = options.flags ?? `SameSite=Lax${this.getProtocol() === 'https:' ? '; Secure' : ''}`;
+        this.setCookie(`_ga=; path=/; max-age=0; ${flags}`);
+        for (const domain of domains) {
+            this.setCookie(`_ga=; path=/; max-age=0; domain=.${domain}; ${flags}`);
+        }
     }
 
     ngOnDestroy(): void {

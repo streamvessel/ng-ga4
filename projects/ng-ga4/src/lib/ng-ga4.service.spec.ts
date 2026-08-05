@@ -2812,5 +2812,57 @@ describe('NgGa4Service', () => {
             expect(chromeLocal['ga_client_id']).toBeUndefined();
             clearChromeMock();
         });
+
+        it('deletes the stored client id and _ga cookie on withdrawal', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            await service.init();
+            expect(mockLocalStorage['ga_client_id']).toBeDefined();
+
+            service.setConsent({ analyticsStorage: 'denied' });
+
+            expect(mockLocalStorage['ga_client_id']).toBeUndefined();
+            expect(mockLocalStorage['ga_session_id']).toBeUndefined();
+            expect(mockLocalStorage['ga_session_number']).toBeUndefined();
+            expect(writtenCookies.some(c => c.startsWith('_ga=') && /max-age=0\b/.test(c))).toBe(true);
+        });
+
+        it('deletes an identifier from a previous visit when booting denied', async () => {
+            // The commonest real case: the app read its own banner store and booted
+            // denied. No transition occurs, so transition-only deletion misses it.
+            mockLocalStorage['ga_client_id'] = 'existing-id';
+            reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+
+            await service.init();
+
+            expect(mockLocalStorage['ga_client_id']).toBeUndefined();
+        });
+
+        it('does not write probe cookies while deleting', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            await service.init();
+            writtenCookies.length = 0;
+
+            service.setConsent({ analyticsStorage: 'denied' });
+
+            // Domain discovery works by writing probes. Doing that as the first act
+            // of a consent withdrawal is indefensible.
+            expect(writtenCookies.every(c => c.startsWith('_ga='))).toBe(true);
+        });
+
+        it('keeps collecting with the same client id after withdrawal', async () => {
+            await service.init();
+            service.trackEvent('before');
+            const before = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            const clientId = before.request.body['client_id'];
+            before.flush({});
+
+            service.setConsent({ analyticsStorage: 'denied' });
+            service.trackEvent('after');
+
+            const after = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            // Withdrawal removes the durable copy; it does not re-identify the user.
+            expect(after.request.body['client_id']).toBe(clientId);
+            after.flush({});
+        });
     });
 });
