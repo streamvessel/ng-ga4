@@ -101,7 +101,7 @@ bootstrapApplication(AppComponent, {
 |----------|------|----------|-------------|
 | `measurementId` | `string` | Yes | GA4 Measurement ID (e.g. `G-XXXXXXXXX`) |
 | `apiSecret` | `string` | Yes | Measurement Protocol API secret |
-| `enabled` | `boolean` | Yes | Enable/disable analytics (no-ops when `false`) |
+| `enabled` | `boolean` | Yes | Initial state of collection. `false` defers initialisation entirely — no client ID, no storage write — until `setEnabled(true)`. See "Consent" below. |
 | `isExtension` | `boolean` | Yes | Set `true` for Chrome extensions — uses `chrome.storage` instead of `localStorage` |
 | `siteUrl` | `string` | No | Base URL for `page_location` parameter. Required for extensions since `document.location.href` points to `chrome-extension://` |
 | `debug` | `boolean` | No | Tag events with `debug_mode` so they appear in GA4 DebugView, and log validation problems to the console. Events are still recorded. |
