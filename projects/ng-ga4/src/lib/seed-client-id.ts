@@ -31,11 +31,18 @@
  * worker startup.
  */
 export async function seedNgGa4ClientId(): Promise<string | null> {
-    if (typeof chrome === 'undefined' || !chrome?.storage?.local) {
-        console.warn('[ng-ga4] seedNgGa4ClientId: chrome.storage.local is unavailable.');
-        return null;
-    }
     try {
+        // Inside the try, not before it. `chrome` is an undeclared identifier on
+        // Firefox, Safari and the server, where reading it throws a ReferenceError
+        // that optional chaining does not prevent — `chrome?.storage` short-circuits
+        // on a null *value*, not on a missing *binding*. Guarding outside the try
+        // would leave that throw escaping into an onInstalled listener, which is the
+        // one thing this function promises never to do. Here the typeof check only
+        // buys a clearer message; the contract holds even without it.
+        if (typeof chrome === 'undefined' || !chrome?.storage?.local) {
+            console.warn('[ng-ga4] seedNgGa4ClientId: chrome.storage.local is unavailable.');
+            return null;
+        }
         const result = await chrome.storage.local.get(['ga_client_id']);
         const existing = result['ga_client_id'];
         // Idempotent by contract: onInstalled fires on update as well as install,

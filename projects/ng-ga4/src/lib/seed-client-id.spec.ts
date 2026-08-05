@@ -1,18 +1,24 @@
 import { seedNgGa4ClientId } from './seed-client-id';
 
 describe('seedNgGa4ClientId', () => {
-    let originalChromeStorage: any;
+    let originalChrome: any;
+    let hadChrome: boolean;
 
     beforeEach(() => {
-        (window as any).chrome = (window as any).chrome || {};
-        originalChromeStorage = (window as any).chrome.storage;
+        // The whole object is saved and replaced with a shallow copy, not just
+        // `.storage` stashed: one spec below deletes `window.chrome` outright, so
+        // restoring only `.storage` would throw on undefined. Copying also keeps
+        // our `.storage` mutations off the object ng-ga4.service.spec.ts shares.
+        hadChrome = 'chrome' in (window as any);
+        originalChrome = (window as any).chrome;
+        (window as any).chrome = { ...originalChrome };
     });
 
     afterEach(() => {
-        if (originalChromeStorage !== undefined) {
-            (window as any).chrome.storage = originalChromeStorage;
+        if (hadChrome) {
+            (window as any).chrome = originalChrome;
         } else {
-            delete (window as any).chrome.storage;
+            delete (window as any).chrome;
         }
     });
 
@@ -65,7 +71,38 @@ describe('seedNgGa4ClientId', () => {
         spyOn(console, 'warn');
 
         expect(await seedNgGa4ClientId()).toBeNull();
-        expect(console.warn).toHaveBeenCalled();
+        // The specific message, not just "warned": the catch-all below also
+        // returns null and warns, so a looser assertion would pass even with the
+        // availability guard deleted entirely.
+        expect(console.warn).toHaveBeenCalledWith(
+            jasmine.stringContaining('chrome.storage.local is unavailable')
+        );
+    });
+
+    // The genuinely-undeclared case (Firefox, Safari, SSR) cannot be reached from
+    // here: `window.chrome` is a non-configurable property in Chrome, so it cannot
+    // be deleted, and assigning `undefined` satisfies the same `typeof` check the
+    // real case would. That path is instead safe by construction — the availability
+    // check lives inside seedNgGa4ClientId's try/catch, so a ReferenceError returns
+    // null rather than escaping. This spec covers the nearest reachable shape.
+    it('returns null rather than throwing when chrome is not an object', async () => {
+        (window as any).chrome = null;
+        spyOn(console, 'warn');
+
+        await expectAsync(seedNgGa4ClientId()).toBeResolvedTo(null);
+        expect(console.warn).toHaveBeenCalledWith(
+            jasmine.stringContaining('chrome.storage.local is unavailable')
+        );
+    });
+
+    it('treats an empty stored client ID as absent and mints instead', async () => {
+        const store: Record<string, any> = { ga_client_id: '' };
+        mockChrome(store);
+
+        const result = await seedNgGa4ClientId();
+
+        expect(result).not.toBe('');
+        expect(store['ga_client_id']).toBe(result!);
     });
 
     it('returns null and warns when the read rejects', async () => {
