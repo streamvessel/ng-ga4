@@ -32,13 +32,17 @@
  */
 export async function seedNgGa4ClientId(): Promise<string | null> {
     try {
-        // Inside the try, not before it. `chrome` is an undeclared identifier on
-        // Firefox, Safari and the server, where reading it throws a ReferenceError
-        // that optional chaining does not prevent — `chrome?.storage` short-circuits
-        // on a null *value*, not on a missing *binding*. Guarding outside the try
-        // would leave that throw escaping into an onInstalled listener, which is the
-        // one thing this function promises never to do. Here the typeof check only
-        // buys a clearer message; the contract holds even without it.
+        // `chrome` is an undeclared identifier on Firefox, Safari and the server.
+        // The typeof test is what makes that safe — it is specified not to throw
+        // on a missing binding, and `||` short-circuits before the right-hand side
+        // is evaluated. Optional chaining would NOT be enough on its own:
+        // `chrome?.storage` short-circuits on a null *value*, not on a missing
+        // *binding*, so simplifying this to just `!chrome?.storage?.local` would
+        // throw a ReferenceError there.
+        //
+        // Kept inside the try so that simplification would be caught rather than
+        // escaping into an onInstalled listener — the one thing this function
+        // promises never to do. Belt and braces, not a fix for a live bug.
         if (typeof chrome === 'undefined' || !chrome?.storage?.local) {
             console.warn('[ng-ga4] seedNgGa4ClientId: chrome.storage.local is unavailable.');
             return null;

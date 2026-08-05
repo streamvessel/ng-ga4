@@ -474,10 +474,9 @@ import { seedNgGa4ClientId } from '@stream-vessel/ng-ga4';
 chrome.runtime.onInstalled.addListener(() => seedNgGa4ClientId());
 ```
 
-With the ID already in `chrome.storage.local`, no context ever reaches the mint
-path, so there is nothing to lose to teardown — and nothing for a
-simultaneously-starting worker and popup to race over either. The call is
-idempotent and never throws.
+Once the seed has landed, no context reaches the mint path, so there is nothing
+to lose to teardown — and nothing for a simultaneously-starting worker and popup
+to race over either. The call is idempotent and never throws.
 
 Two things to get right:
 
@@ -499,6 +498,15 @@ chrome.action.onClicked.addListener(async () => {
     ga.trackEvent('action_clicked');
     await ga.flushStorage();
 });
+```
+
+This applies to `setConsent()` too, not just tracking calls — granting or
+denying `analyticsStorage` writes to and deletes from `chrome.storage`, and
+those are lost to teardown like any other write:
+
+```typescript
+ga.setConsent({ analyticsStorage: 'denied' });
+await ga.flushStorage();
 ```
 
 `flushStorage()` covers `chrome.storage` writes only — event delivery is still

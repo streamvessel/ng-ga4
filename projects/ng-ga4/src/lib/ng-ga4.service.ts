@@ -1358,6 +1358,10 @@ export class NgGa4Service implements OnDestroy {
                 //
                 // Awaiting does not defeat MV3 teardown: it makes our code wait,
                 // not Chrome. seedNgGa4ClientId() is the fix that does — see #32.
+                //
+                // Unlike repersistIdentity, no inner catch: a failure here is worth
+                // both lines it produces, since the chain's message names the write
+                // and the catch below names the recovery.
                 await this.enqueueStorageWrite(
                     'chrome.storage.local.set (mint client id)',
                     () => chrome.storage.local.set({ ga_client_id: clientId })

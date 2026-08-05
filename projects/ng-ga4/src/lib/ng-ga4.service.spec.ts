@@ -3191,7 +3191,17 @@ describe('NgGa4Service', () => {
 
         it('flushStorage() resolves immediately on the web path', async () => {
             await service.init();
-            await expectAsync(service.flushStorage()).toBeResolved();
+
+            // toBeResolved() alone would pass however long it took — it only says
+            // the promise settles inside Jasmine's timeout. The web path enqueues
+            // nothing, so this must come back on microtasks with no storage
+            // round-trip to wait for.
+            let settled = false;
+            const flushed = service.flushStorage().then(() => { settled = true; });
+            await drainMicrotasks();
+
+            expect(settled).toBe(true);
+            await expectAsync(flushed).toBeResolved();
         });
 
         // Proves the writes reach storage, and nothing more. It cannot prove the
