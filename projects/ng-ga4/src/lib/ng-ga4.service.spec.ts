@@ -2727,6 +2727,25 @@ describe('NgGa4Service', () => {
             expect(mockLocalStorage['ga_client_id']).toBeDefined();
         });
 
+        it('does not re-register listeners when a failed init is retried', async () => {
+            const addSpy = spyOn(document, 'addEventListener').and.callThrough();
+            let failing = true;
+            (localStorage.setItem as jasmine.Spy).and.callFake((key: string, value: string) => {
+                if (failing && key === 'ga_client_id') {
+                    throw new Error('QuotaExceededError');
+                }
+                mockLocalStorage[key] = value;
+            });
+
+            await expectAsync(service.init()).toBeRejected();
+            failing = false;
+            await service.init();
+
+            // A second registration would leak a whole set: runInit() overwrites the
+            // handles ngOnDestroy needs to remove the first one.
+            expect(addSpy.calls.allArgs().filter(args => args[0] === 'visibilitychange').length).toBe(1);
+        });
+
         it('does not measure engagement while disabled', async () => {
             await service.init();
             service.trackPageView('/page');

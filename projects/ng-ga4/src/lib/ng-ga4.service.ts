@@ -714,6 +714,14 @@ export class NgGa4Service implements OnDestroy {
         if (typeof document === 'undefined' || typeof window === 'undefined') {
             return;
         }
+        // init() clears its memoised promise on rejection so a transient storage
+        // failure can be retried, which means runInit() can legitimately run more
+        // than once. Re-registering would attach a second set of listeners and
+        // overwrite the handles ngOnDestroy needs to remove the first — leaking a
+        // full set per retry, for the life of the page.
+        if (this.visibilityListener) {
+            return;
+        }
         // init() is an APP_INITIALIZER, which runs inside the Angular zone — with no
         // NgZone escape, zone.js would patch all five handlers below and trigger a
         // full ApplicationRef.tick() on every focus, blur, visibilitychange and
@@ -994,6 +1002,11 @@ export class NgGa4Service implements OnDestroy {
     // lives in chrome.storage.local, hence the two areas.
     private registerSessionSyncListener(): void {
         if (!this.config.isExtension || !chrome?.storage?.onChanged) {
+            return;
+        }
+        // See registerEngagementListeners: runInit() can run again after a retried
+        // init, and a second registration would leak this listener too.
+        if (this.chromeStorageListener) {
             return;
         }
         this.chromeStorageListener = (changes, areaName) => {

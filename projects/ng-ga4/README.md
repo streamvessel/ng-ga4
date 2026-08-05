@@ -349,6 +349,23 @@ disagree with it. **Call `setConsent()` on every boot** from your own store.
 and engagement time stops accruing — but deletes nothing. To remove stored
 identifiers, deny `analyticsStorage`.
 
+### Two gaps worth knowing about
+
+**Re-granting does not restore `_ga` until the next page load.** Withdrawal
+deletes the cookie; re-granting in the same page load restores the client ID and
+session state, but not `_ga`. It comes back on the next `init()`. The cookie is
+deliberately not rewritten in place because an ID adopted from an existing `_ga`
+must never be written back out (see "Interop with gtag.js"), and by that point
+the library no longer distinguishes an adopted ID from one it minted. If gtag.js
+is co-installed it will mint its own `_ga` in the meantime, so the two identities
+can diverge until that reload.
+
+**Consent state is per-instance and not synchronised across tabs.** Each tab, and
+each extension context, holds its own. If one denies while another still has a
+granted state, the second will keep writing session data to the shared store —
+correctly, from its own point of view. This follows from the library not
+persisting consent: call `setConsent()` in every context, on every boot.
+
 ## Usage
 
 ### Automatic page views
