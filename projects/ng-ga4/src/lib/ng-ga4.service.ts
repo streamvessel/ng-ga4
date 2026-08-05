@@ -70,6 +70,7 @@ export class NgGa4Service implements OnDestroy {
     private readonly consent: ConsentState;
     private enabled: boolean;
     private initPromise: Promise<void> | null = null;
+    private storageWrites: Promise<void> = Promise.resolve();
 
     constructor(
         private http: HttpClient,
@@ -153,6 +154,16 @@ export class NgGa4Service implements OnDestroy {
         if (!this.consent.storageAllowed) {
             this.clearPersistedIdentity();
         }
+
+        // `await init()` should mean "identity and session state are on disk".
+        // On an extension the writes above are queued, not yet landed; on the web
+        // this is a resolved promise. Also what keeps specs that assert on mock
+        // storage immediately after `await service.init()` honest.
+        //
+        // init() is an APP_INITIALIZER, so a chrome.storage promise that never
+        // settles would stall bootstrap — but loadOrCreateClientIdFromChromeStorage
+        // already awaits one above, so this adds no new class of hazard.
+        await this.flushStorage();
     }
 
     /**
@@ -202,6 +213,57 @@ export class NgGa4Service implements OnDestroy {
         // Caught, not `void`ed: a storage failure during a late init would
         // otherwise surface as an unhandled promise rejection in the host app.
         this.init().catch(err => console.warn('[ng-ga4] init failed', err));
+    }
+
+    /**
+     * Resolve once every pending `chrome.storage` write has landed.
+     *
+     * Await this before an MV3 event handler returns. The service worker can be
+     * torn down as soon as the event loop goes idle, and a session or identity
+     * write still in flight is simply lost — the next wake reads stale state.
+     *
+     * Resolves immediately on the web, where storage writes are synchronous.
+     *
+     * This does not flush *events*: sends are still fire-and-forget (see #26).
+     * It is also not a guarantee against forced termination — a browser quit or
+     * extension reload can drop an in-flight write whatever we do. For the client
+     * ID specifically, `seedNgGa4ClientId()` removes the exposure entirely.
+     */
+    async flushStorage(): Promise<void> {
+        let tail: Promise<void>;
+        // Looped, not a single await: a concurrent trackEvent()/trackPageView()
+        // reaches ensureSession() -> saveSessionState() and can enqueue during
+        // the await, and returning after only the first tail would drop exactly
+        // the write the caller wanted protected. Terminates because nothing here
+        // writes in response to a write — there is no path from a settled
+        // chrome.storage operation back into enqueueStorageWrite.
+        do {
+            tail = this.storageWrites;
+            await tail;
+        } while (tail !== this.storageWrites);
+    }
+
+    // Serialises chrome.storage operations: each is chained behind everything
+    // already queued, so a write issued earlier can never land after one issued
+    // later. That is what makes consent withdrawal's remove() provably final
+    // rather than probably final — Chrome documents no ordering guarantee, and
+    // clearPersistedIdentity spans two storage areas where none is even implied.
+    //
+    // Two promises, deliberately. `storageWrites` is the tail flushStorage()
+    // awaits and must never reject, or one failed write would poison every flush
+    // after it. The returned promise keeps the rejection, for the one caller —
+    // the client-ID mint — whose localStorage fallback depends on seeing it.
+    // Assigning done.catch(...) to the tail also means `done` always carries a
+    // handler, so the call sites that ignore it cannot raise an unhandled
+    // rejection.
+    //
+    // `op` is a thunk, not a promise, so nothing is issued until its turn comes.
+    // It may return undefined: clearPersistedIdentity's session remove uses
+    // optional chaining, which yields undefined when the area is absent.
+    private enqueueStorageWrite(label: string, op: () => Promise<unknown> | undefined): Promise<void> {
+        const done = this.storageWrites.then(op).then(() => undefined);
+        this.storageWrites = done.catch(err => console.warn(`[ng-ga4] ${label} failed`, err));
+        return done;
     }
 
     // A withdrawal that leaves the identifier on disk is not a withdrawal. Note this
@@ -933,8 +995,10 @@ export class NgGa4Service implements OnDestroy {
             return;
         }
         if (this.config.isExtension && chrome?.storage) {
-            chrome.storage.local.set({ ga_session_number: sessionNumber.toString() })
-                .catch(err => console.warn('[ng-ga4] chrome.storage.local.set failed', err));
+            this.enqueueStorageWrite(
+                'chrome.storage.local.set',
+                () => chrome.storage.local.set({ ga_session_number: sessionNumber.toString() })
+            );
         } else {
             localStorage.setItem('ga_session_number', sessionNumber.toString());
         }
@@ -1057,8 +1121,15 @@ export class NgGa4Service implements OnDestroy {
             return;
         }
         if (this.config.isExtension && chrome?.storage?.session) {
-            chrome.storage.session.set({ ga_session_id: this.sessionId, ga_last_activity: this.lastActivityTimestamp.toString() })
-                .catch(err => console.warn('[ng-ga4] chrome.storage.session.set failed', err));
+            // Captured at enqueue time, not read inside the thunk. The thunk runs
+            // later, by which point these fields may already describe a different
+            // session — a queued write must persist the state it was issued for.
+            const sessionId = this.sessionId;
+            const lastActivity = this.lastActivityTimestamp.toString();
+            this.enqueueStorageWrite(
+                'chrome.storage.session.set',
+                () => chrome.storage.session.set({ ga_session_id: sessionId, ga_last_activity: lastActivity })
+            );
         } else {
             localStorage.setItem('ga_session_id', this.sessionId);
             localStorage.setItem('ga_last_activity', this.lastActivityTimestamp.toString());
