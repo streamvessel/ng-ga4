@@ -4,6 +4,7 @@ import { isPlatformBrowser } from '@angular/common';
 import { NavigationEnd, Router } from '@angular/router';
 import { filter, Subscription } from 'rxjs';
 import { NG_GA4_CONFIG, NgGa4Config, NgGa4CookieOptions } from './ng-ga4.config';
+import { ConsentState, Ga4ConsentPayload, NgGa4Consent } from './consent';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
@@ -66,6 +67,9 @@ export class NgGa4Service implements OnDestroy {
     ]);
 
     private readonly isBrowser: boolean;
+    private readonly consent: ConsentState;
+    private enabled: boolean;
+    private initPromise: Promise<void> | null = null;
 
     constructor(
         private http: HttpClient,
@@ -75,16 +79,37 @@ export class NgGa4Service implements OnDestroy {
         @Inject(PLATFORM_ID) platformId: object
     ) {
         this.isBrowser = isPlatformBrowser(platformId);
+        this.consent = new ConsentState(config.consent);
+        // config.enabled is only the *initial* value now: a consent banner has to be
+        // able to turn collection on after the injector is built.
+        this.enabled = config.enabled;
     }
 
-    async init(): Promise<void> {
+    init(): Promise<void> {
         // Every collection path below reads a browser-only global (localStorage,
         // crypto, screen, navigator, window.location), so on the server this must
         // be inert rather than merely quiet — an APP_INITIALIZER that throws takes
         // the whole SSR/prerender bootstrap down with it.
-        if (!this.isBrowser || !this.config.enabled || this.initialized) {
-            return;
+        if (!this.isBrowser || !this.enabled) {
+            return Promise.resolve();
         }
+        // Memoised rather than guarded by `initialized`: that flag is set
+        // synchronously before the first await, so a second caller would resolve
+        // while the first is still suspended. setEnabled(true) followed by
+        // `await init()` has to await the real thing.
+        //
+        // A rejection is deliberately NOT memoised. localStorage.setItem throws in
+        // Safari private browsing and on quota exhaustion, and caching that would
+        // poison the service for its whole lifetime — every later setEnabled(true)
+        // would hand back the same rejected promise. Clearing it lets a later call
+        // retry.
+        return this.initPromise ??= this.runInit().catch(err => {
+            this.initPromise = null;
+            throw err;
+        });
+    }
+
+    private async runInit(): Promise<void> {
         this.initialized = true;
 
         // Created here, not in the constructor: the constructor also runs on
@@ -121,6 +146,138 @@ export class NgGa4Service implements OnDestroy {
         // and "the listener just registered above can observe it" — see
         // catchUpSessionState() for why this can't simply be moved earlier instead.
         await this.catchUpSessionState();
+
+        // Booting denied is not a transition, so setConsent() never fires. Without
+        // this, a returning visitor whose app boots denied keeps the identifier
+        // written under a previous visit's consent, indefinitely.
+        if (!this.consent.storageAllowed) {
+            this.clearPersistedIdentity();
+        }
+    }
+
+    /**
+     * Update consent at runtime. Merges into the current state — keys you omit are
+     * left alone. Call this on every app boot from your own consent store; this
+     * library deliberately does not persist consent itself.
+     */
+    setConsent(consent: NgGa4Consent): void {
+        const wasAllowed = this.consent.storageAllowed;
+        this.consent.merge(consent);
+        const isAllowed = this.consent.storageAllowed;
+        if (wasAllowed && !isAllowed) {
+            this.clearPersistedIdentity();
+            return;
+        }
+        if (!wasAllowed && isAllowed && this.clientId) {
+            this.repersistIdentity(this.clientId);
+        }
+    }
+
+    /**
+     * Turn collection on or off at runtime — the consent-banner switch.
+     *
+     * Enabling for the first time runs the initialisation that `enabled: false`
+     * skipped at bootstrap, so nothing — no client ID, no session, no storage
+     * write — exists before this point. `await init()` afterwards if you need to
+     * know when it has finished.
+     *
+     * This is a kill switch, not a consent withdrawal: disabling stops sending but
+     * deletes nothing. To remove stored identifiers, deny `analyticsStorage`.
+     */
+    setEnabled(enabled: boolean): void {
+        this.enabled = enabled;
+        if (!enabled) {
+            // Close the interval so the disabled window is not measured. Time
+            // accrued before this point was collected under consent and stays in
+            // the accumulator to ride out on a later hit.
+            this.engagement?.setEngaged(false);
+            return;
+        }
+        if (!this.isBrowser) {
+            return;
+        }
+        // Reopen if the page is currently engaged — the listeners were gated off
+        // while disabled, so nothing else will reopen it until the next focus.
+        this.setEngagementActive(this.isPageEngaged());
+        // Caught, not `void`ed: a storage failure during a late init would
+        // otherwise surface as an unhandled promise rejection in the host app.
+        this.init().catch(err => console.warn('[ng-ga4] init failed', err));
+    }
+
+    // A withdrawal that leaves the identifier on disk is not a withdrawal. Note this
+    // ignores provenance: an ID adopted from an existing _ga is deleted too. #13's
+    // rule is that we never *write back* an adopted ID; a user withdrawing consent
+    // is withdrawing it for the identifier, not for our authorship of it.
+    private clearPersistedIdentity(): void {
+        if (!this.isBrowser) {
+            return;
+        }
+        if (this.config.isExtension && chrome?.storage) {
+            chrome.storage.local.remove(['ga_client_id', 'ga_session_number'])
+                .catch(err => console.warn('[ng-ga4] chrome.storage.local.remove failed', err));
+            chrome.storage.session?.remove(['ga_session_id', 'ga_last_activity'])
+                .catch(err => console.warn('[ng-ga4] chrome.storage.session.remove failed', err));
+            // Deliberately no early return. The *write* paths fall back to
+            // localStorage whenever chrome.storage.session is absent (MV3 exposes it
+            // to trusted contexts only), and loadOrCreateClientId falls back to
+            // localStorage if chrome.storage throws. Removing a key that was never
+            // written costs nothing; missing one leaks the whole point of this method.
+        }
+        localStorage.removeItem('ga_client_id');
+        localStorage.removeItem('ga_session_id');
+        localStorage.removeItem('ga_last_activity');
+        localStorage.removeItem('ga_session_number');
+        this.deleteGaCookie();
+    }
+
+    private deleteGaCookie(): void {
+        // 'storage' is documented as "never touch the cookie". We never read or wrote
+        // _ga under it, so deleting it would break an explicit configuration contract
+        // to remove something that was never ours.
+        if (this.resolveClientIdSource() === 'storage') {
+            return;
+        }
+        const options = this.resolveCookieOptions();
+        const explicit = options.domain?.replace(/^\.+/, '');
+        // NOT discoverCookieDomain(): that probes by writing cookies. Fanning out
+        // across every candidate is both safer and more thorough — deletion is
+        // idempotent, cannot create a cookie, and this also clears a host-only _ga
+        // that discovery would miss.
+        const domains = explicit ? [explicit] : registrableDomainCandidates(this.getHostname());
+        // Reuse the caller's flags: a cookie written with 'SameSite=None; Secure'
+        // for a cross-site iframe is rejected — and so not deleted — by a write
+        // that silently defaults back to SameSite=Lax.
+        const flags = options.flags ?? `SameSite=Lax${this.getProtocol() === 'https:' ? '; Secure' : ''}`;
+        this.setCookie(`_ga=; path=/; max-age=0; ${flags}`);
+        for (const domain of domains) {
+            this.setCookie(`_ga=; path=/; max-age=0; domain=.${domain}; ${flags}`);
+        }
+    }
+
+    // Persists what is already in hand rather than minting: identity continuity
+    // across a consent grant is the whole point.
+    //
+    // storeClientId cannot be used alone here. It writes to localStorage even for
+    // extensions, deliberately, because it is the store the chrome.storage failure
+    // path falls back to. On re-grant an extension must go back to chrome.storage,
+    // or the ID lands somewhere loadOrCreateClientIdFromChromeStorage never reads
+    // and the next service-worker start mints a fresh one.
+    //
+    // Session state goes back too: clearPersistedIdentity removed ga_session_number,
+    // and leaving it absent makes the next reload restart the count at 0.
+    private repersistIdentity(clientId: string): void {
+        if (this.config.isExtension && chrome?.storage) {
+            chrome.storage.local.set({ ga_client_id: clientId })
+                .catch(err => {
+                    console.warn('[ng-ga4] chrome.storage.local.set failed', err);
+                    // Same fallback the init path uses when chrome.storage is broken.
+                    this.storeClientId(clientId);
+                });
+        } else {
+            this.storeClientId(clientId);
+        }
+        this.saveSessionNumber(this.sessionNumber);
+        this.saveSessionState();
     }
 
     ngOnDestroy(): void {
@@ -148,7 +305,7 @@ export class NgGa4Service implements OnDestroy {
     trackPageView(pagePath: string, pageTitle?: string): void {
         // Dropped, not queued: the server has no client identity to attach a hit to,
         // and replaying queued events after hydration would double-count the view.
-        if (!this.isBrowser || !this.config.enabled) {
+        if (!this.isBrowser || !this.enabled) {
             return;
         }
         if (!this.clientId) {
@@ -177,7 +334,7 @@ export class NgGa4Service implements OnDestroy {
 
     trackEvent(name: string, params?: Record<string, any>): void {
         // See trackPageView: inert on the server, and deliberately not queued.
-        if (!this.isBrowser || !this.config.enabled) {
+        if (!this.isBrowser || !this.enabled) {
             return;
         }
         if (!this.clientId) {
@@ -225,6 +382,7 @@ export class NgGa4Service implements OnDestroy {
             events: Array<{ name: string; params?: Record<string, any> }>;
             device?: Ga4Device;
             user_location?: Ga4UserLocation;
+            consent?: Ga4ConsentPayload;
         } = {
             client_id: this.clientId,
             // debug_mode has to ride on every event in the batch — DebugView only
@@ -241,6 +399,13 @@ export class NgGa4Service implements OnDestroy {
         }
         if (this.userLocation) {
             body.user_location = this.userLocation;
+        }
+        // Omitted entirely when neither ad signal is set, so GA4 applies the
+        // property's own defaults and an install that never calls setConsent()
+        // produces a byte-identical request to previous versions.
+        const consentPayload = this.consent.toPayload();
+        if (consentPayload) {
+            body.consent = consentPayload;
         }
 
         // The validation endpoint records nothing — "events sent to the validation
@@ -536,8 +701,25 @@ export class NgGa4Service implements OnDestroy {
         return this.engagement?.consume() ?? 0;
     }
 
+    // Engagement only accrues while collection is enabled. The listeners below stay
+    // registered after setEnabled(false), so without this gate a focus or
+    // visibilitychange during the disabled window would reopen the interval and the
+    // first hit after re-enabling would report time the user spent while collection
+    // was supposedly off.
+    private setEngagementActive(engaged: boolean): void {
+        this.engagement?.setEngaged(engaged && this.enabled);
+    }
+
     private registerEngagementListeners(): void {
         if (typeof document === 'undefined' || typeof window === 'undefined') {
+            return;
+        }
+        // init() clears its memoised promise on rejection so a transient storage
+        // failure can be retried, which means runInit() can legitimately run more
+        // than once. Re-registering would attach a second set of listeners and
+        // overwrite the handles ngOnDestroy needs to remove the first — leaking a
+        // full set per retry, for the life of the page.
+        if (this.visibilityListener) {
             return;
         }
         // init() is an APP_INITIALIZER, which runs inside the Angular zone — with no
@@ -551,7 +733,7 @@ export class NgGa4Service implements OnDestroy {
             // hidden tab is a real end of the visit-so-far, worth a network hit.
             this.visibilityListener = () => {
                 const engaged = this.isPageEngaged();
-                this.engagement?.setEngaged(engaged);
+                this.setEngagementActive(engaged);
                 if (!engaged) {
                     this.flushEngagement();
                 }
@@ -561,12 +743,12 @@ export class NgGa4Service implements OnDestroy {
             // time is not lost — it stays in the accumulator and rides out on the
             // next hit, or on the eventual hide/pagehide, which still fires on tab close.
             this.blurListener = () => {
-                this.engagement?.setEngaged(false);
+                this.setEngagementActive(false);
             };
             // Shared with pageshow below — both just mean "back in front of the
             // user." Never flushes: neither event closes the interval, only opens it.
             const onFocusLike = () => {
-                this.engagement?.setEngaged(this.isPageEngaged());
+                this.setEngagementActive(this.isPageEngaged());
             };
             this.focusListener = onFocusLike;
             // bfcache restore: pagehide closed the interval on the way out; reopening
@@ -579,7 +761,7 @@ export class NgGa4Service implements OnDestroy {
             // drops those too. setEngaged(false) closes the interval before flushing so a
             // bfcache restore minutes later can't have that dead time recounted.
             this.pagehideListener = () => {
-                this.engagement?.setEngaged(false);
+                this.setEngagementActive(false);
                 this.flushEngagement();
             };
             document.addEventListener('visibilitychange', this.visibilityListener);
@@ -593,7 +775,10 @@ export class NgGa4Service implements OnDestroy {
     // Flushes the trailing chunk of foreground time a page_view-only visit
     // would otherwise never report.
     private flushEngagement(): void {
-        if (this.config.sendEngagementOnHide === false || !this.clientId) {
+        // `enabled` is checked here too, not only in track*: this is the fourth
+        // sendToGA4 call site and fires from visibilitychange/pagehide listeners
+        // that stay registered after setEnabled(false).
+        if (!this.enabled || this.config.sendEngagementOnHide === false || !this.clientId) {
             return;
         }
         // Read without draining: below the floor, the time stays in the accumulator
@@ -744,6 +929,9 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private saveSessionNumber(sessionNumber: number): void {
+        if (!this.consent.storageAllowed) {
+            return;
+        }
         if (this.config.isExtension && chrome?.storage) {
             chrome.storage.local.set({ ga_session_number: sessionNumber.toString() })
                 .catch(err => console.warn('[ng-ga4] chrome.storage.local.set failed', err));
@@ -816,6 +1004,11 @@ export class NgGa4Service implements OnDestroy {
         if (!this.config.isExtension || !chrome?.storage?.onChanged) {
             return;
         }
+        // See registerEngagementListeners: runInit() can run again after a retried
+        // init, and a second registration would leak this listener too.
+        if (this.chromeStorageListener) {
+            return;
+        }
         this.chromeStorageListener = (changes, areaName) => {
             if (areaName === 'session') {
                 const id = changes['ga_session_id']?.newValue;
@@ -860,6 +1053,9 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private saveSessionState(): void {
+        if (!this.consent.storageAllowed) {
+            return;
+        }
         if (this.config.isExtension && chrome?.storage?.session) {
             chrome.storage.session.set({ ga_session_id: this.sessionId, ga_last_activity: this.lastActivityTimestamp.toString() })
                 .catch(err => console.warn('[ng-ga4] chrome.storage.session.set failed', err));
@@ -944,6 +1140,9 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private persistGaCookie(clientId: string): void {
+        if (!this.consent.storageAllowed) {
+            return;
+        }
         const options = this.resolveCookieOptions();
         // An explicit domain bypasses discovery entirely. Strip any leading dot the
         // caller supplied — the attribute below always adds exactly one — so
@@ -1025,7 +1224,15 @@ export class NgGa4Service implements OnDestroy {
         }
     }
 
+    // Deliberately writes to localStorage even for extensions. This is the store
+    // the *fallback* path uses: loadOrCreateClientIdFromChromeStorage drops here
+    // when chrome.storage throws, and routing back to chrome.storage would write
+    // into the very store that just failed. The extension's own identity write is
+    // inline in that method and gated separately.
     private storeClientId(clientId: string): void {
+        if (!this.consent.storageAllowed) {
+            return;
+        }
         localStorage.setItem('ga_client_id', clientId);
     }
 
@@ -1052,7 +1259,14 @@ export class NgGa4Service implements OnDestroy {
                 return result['ga_client_id'];
             }
             const clientId = crypto.randomUUID();
-            await chrome.storage.local.set({ ga_client_id: clientId });
+            if (this.consent.storageAllowed) {
+                // Deliberately still awaited rather than routed through
+                // storeClientId: that method is fire-and-forget, and issue #32 is
+                // open precisely because un-awaited chrome.storage writes are lost
+                // to MV3 service-worker teardown. Do not "unify" these two by
+                // making this one fire-and-forget.
+                await chrome.storage.local.set({ ga_client_id: clientId });
+            }
             return clientId;
         } catch (err) {
             console.warn('[ng-ga4] chrome.storage.local failed, falling back to localStorage', err);

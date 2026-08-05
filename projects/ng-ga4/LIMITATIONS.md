@@ -47,6 +47,7 @@ Claims here are not all the same kind, and the difference matters:
 | Demographics, interests, Google Signals | Require tagging | Documented |
 | Ads remarketing, `gclid` linkage, conversion import | Require tagging | Documented |
 | Cross-domain measurement (the `_gl` linker) | Not exposed by MP | Documented |
+| Deleting `_ga` on consent withdrawal | Durable only if `gtag.js` is not co-installed — gtag rewrites the cookie on its next hit | Documented |
 
 ### Does work
 
@@ -150,7 +151,6 @@ Measurement Protocol, and they are open work rather than permanent limits:
 
 | Gap | Issue |
 |---|---|
-| Consent Mode: `consent` payload plus runtime `setConsent()` / `setEnabled()` | [#20](https://github.com/streamvessel/ng-ga4/issues/20) |
 | `user_id` | [#18](https://github.com/streamvessel/ng-ga4/issues/18) |
 | `user_properties` | [#19](https://github.com/streamvessel/ng-ga4/issues/19) |
 | Event and parameter name validation in dev | [#29](https://github.com/streamvessel/ng-ga4/issues/29) |

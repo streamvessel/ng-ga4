@@ -146,13 +146,15 @@ describe('NgGa4Service', () => {
                 get: (keys: string[]) => Promise.resolve(
                     keys.reduce((acc: any, k: string) => { if (chromeLocal[k] !== undefined) acc[k] = chromeLocal[k]; return acc; }, {})
                 ),
-                set: (items: any) => { Object.assign(chromeLocal, items); return Promise.resolve(); }
+                set: (items: any) => { Object.assign(chromeLocal, items); return Promise.resolve(); },
+                remove: (keys: string[]) => { for (const k of keys) { delete chromeLocal[k]; } return Promise.resolve(); }
             },
             session: {
                 get: (keys: string[]) => Promise.resolve(
                     keys.reduce((acc: any, k: string) => { if (chromeSession[k] !== undefined) acc[k] = chromeSession[k]; return acc; }, {})
                 ),
-                set: (items: any) => { Object.assign(chromeSession, items); return Promise.resolve(); }
+                set: (items: any) => { Object.assign(chromeSession, items); return Promise.resolve(); },
+                remove: (keys: string[]) => { for (const k of keys) { delete chromeSession[k]; } return Promise.resolve(); }
             }
         };
     }
@@ -172,6 +174,10 @@ describe('NgGa4Service', () => {
         mockLocalStorage = {};
         spyOn(localStorage, 'getItem').and.callFake((key: string) => mockLocalStorage[key] || null);
         spyOn(localStorage, 'setItem').and.callFake((key: string, value: string) => { mockLocalStorage[key] = value; });
+        // Deletion (consent withdrawal) is a first-class path now. Without this spy
+        // removeItem would hit the real localStorage while reads come from
+        // mockLocalStorage, so a delete would appear to silently do nothing.
+        spyOn(localStorage, 'removeItem').and.callFake((key: string) => { delete mockLocalStorage[key]; });
 
         spyOn(crypto, 'randomUUID').and.returnValue(MOCK_UUID as `${string}-${string}-${string}-${string}-${string}`);
 
@@ -2599,6 +2605,412 @@ describe('NgGa4Service', () => {
             // Validation is a separate XHR side channel, not a replacement.
             const req = httpMock.expectOne((r) => r.url.includes('debug/mp/collect'));
             req.flush({ validationMessages: [] });
+        });
+    });
+
+    describe('consent', () => {
+        it('omits the consent key entirely by default', async () => {
+            await service.init();
+            service.trackEvent('test_event');
+
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            // Byte-identical to pre-consent versions: an existing install that never
+            // calls setConsent() must send exactly what it sent before.
+            expect(req.request.body['consent']).toBeUndefined();
+            req.flush({});
+        });
+
+        it('sends ad signals supplied via config', async () => {
+            reconfigureTestBed({ consent: { adUserData: 'granted', adPersonalization: 'denied' } });
+            await service.init();
+            service.trackEvent('test_event');
+
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(req.request.body['consent']).toEqual({ ad_user_data: 'GRANTED', ad_personalization: 'DENIED' });
+            req.flush({});
+        });
+
+        it('reflects a runtime setConsent() call on the next hit', async () => {
+            await service.init();
+            service.setConsent({ adUserData: 'denied' });
+            service.trackEvent('test_event');
+
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(req.request.body['consent']).toEqual({ ad_user_data: 'DENIED' });
+            req.flush({});
+        });
+
+        it('does not initialise or mint an identifier while disabled', async () => {
+            reconfigureTestBed({ enabled: false });
+            await service.init();
+
+            expect(mockLocalStorage['ga_client_id']).toBeUndefined();
+            httpMock.expectNone(() => true);
+        });
+
+        it('starts collecting after setEnabled(true)', async () => {
+            reconfigureTestBed({ enabled: false });
+            await service.init();
+
+            service.setEnabled(true);
+            // Awaits the in-flight init started by setEnabled, not a fresh one —
+            // this only works because init() memoises its promise.
+            await service.init();
+            service.trackEvent('after_consent');
+
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(req.request.body['events'][0]['name']).toBe('after_consent');
+            req.flush({});
+        });
+
+        it('drops events fired while disabled instead of replaying them on enable', async () => {
+            reconfigureTestBed({ enabled: false });
+            await service.init();
+            service.trackEvent('lost_event');
+
+            service.setEnabled(true);
+            await service.init();
+            service.trackEvent('after_consent');
+
+            // Anchored positively: exactly one request, and it is the post-consent
+            // one. A bare expectNone would pass even if the drop logic were deleted.
+            const reqs = httpMock.match(() => true);
+            expect(reqs.length).toBe(1);
+            expect(reqs[0].request.body['events'][0]['name']).toBe('after_consent');
+            reqs[0].flush({});
+        });
+
+        it('stops sending after setEnabled(false) without deleting the identifier', async () => {
+            await service.init();
+            const stored = mockLocalStorage['ga_client_id'];
+            expect(stored).toBeDefined();
+
+            service.setEnabled(false);
+            service.trackEvent('ignored');
+
+            httpMock.expectNone(() => true);
+            // setEnabled is a kill switch, not a consent withdrawal.
+            expect(mockLocalStorage['ga_client_id']).toBe(stored);
+        });
+
+        it('does not flush engagement on hide after setEnabled(false)', async () => {
+            await service.init();
+            service.trackPageView('/page');
+            httpMock.expectOne(r => r.url.includes('/mp/collect')).flush({});
+
+            service.setEnabled(false);
+            jasmine.clock().tick(5000);
+            // forceBeacon would otherwise bypass HttpTestingController entirely.
+            (service as any).getNavigator = () => ({});
+            (service as any).getFetch = () => undefined;
+            window.dispatchEvent(new Event('pagehide'));
+
+            httpMock.expectNone(() => true);
+        });
+
+        it('does not cache a rejected init, so a later call can retry', async () => {
+            let failing = true;
+            (localStorage.setItem as jasmine.Spy).and.callFake((key: string, value: string) => {
+                if (failing && key === 'ga_client_id') {
+                    throw new Error('QuotaExceededError');
+                }
+                mockLocalStorage[key] = value;
+            });
+
+            await expectAsync(service.init()).toBeRejected();
+
+            failing = false;
+            await service.init();
+
+            // A transient storage failure (Safari private browsing, quota) must not
+            // poison the service for the rest of its lifetime.
+            expect(mockLocalStorage['ga_client_id']).toBeDefined();
+        });
+
+        it('does not re-register listeners when a failed init is retried', async () => {
+            const addSpy = spyOn(document, 'addEventListener').and.callThrough();
+            let failing = true;
+            (localStorage.setItem as jasmine.Spy).and.callFake((key: string, value: string) => {
+                if (failing && key === 'ga_client_id') {
+                    throw new Error('QuotaExceededError');
+                }
+                mockLocalStorage[key] = value;
+            });
+
+            await expectAsync(service.init()).toBeRejected();
+            failing = false;
+            await service.init();
+
+            // A second registration would leak a whole set: runInit() overwrites the
+            // handles ngOnDestroy needs to remove the first one.
+            expect(addSpy.calls.allArgs().filter(args => args[0] === 'visibilitychange').length).toBe(1);
+        });
+
+        it('does not measure engagement while disabled', async () => {
+            await service.init();
+            service.trackPageView('/page');
+            httpMock.expectOne(r => r.url.includes('/mp/collect')).flush({});
+
+            service.setEnabled(false);
+            jasmine.clock().tick(10000);
+            service.setEnabled(true);
+            await service.init();
+
+            service.trackEvent('after');
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            // The 10s spent while collection was off must not be reported as
+            // engagement on the first hit after re-enabling.
+            expect(req.request.body['events'][0]['params']['engagement_time_msec']).toBeLessThan(1000);
+            req.flush({});
+        });
+
+        it('does not reopen the engagement interval on focus while disabled', async () => {
+            await service.init();
+            service.trackPageView('/page');
+            httpMock.expectOne(r => r.url.includes('/mp/collect')).flush({});
+
+            service.setEnabled(false);
+            // The engagement listeners stay registered after setEnabled(false), so
+            // this is the case the gate in setEngagementActive actually exists for.
+            // The sibling spec above does not reach it: setEnabled(false) closes the
+            // interval directly, and with no event fired during the window the gate
+            // is never consulted.
+            window.dispatchEvent(new Event('focus'));
+            jasmine.clock().tick(10000);
+
+            service.setEnabled(true);
+            await service.init();
+            service.trackEvent('after');
+
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(req.request.body['events'][0]['params']['engagement_time_msec']).toBeLessThan(1000);
+            req.flush({});
+        });
+
+        it('collects but persists nothing when storage is denied at startup', async () => {
+            // writeGaCookie: true is required or persistGaCookie is never reached and
+            // the cookie assertion below would pass on unmodified source.
+            reconfigureTestBed({ consent: { analyticsStorage: 'denied' }, writeGaCookie: true });
+            await service.init();
+            service.trackEvent('no_storage');
+
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(req.request.body['client_id']).toBeTruthy();
+            req.flush({});
+
+            expect(mockLocalStorage['ga_client_id']).toBeUndefined();
+            expect(mockLocalStorage['ga_session_id']).toBeUndefined();
+            expect(mockLocalStorage['ga_session_number']).toBeUndefined();
+            expect(writtenCookies.filter(c => c.startsWith('_ga=') && !/max-age=0\b/.test(c)).length).toBe(0);
+        });
+
+        it('keeps the in-memory client id stable across hits while denied', async () => {
+            reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+            await service.init();
+
+            service.trackEvent('one');
+            const first = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            const clientId = first.request.body['client_id'];
+            first.flush({});
+
+            service.trackEvent('two');
+            const second = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(second.request.body['client_id']).toBe(clientId);
+            second.flush({});
+        });
+
+        it('does not write the extension identity when storage is denied', async () => {
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal, {});
+            reconfigureTestBed({ isExtension: true, consent: { analyticsStorage: 'denied' } });
+
+            await service.init();
+
+            // The inline write in loadOrCreateClientIdFromChromeStorage bypasses
+            // storeClientId, so gating that method alone does not cover this.
+            expect(chromeLocal['ga_client_id']).toBeUndefined();
+            clearChromeMock();
+        });
+
+        it('deletes the stored client id and _ga cookie on withdrawal', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            await service.init();
+            expect(mockLocalStorage['ga_client_id']).toBeDefined();
+
+            service.setConsent({ analyticsStorage: 'denied' });
+
+            expect(mockLocalStorage['ga_client_id']).toBeUndefined();
+            expect(mockLocalStorage['ga_session_id']).toBeUndefined();
+            expect(mockLocalStorage['ga_session_number']).toBeUndefined();
+            expect(writtenCookies.some(c => c.startsWith('_ga=') && /max-age=0\b/.test(c))).toBe(true);
+        });
+
+        it('deletes an identifier from a previous visit when booting denied', async () => {
+            // The commonest real case: the app read its own banner store and booted
+            // denied. No transition occurs, so transition-only deletion misses it.
+            mockLocalStorage['ga_client_id'] = 'existing-id';
+            reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+
+            await service.init();
+
+            expect(mockLocalStorage['ga_client_id']).toBeUndefined();
+        });
+
+        it('does not write probe cookies while deleting', async () => {
+            reconfigureTestBed({ writeGaCookie: true });
+            // Karma's real hostname is `localhost` — a single label, which yields
+            // zero registrable-domain candidates. Under that hostname the probing
+            // and non-probing implementations behave identically, so without this
+            // stub the assertion below cannot tell them apart and passes either way.
+            spyOn(service as any, 'getHostname').and.returnValue('www.example.com');
+            await service.init();
+            writtenCookies.length = 0;
+
+            service.setConsent({ analyticsStorage: 'denied' });
+
+            // Domain discovery works by writing probes. Doing that as the first act
+            // of a consent withdrawal is indefensible.
+            expect(writtenCookies.every(c => c.startsWith('_ga='))).toBe(true);
+        });
+
+        it('keeps collecting with the same client id after withdrawal', async () => {
+            await service.init();
+            service.trackEvent('before');
+            const before = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            const clientId = before.request.body['client_id'];
+            before.flush({});
+
+            service.setConsent({ analyticsStorage: 'denied' });
+            service.trackEvent('after');
+
+            const after = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            // Withdrawal removes the durable copy; it does not re-identify the user.
+            expect(after.request.body['client_id']).toBe(clientId);
+            after.flush({});
+        });
+
+        it('re-persists the same client id when storage is granted again', async () => {
+            await service.init();
+            service.trackEvent('first');
+            const first = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            const clientId = first.request.body['client_id'];
+            first.flush({});
+
+            service.setConsent({ analyticsStorage: 'denied' });
+            expect(mockLocalStorage['ga_client_id']).toBeUndefined();
+
+            service.setConsent({ analyticsStorage: 'granted' });
+
+            // The same ID, not a fresh mint: re-identifying someone as a consequence
+            // of them *granting* consent would be perverse.
+            expect(mockLocalStorage['ga_client_id']).toBe(clientId);
+        });
+
+        it('restores session state and number on re-grant', async () => {
+            await service.init();
+            const sessionNumber = mockLocalStorage['ga_session_number'];
+            expect(sessionNumber).toBeDefined();
+
+            service.setConsent({ analyticsStorage: 'denied' });
+            service.setConsent({ analyticsStorage: 'granted' });
+
+            // Without this, a reload inside the session window reads null -> 0 and
+            // every subsequent hit carries session_number: 0.
+            expect(mockLocalStorage['ga_session_number']).toBe(sessionNumber);
+            expect(mockLocalStorage['ga_session_id']).toBeDefined();
+        });
+
+        it('re-persists an extension identity to chrome.storage, not localStorage', async () => {
+            const chromeLocal: Record<string, any> = {};
+            const chromeSession: Record<string, any> = {};
+            setupChromeMock(chromeLocal, chromeSession);
+            reconfigureTestBed({ isExtension: true });
+
+            await service.init();
+            const clientId = chromeLocal['ga_client_id'];
+            expect(clientId).toBeDefined();
+
+            service.setConsent({ analyticsStorage: 'denied' });
+            expect(chromeLocal['ga_client_id']).toBeUndefined();
+
+            service.setConsent({ analyticsStorage: 'granted' });
+
+            // Writing to localStorage here would leave the ID somewhere
+            // loadOrCreateClientIdFromChromeStorage never reads, so the next
+            // service-worker start would mint a fresh one.
+            expect(chromeLocal['ga_client_id']).toBe(clientId);
+            expect(mockLocalStorage['ga_client_id']).toBeUndefined();
+            clearChromeMock();
+        });
+
+        it('clears the chrome.storage identity on withdrawal', async () => {
+            const chromeLocal: Record<string, any> = {};
+            const chromeSession: Record<string, any> = {};
+            setupChromeMock(chromeLocal, chromeSession);
+            reconfigureTestBed({ isExtension: true });
+
+            await service.init();
+            service.trackEvent('seed');
+            httpMock.expectOne(r => r.url.includes('/mp/collect')).flush({});
+            // Asserted before the withdrawal so the post-condition cannot hold
+            // vacuously against state that was never written in the first place.
+            expect(chromeLocal['ga_client_id']).toBeDefined();
+            expect(chromeSession['ga_session_id']).toBeDefined();
+
+            service.setConsent({ analyticsStorage: 'denied' });
+
+            expect(chromeLocal['ga_client_id']).toBeUndefined();
+            expect(chromeSession['ga_session_id']).toBeUndefined();
+            clearChromeMock();
+        });
+
+        it('clears localStorage fallback state on an extension with no chrome.storage.session', async () => {
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal, {});
+            // MV3 exposes chrome.storage.session to trusted contexts only. Without
+            // it, saveSessionState falls back to localStorage — which withdrawal
+            // must still clear. This is the case the deliberate absence of an early
+            // return after the chrome branch exists for; the sibling spec above
+            // never reaches it, because it only asserts on chrome.storage keys.
+            delete (window as any).chrome.storage.session;
+            reconfigureTestBed({ isExtension: true });
+
+            await service.init();
+            service.trackEvent('seed');
+            httpMock.expectOne(r => r.url.includes('/mp/collect')).flush({});
+            expect(mockLocalStorage['ga_session_id']).toBeDefined();
+
+            service.setConsent({ analyticsStorage: 'denied' });
+
+            expect(mockLocalStorage['ga_session_id']).toBeUndefined();
+            expect(mockLocalStorage['ga_last_activity']).toBeUndefined();
+            clearChromeMock();
+        });
+
+        it('leaves the _ga cookie alone under clientIdSource: storage', async () => {
+            reconfigureTestBed({ clientIdSource: 'storage' });
+            await service.init();
+            writtenCookies.length = 0;
+
+            service.setConsent({ analyticsStorage: 'denied' });
+
+            // 'storage' is documented as "never touch the cookie". Storage deletion
+            // still happens; the cookie is not ours to remove.
+            expect(writtenCookies.length).toBe(0);
+            expect(mockLocalStorage['ga_client_id']).toBeUndefined();
+        });
+
+        it('writes nothing to storage when a session rolls while denied', async () => {
+            reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+            await service.init();
+
+            // Past the 30-minute inactivity timeout, so the next hit rolls a session.
+            jasmine.clock().tick(31 * 60 * 1000);
+            service.trackEvent('after_roll');
+            httpMock.expectOne(r => r.url.includes('/mp/collect')).flush({});
+
+            expect(mockLocalStorage['ga_session_id']).toBeUndefined();
+            expect(mockLocalStorage['ga_session_number']).toBeUndefined();
         });
     });
 });

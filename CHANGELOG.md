@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Consent Mode. `setConsent()` and `setEnabled()` on `NgGa4Service`, plus an
+  optional `consent` config field supplying the initial state. `adUserData` and
+  `adPersonalization` are sent as the Measurement Protocol's `consent` object;
+  `analyticsStorage` is **not** an MP field and instead gates local persistence —
+  denying it stops every write to `localStorage`, `chrome.storage` and `_ga`, and
+  deletes what is already stored, while collection continues with an in-memory
+  client ID. Deletion also runs when the library boots already denied, so a
+  returning visitor's prior identifier is removed rather than surviving
+  indefinitely; it is skipped for `_ga` under `clientIdSource: 'storage'`, which
+  never touches the cookie, and is durable only where `gtag.js` is not
+  co-installed, since gtag rewrites it. Re-granting re-persists the same client
+  ID and session state rather than minting a new identity. `enabled` is now the
+  *initial* value of a runtime flag: `setEnabled(true)` runs the initialisation
+  that `enabled: false` skipped, so a consent-banner app creates no identifier
+  until the user accepts, and events fired before that are dropped rather than
+  queued. `setEnabled(false)` also stops the engagement flush on tab hide, and
+  engagement time no longer accrues while disabled. `init()` is memoised so
+  awaiting it after `setEnabled(true)` waits for the real initialisation, and a
+  rejected init is not cached, so a transient storage failure can be retried.
+  Defaults are unchanged — omitting `consent` means `analyticsStorage: 'granted'`
+  with no `consent` key on the wire, so upgrading alters nothing until you opt
+  in. Any invalid consent value is treated as denied. This library does not
+  persist consent state; call `setConsent()` on each boot from your own store.
+  ([#20](https://github.com/streamvessel/ng-ga4/issues/20))
 - `clientIdSource` option, default `'auto'`, to interoperate with gtag.js's
   `_ga` cookie. Previously this library always kept its client ID in
   origin-scoped `localStorage`, so a site running both gtag.js and this

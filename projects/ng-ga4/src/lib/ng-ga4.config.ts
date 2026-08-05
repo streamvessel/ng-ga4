@@ -1,4 +1,5 @@
 import { InjectionToken } from '@angular/core';
+import { NgGa4Consent } from './consent';
 
 /**
  * Options for the `_ga` cookie this library writes when `writeGaCookie` is
@@ -69,8 +70,9 @@ export interface NgGa4Config {
      * existing user upgrading from a version before this shape change keeps
      * their previously stored `crypto.randomUUID()` as-is; reusing rather
      * than replacing it is deliberate, to avoid re-identifying the user. Off
-     * by default: this library does not set a cookie unless asked, which
-     * matters because Consent Mode is not implemented yet. Ignored for
+     * by default: this library does not set a cookie unless asked. Denying
+     * `analyticsStorage` via `consent` suppresses this write and deletes any
+     * cookie already present. Ignored for
      * `'storage'` and for extensions; implied by `'cookie'`.
      *
      * Truthiness governs whether the cookie is written — `{}` writes with all
@@ -114,6 +116,24 @@ export interface NgGa4Config {
      * See "Engagement measurement" in the README for the full reasoning.
      */
     engagementEventName?: string;
+
+    /**
+     * Initial consent state. Omitting it means `analyticsStorage: 'granted'` with
+     * both ad signals unset — exactly the behaviour of every version before this
+     * one, so upgrading changes nothing until you call `setConsent()`.
+     *
+     * Booting with `analyticsStorage: 'denied'` still initialises and still sends;
+     * it just never writes to storage, and **deletes anything already stored**
+     * from a previous visit. Use `enabled: false` to stop collection itself.
+     *
+     * **This library does not persist consent state.** Your app owns its banner
+     * and already stores the user's choice; a second copy here would be a second
+     * source of truth that can disagree with it. Call `setConsent()` on every
+     * boot from your own store.
+     */
+    consent?: NgGa4Consent;
 }
 
 export const NG_GA4_CONFIG = new InjectionToken<NgGa4Config>('NG_GA4_CONFIG');
+
+export { NgGa4Consent, NgGa4ConsentState } from './consent';
