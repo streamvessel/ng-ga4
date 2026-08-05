@@ -3207,6 +3207,42 @@ describe('NgGa4Service', () => {
             expect(chromeSession['ga_session_id']).toBeDefined();
         });
 
+        // The spec above cannot actually detect the loss of runInit()'s trailing
+        // flushStorage(): setupChromeMock mutates its store synchronously inside
+        // set(), and runInit() awaits several unrelated things afterwards, so the
+        // writes land on incidental microtask ticks either way. Found by mutation
+        // testing. This one holds the writes open, so only the flush can explain
+        // init() still being pending.
+        it('init() stays pending until the queued extension writes settle', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const mock = setupDeferredChromeMock({ ga_client_id: 'ext-id' });
+            // Real navigator.userAgentData resolves getHighEntropyValues() on a
+            // task, not a microtask, and jasmine.clock() has mocked setTimeout —
+            // so a microtask-only drain can never let it settle, and init() would
+            // sit pending for a reason that has nothing to do with storage,
+            // making the assertion below pass against any implementation. The
+            // user-agent-string path is synchronous.
+            spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
+
+            let initDone = false;
+            const initPromise = service.init().then(() => { initDone = true; });
+
+            // Drained far past what init() needs: every other await inside it is
+            // already settled, so without the flush it would have resolved long
+            // before here. Only a still-pending storage write can hold it open.
+            for (let i = 0; i < 20; i++) {
+                await drainMicrotasks();
+            }
+            expect(mock.calls.length).toBeGreaterThan(0);
+            expect(initDone).toBe(false);
+
+            await mock.releaseAll();
+            await initPromise;
+
+            expect(initDone).toBe(true);
+            expect(mock.localStore['ga_session_number']).toBe('1');
+        });
+
         it('consent withdrawal removes after an in-flight write, never before', async () => {
             reconfigureTestBed({ isExtension: true });
             const mock = setupDeferredChromeMock({ ga_client_id: 'ext-id' });
