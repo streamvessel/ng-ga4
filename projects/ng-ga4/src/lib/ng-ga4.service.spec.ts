@@ -2945,6 +2945,29 @@ describe('NgGa4Service', () => {
             clearChromeMock();
         });
 
+        it('clears localStorage fallback state on an extension with no chrome.storage.session', async () => {
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal, {});
+            // MV3 exposes chrome.storage.session to trusted contexts only. Without
+            // it, saveSessionState falls back to localStorage — which withdrawal
+            // must still clear. This is the case the deliberate absence of an early
+            // return after the chrome branch exists for; the sibling spec above
+            // never reaches it, because it only asserts on chrome.storage keys.
+            delete (window as any).chrome.storage.session;
+            reconfigureTestBed({ isExtension: true });
+
+            await service.init();
+            service.trackEvent('seed');
+            httpMock.expectOne(r => r.url.includes('/mp/collect')).flush({});
+            expect(mockLocalStorage['ga_session_id']).toBeDefined();
+
+            service.setConsent({ analyticsStorage: 'denied' });
+
+            expect(mockLocalStorage['ga_session_id']).toBeUndefined();
+            expect(mockLocalStorage['ga_last_activity']).toBeUndefined();
+            clearChromeMock();
+        });
+
         it('leaves the _ga cookie alone under clientIdSource: storage', async () => {
             reconfigureTestBed({ clientIdSource: 'storage' });
             await service.init();
