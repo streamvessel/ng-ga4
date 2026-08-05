@@ -2869,5 +2869,59 @@ describe('NgGa4Service', () => {
             expect(after.request.body['client_id']).toBe(clientId);
             after.flush({});
         });
+
+        it('re-persists the same client id when storage is granted again', async () => {
+            await service.init();
+            service.trackEvent('first');
+            const first = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            const clientId = first.request.body['client_id'];
+            first.flush({});
+
+            service.setConsent({ analyticsStorage: 'denied' });
+            expect(mockLocalStorage['ga_client_id']).toBeUndefined();
+
+            service.setConsent({ analyticsStorage: 'granted' });
+
+            // The same ID, not a fresh mint: re-identifying someone as a consequence
+            // of them *granting* consent would be perverse.
+            expect(mockLocalStorage['ga_client_id']).toBe(clientId);
+        });
+
+        it('restores session state and number on re-grant', async () => {
+            await service.init();
+            const sessionNumber = mockLocalStorage['ga_session_number'];
+            expect(sessionNumber).toBeDefined();
+
+            service.setConsent({ analyticsStorage: 'denied' });
+            service.setConsent({ analyticsStorage: 'granted' });
+
+            // Without this, a reload inside the session window reads null -> 0 and
+            // every subsequent hit carries session_number: 0.
+            expect(mockLocalStorage['ga_session_number']).toBe(sessionNumber);
+            expect(mockLocalStorage['ga_session_id']).toBeDefined();
+        });
+
+        it('re-persists an extension identity to chrome.storage, not localStorage', async () => {
+            const chromeLocal: Record<string, any> = {};
+            const chromeSession: Record<string, any> = {};
+            setupChromeMock(chromeLocal, chromeSession);
+            reconfigureTestBed({ isExtension: true });
+
+            await service.init();
+            const clientId = chromeLocal['ga_client_id'];
+            expect(clientId).toBeDefined();
+
+            service.setConsent({ analyticsStorage: 'denied' });
+            expect(chromeLocal['ga_client_id']).toBeUndefined();
+
+            service.setConsent({ analyticsStorage: 'granted' });
+
+            // Writing to localStorage here would leave the ID somewhere
+            // loadOrCreateClientIdFromChromeStorage never reads, so the next
+            // service-worker start would mint a fresh one.
+            expect(chromeLocal['ga_client_id']).toBe(clientId);
+            expect(mockLocalStorage['ga_client_id']).toBeUndefined();
+            clearChromeMock();
+        });
     });
 });

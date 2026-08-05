@@ -163,8 +163,13 @@ export class NgGa4Service implements OnDestroy {
     setConsent(consent: NgGa4Consent): void {
         const wasAllowed = this.consent.storageAllowed;
         this.consent.merge(consent);
-        if (wasAllowed && !this.consent.storageAllowed) {
+        const isAllowed = this.consent.storageAllowed;
+        if (wasAllowed && !isAllowed) {
             this.clearPersistedIdentity();
+            return;
+        }
+        if (!wasAllowed && isAllowed && this.clientId) {
+            this.repersistIdentity(this.clientId);
         }
     }
 
@@ -247,6 +252,32 @@ export class NgGa4Service implements OnDestroy {
         for (const domain of domains) {
             this.setCookie(`_ga=; path=/; max-age=0; domain=.${domain}; ${flags}`);
         }
+    }
+
+    // Persists what is already in hand rather than minting: identity continuity
+    // across a consent grant is the whole point.
+    //
+    // storeClientId cannot be used alone here. It writes to localStorage even for
+    // extensions, deliberately, because it is the store the chrome.storage failure
+    // path falls back to. On re-grant an extension must go back to chrome.storage,
+    // or the ID lands somewhere loadOrCreateClientIdFromChromeStorage never reads
+    // and the next service-worker start mints a fresh one.
+    //
+    // Session state goes back too: clearPersistedIdentity removed ga_session_number,
+    // and leaving it absent makes the next reload restart the count at 0.
+    private repersistIdentity(clientId: string): void {
+        if (this.config.isExtension && chrome?.storage) {
+            chrome.storage.local.set({ ga_client_id: clientId })
+                .catch(err => {
+                    console.warn('[ng-ga4] chrome.storage.local.set failed', err);
+                    // Same fallback the init path uses when chrome.storage is broken.
+                    this.storeClientId(clientId);
+                });
+        } else {
+            this.storeClientId(clientId);
+        }
+        this.saveSessionNumber(this.sessionNumber);
+        this.saveSessionState();
     }
 
     ngOnDestroy(): void {
