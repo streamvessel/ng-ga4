@@ -458,8 +458,11 @@ session; a dropped *client ID* write makes the next wake mint a second one, and
 that user is counted twice from then on.
 
 Writes are serialised internally, so they can never land out of order — a
-consent withdrawal's delete cannot be overtaken by a write issued before it. But
-ordering does not make a write survive teardown. Two things do.
+consent withdrawal's delete cannot be overtaken by a write issued before it.
+That holds per service instance: a background worker and a popup each build
+their own injector, and Chrome still orders their writes against each other
+however it likes. But ordering does not make a write survive teardown. Two
+things do.
 
 **Seed the client ID at install time.** This is the only complete fix, and it is
 one line:
