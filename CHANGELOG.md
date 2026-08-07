@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `seedNgGa4ClientId()` and `flushStorage()`, for Manifest V3 service-worker
+  teardown. Call `seedNgGa4ClientId()` from `chrome.runtime.onInstalled` at
+  worker top level — for every reason, not just `'install'` — to write the
+  client ID once at install time; no context then ever reaches the mint path,
+  which is the only complete fix for the duplicate identity described in
+  [#32](https://github.com/streamvessel/ng-ga4/issues/32). A worker torn down
+  between minting an ID and persisting it makes the next wake mint a second one,
+  and awaiting the write cannot prevent that, since it makes our code wait
+  rather than Chrome. `flushStorage()` resolves once pending `chrome.storage`
+  writes have landed, to be awaited before an MV3 event handler returns; it
+  covers storage only, not event delivery
+  ([#26](https://github.com/streamvessel/ng-ga4/issues/26)), and resolves
+  immediately on the web, where writes are synchronous. Neither survives forced
+  termination — a browser quit or extension reload can still drop an in-flight
+  write, and clearing extension storage reopens the mint path since
+  `onInstalled` does not re-fire.
+  ([#32](https://github.com/streamvessel/ng-ga4/issues/32))
 - Consent Mode. `setConsent()` and `setEnabled()` on `NgGa4Service`, plus an
   optional `consent` config field supplying the initial state. `adUserData` and
   `adPersonalization` are sent as the Measurement Protocol's `consent` object;
@@ -101,6 +118,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `chrome.storage` writes are serialised instead of issued and abandoned.
+  `saveSessionNumber`, `saveSessionState`, `repersistIdentity` and
+  `clearPersistedIdentity` each fired a write with only a `.catch()` attached and
+  nothing ordering them against each other. Consent Mode made that sharper:
+  denying `analyticsStorage` issues a delete while an earlier write may still be
+  in flight, and across two different storage areas Chrome documents no ordering
+  guarantee at all — so a write could land after the withdrawal and resurrect the
+  identifier. Every write and delete now runs behind the previous one, and a
+  failed write no longer prevents the next from being attempted.
+  ([#32](https://github.com/streamvessel/ng-ga4/issues/32))
 - Debug mode records events again. `debug: true` sent every hit to the Measurement
   Protocol validation endpoint, which never records anything, so the
   `debug: !environment.production` pattern the README recommended collected no data

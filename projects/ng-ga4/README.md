@@ -404,6 +404,7 @@ this.analytics.trackPageView('/custom-page', 'Custom Page Title');
 | `trackEvent(name: string, params?: Record<string, any>): void` | Track a custom event. |
 | `setConsent(consent: NgGa4Consent): void` | Update consent at runtime. Partial merge — omitted keys are left alone. |
 | `setEnabled(enabled: boolean): void` | Turn collection on or off at runtime. Enabling for the first time runs the deferred initialisation. |
+| `flushStorage(): Promise<void>` | Resolve once pending `chrome.storage` writes have landed. Await before an MV3 event handler returns. No-op on the web. |
 
 Tracking methods are no-ops while collection is disabled — `enabled: false` in
 config, or `setEnabled(false)` at runtime — and before initialization.
@@ -447,6 +448,72 @@ NgGa4Module.forRoot({
 | Client ID | `_ga` cookie when present and well-formed (default), else `localStorage`; writing to the cookie is opt-in (see "Interop with gtag.js" above) | `chrome.storage.local` |
 | Session number | `localStorage` | `chrome.storage.local` |
 | Session ID + activity | `localStorage` | `chrome.storage.session` |
+
+### Service worker teardown
+
+An MV3 service worker is terminated once the event loop goes idle, and a
+`chrome.storage` write still in flight when that happens is lost. A dropped
+session write makes the next wake read stale state and roll a spurious new
+session; a dropped *client ID* write makes the next wake mint a second one, and
+that user is counted twice from then on.
+
+Writes are serialised internally, so they can never land out of order — a
+consent withdrawal's delete cannot be overtaken by a write issued before it.
+That holds per service instance: a background worker and a popup each build
+their own injector, and Chrome still orders their writes against each other
+however it likes. But ordering does not make a write survive teardown. Two
+things do.
+
+**Seed the client ID at install time.** This is the only complete fix, and it is
+one line:
+
+```typescript
+// service-worker.ts, at top level — not inside Angular bootstrap
+import { seedNgGa4ClientId } from '@stream-vessel/ng-ga4';
+
+chrome.runtime.onInstalled.addListener(() => seedNgGa4ClientId());
+```
+
+Once the seed has landed, no context reaches the mint path, so there is nothing
+to lose to teardown — and nothing for a simultaneously-starting worker and popup
+to race over either. The call is idempotent and never throws.
+
+Two things to get right:
+
+- **Call it on every `onInstalled` event, not just `reason === 'install'`.** If
+  you are adding this to an extension that is already published, every existing
+  user gets `reason: 'update'` and never `'install'` — a `reason` guard would
+  permanently skip exactly the users this protects.
+- **Register at worker top level.** A listener added after Angular bootstrap
+  misses the very `onInstalled` event that started the worker, which is why the
+  library cannot do this for you.
+
+Seeding does not cover a user who clears extension storage: `onInstalled` does
+not re-fire, so the next worker wake mints as before.
+
+**Await pending writes before your handler returns.**
+
+```typescript
+chrome.action.onClicked.addListener(async () => {
+    ga.trackEvent('action_clicked');
+    await ga.flushStorage();
+});
+```
+
+This applies to `setConsent()` too, not just tracking calls — granting or
+denying `analyticsStorage` writes to and deletes from `chrome.storage`, and
+those are lost to teardown like any other write:
+
+```typescript
+ga.setConsent({ analyticsStorage: 'denied' });
+await ga.flushStorage();
+```
+
+`flushStorage()` covers `chrome.storage` writes only — event delivery is still
+fire-and-forget ([#26](https://github.com/streamvessel/ng-ga4/issues/26)). And
+neither measure survives *forced* termination: a browser quit, crash or
+extension reload can drop an in-flight write whatever the library does. Seeding
+is what removes the client ID from that exposure for good.
 
 ### Cross-tab session sync
 

@@ -159,6 +159,88 @@ describe('NgGa4Service', () => {
         };
     }
 
+    interface DeferredChromeMock {
+        /** Labels of the operations that have actually been invoked, in order. */
+        calls: string[];
+        /** Resolve the oldest still-pending operation, applying its mutation. */
+        release(): void;
+        /** Reject the oldest still-pending operation. */
+        rejectNext(err?: unknown): void;
+        /**
+         * Resolve every operation, including ones not yet queued.
+         *
+         * Chained links do not register with the mock until their turn comes, so
+         * a single pass drains only what was already pending and the rest of the
+         * chain never settles — which hangs `flushStorage()` rather than failing
+         * it. Hence the drain-and-retry loop.
+         */
+        releaseAll(): Promise<void>;
+        localStore: Record<string, any>;
+        sessionStore: Record<string, any>;
+    }
+
+    // The existing setupChromeMock resolves every write immediately, so it cannot
+    // distinguish "serialised" from "all issued at once". This one holds each
+    // operation open until the test releases it.
+    function setupDeferredChromeMock(
+        localStore: Record<string, any> = {},
+        sessionStore: Record<string, any> = {}
+    ): DeferredChromeMock {
+        const calls: string[] = [];
+        const pending: Array<{ settle: (reject?: unknown) => void }> = [];
+
+        const defer = (label: string, apply: () => void) => {
+            calls.push(label);
+            return new Promise<void>((resolve, reject) => {
+                pending.push({
+                    settle: (rejectWith?: unknown) => {
+                        if (rejectWith !== undefined) {
+                            reject(rejectWith);
+                            return;
+                        }
+                        apply();
+                        resolve();
+                    }
+                });
+            });
+        };
+
+        const area = (store: Record<string, any>, name: string) => ({
+            get: (keys: string[]) => Promise.resolve(
+                keys.reduce((acc: any, k: string) => { if (store[k] !== undefined) acc[k] = store[k]; return acc; }, {})
+            ),
+            set: (items: any) => defer(`${name}.set:${Object.keys(items).join(',')}`, () => Object.assign(store, items)),
+            remove: (keys: string[]) => defer(`${name}.remove:${keys.join(',')}`, () => { for (const k of keys) { delete store[k]; } })
+        });
+
+        (window as any).chrome.storage = { local: area(localStore, 'local'), session: area(sessionStore, 'session') };
+
+        return {
+            calls,
+            localStore,
+            sessionStore,
+            release: () => pending.shift()?.settle(),
+            rejectNext: (err: unknown = new Error('storage failure')) => pending.shift()?.settle(err),
+            releaseAll: async () => {
+                // Bounded so a genuine feedback loop fails the test instead of
+                // hanging it. Nothing in the library writes in response to a
+                // write, so five rounds is far beyond any real chain depth.
+                for (let round = 0; round < 5 && pending.length; round++) {
+                    while (pending.length) { pending.shift()!.settle(); }
+                    await drainMicrotasks();
+                }
+            }
+        };
+    }
+
+    // The chain is pure microtasks, and jasmine.clock() has mocked setTimeout, so
+    // draining means yielding the microtask queue — not a timer.
+    async function drainMicrotasks(): Promise<void> {
+        for (let i = 0; i < 10; i++) {
+            await Promise.resolve();
+        }
+    }
+
     function clearChromeMock(): void {
         if (originalChromeStorage !== undefined) {
             (window as any).chrome.storage = originalChromeStorage;
@@ -2931,9 +3013,11 @@ describe('NgGa4Service', () => {
             expect(clientId).toBeDefined();
 
             service.setConsent({ analyticsStorage: 'denied' });
+            await service.flushStorage();
             expect(chromeLocal['ga_client_id']).toBeUndefined();
 
             service.setConsent({ analyticsStorage: 'granted' });
+            await service.flushStorage();
 
             // Writing to localStorage here would leave the ID somewhere
             // loadOrCreateClientIdFromChromeStorage never reads, so the next
@@ -2958,6 +3042,7 @@ describe('NgGa4Service', () => {
             expect(chromeSession['ga_session_id']).toBeDefined();
 
             service.setConsent({ analyticsStorage: 'denied' });
+            await service.flushStorage();
 
             expect(chromeLocal['ga_client_id']).toBeUndefined();
             expect(chromeSession['ga_session_id']).toBeUndefined();
@@ -3011,6 +3096,244 @@ describe('NgGa4Service', () => {
 
             expect(mockLocalStorage['ga_session_id']).toBeUndefined();
             expect(mockLocalStorage['ga_session_number']).toBeUndefined();
+        });
+    });
+
+    describe('chrome.storage write durability', () => {
+        it('serialises writes: a later write does not start until the earlier one lands', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const mock = setupDeferredChromeMock({ ga_client_id: 'ext-id' });
+
+            // Two writes issued back to back, with nothing released yet.
+            (service as any).saveSessionNumber(7);
+            (service as any).saveSessionState();
+            await drainMicrotasks();
+
+            // Only the first has actually reached chrome.storage.
+            expect(mock.calls).toEqual(['local.set:ga_session_number']);
+
+            mock.release();
+            await drainMicrotasks();
+
+            expect(mock.calls).toEqual([
+                'local.set:ga_session_number',
+                'session.set:ga_session_id,ga_last_activity'
+            ]);
+        });
+
+        it('flushStorage() resolves only once pending writes have landed', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const mock = setupDeferredChromeMock({ ga_client_id: 'ext-id' });
+
+            (service as any).saveSessionNumber(9);
+            let settled = false;
+            const flushed = service.flushStorage().then(() => { settled = true; });
+            await drainMicrotasks();
+
+            expect(settled).toBe(false);
+            expect(mock.localStore['ga_session_number']).toBeUndefined();
+
+            await mock.releaseAll();
+            await flushed;
+
+            expect(settled).toBe(true);
+            expect(mock.localStore['ga_session_number']).toBe('9');
+        });
+
+        it('flushStorage() also awaits a write enqueued while it is waiting', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const mock = setupDeferredChromeMock({ ga_client_id: 'ext-id' });
+
+            (service as any).saveSessionNumber(1);
+            let settled = false;
+            const flushed = service.flushStorage().then(() => { settled = true; });
+            await drainMicrotasks();
+
+            // A second write arrives mid-flush, as a concurrent trackEvent() could cause.
+            (service as any).saveSessionNumber(2);
+            mock.release();
+            await drainMicrotasks();
+
+            expect(settled).toBe(false);
+
+            await mock.releaseAll();
+            await flushed;
+
+            expect(settled).toBe(true);
+            expect(mock.localStore['ga_session_number']).toBe('2');
+        });
+
+        it('keeps writing after one write rejects', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const mock = setupDeferredChromeMock({ ga_client_id: 'ext-id' });
+            spyOn(console, 'warn');
+
+            (service as any).saveSessionNumber(3);
+            // Set explicitly: this spec never calls init(), so this.sessionId is
+            // undefined, and Object.assign would copy the key with an undefined
+            // value — making toBeDefined() fail for a reason unrelated to the
+            // chain. Asserting the real value also makes the check meaningful.
+            (service as any).sessionId = 'session-3';
+            (service as any).saveSessionState();
+            await drainMicrotasks();
+
+            mock.rejectNext();
+            await drainMicrotasks();
+
+            // The failure is reported and the chain carries on.
+            expect(console.warn).toHaveBeenCalled();
+            expect(mock.calls).toContain('session.set:ga_session_id,ga_last_activity');
+
+            await mock.releaseAll();
+            await expectAsync(service.flushStorage()).toBeResolved();
+            expect(mock.sessionStore['ga_session_id']).toBe('session-3');
+        });
+
+        it('flushStorage() resolves immediately on the web path', async () => {
+            await service.init();
+
+            // toBeResolved() alone would pass however long it took — it only says
+            // the promise settles inside Jasmine's timeout. The web path enqueues
+            // nothing, so this must come back on microtasks with no storage
+            // round-trip to wait for.
+            let settled = false;
+            const flushed = service.flushStorage().then(() => { settled = true; });
+            await drainMicrotasks();
+
+            expect(settled).toBe(true);
+            await expectAsync(flushed).toBeResolved();
+        });
+
+        // Proves the writes reach storage, and nothing more. It cannot prove the
+        // flush is what got them there — setupChromeMock mutates synchronously,
+        // so this passes with runInit()'s flushStorage() deleted. The spec below
+        // is the one that pins that; keep both, but do not read this one alone.
+        it('await init() implies the initial extension writes have landed', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const chromeLocal: Record<string, any> = {};
+            const chromeSession: Record<string, any> = {};
+            setupChromeMock(chromeLocal, chromeSession);
+
+            await service.init();
+
+            expect(chromeLocal['ga_client_id']).toBeDefined();
+            expect(chromeLocal['ga_session_number']).toBe('1');
+            expect(chromeSession['ga_session_id']).toBeDefined();
+        });
+
+        // The spec above cannot actually detect the loss of runInit()'s trailing
+        // flushStorage(): setupChromeMock mutates its store synchronously inside
+        // set(), and runInit() awaits several unrelated things afterwards, so the
+        // writes land on incidental microtask ticks either way. Found by mutation
+        // testing. This one holds the writes open, so only the flush can explain
+        // init() still being pending.
+        it('init() stays pending until the queued extension writes settle', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const mock = setupDeferredChromeMock({ ga_client_id: 'ext-id' });
+            // Real navigator.userAgentData resolves getHighEntropyValues() on a
+            // task, not a microtask, and jasmine.clock() has mocked setTimeout —
+            // so a microtask-only drain can never let it settle, and init() would
+            // sit pending for a reason that has nothing to do with storage,
+            // making the assertion below pass against any implementation. The
+            // user-agent-string path is synchronous.
+            spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
+
+            let initDone = false;
+            const initPromise = service.init().then(() => { initDone = true; });
+
+            // Drained far past what init() needs: every other await inside it is
+            // already settled, so without the flush it would have resolved long
+            // before here. Only a still-pending storage write can hold it open.
+            for (let i = 0; i < 20; i++) {
+                await drainMicrotasks();
+            }
+            expect(mock.calls.length).toBeGreaterThan(0);
+            expect(initDone).toBe(false);
+
+            await mock.releaseAll();
+            await initPromise;
+
+            expect(initDone).toBe(true);
+            expect(mock.localStore['ga_session_number']).toBe('1');
+        });
+
+        // saveSessionState() copies sessionId and lastActivityTimestamp into
+        // locals before enqueueing rather than reading them inside the thunk.
+        // Mutation testing showed nothing detected the difference, because every
+        // existing spec leaves those fields untouched between enqueue and run.
+        it('persists the session state a queued write was issued for, not a later one', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const mock = setupDeferredChromeMock({ ga_client_id: 'ext-id' });
+
+            (service as any).sessionId = 'S1';
+            (service as any).lastActivityTimestamp = 1000;
+            (service as any).saveSessionState();
+            // Synchronously, so the thunk has not run yet: the fields move on
+            // before the write they were issued for reaches chrome.storage.
+            (service as any).sessionId = 'S2';
+            (service as any).lastActivityTimestamp = 2000;
+
+            await drainMicrotasks();
+            await mock.releaseAll();
+            await service.flushStorage();
+
+            expect(mock.sessionStore['ga_session_id']).toBe('S1');
+            expect(mock.sessionStore['ga_last_activity']).toBe('1000');
+        });
+
+        it('consent withdrawal removes after an in-flight write, never before', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const mock = setupDeferredChromeMock({ ga_client_id: 'ext-id' });
+
+            (service as any).saveSessionNumber(4);
+            // Denied while that write is still open. The remove must queue behind
+            // it — landing first would let the write resurrect the identifier.
+            service.setConsent({ analyticsStorage: 'denied' });
+            await drainMicrotasks();
+
+            expect(mock.calls).toEqual(['local.set:ga_session_number']);
+
+            await mock.releaseAll();
+            await service.flushStorage();
+
+            expect(mock.calls).toEqual([
+                'local.set:ga_session_number',
+                'local.remove:ga_client_id,ga_session_number',
+                'session.remove:ga_session_id,ga_last_activity'
+            ]);
+            expect(mock.localStore['ga_session_number']).toBeUndefined();
+            expect(mock.localStore['ga_client_id']).toBeUndefined();
+        });
+
+        // The only spec that makes enqueueStorageWrite's two-promise split
+        // load-bearing. 'should not throw when chrome.storage.local.set rejects'
+        // asserts only that init() resolves, so it passes just as happily against
+        // a version that returns an ID persisted nowhere at all.
+        it('falls back to localStorage when the client-ID write is rejected', async () => {
+            reconfigureTestBed({ isExtension: true });
+            (window as any).chrome.storage = {
+                local: {
+                    get: () => Promise.resolve({}),
+                    set: () => Promise.reject(new Error('quota exceeded')),
+                    remove: () => Promise.resolve()
+                },
+                session: {
+                    get: () => Promise.resolve({}),
+                    set: () => Promise.resolve(),
+                    remove: () => Promise.resolve()
+                }
+            };
+            spyOn(console, 'warn');
+
+            await service.init();
+
+            // The chrome.storage write failed, so the ID has to have landed in
+            // the fallback store — not merely been minted and returned.
+            expect(mockLocalStorage['ga_client_id']).toBeDefined();
+            service.trackEvent('probe');
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(req.request.body.client_id).toBe(mockLocalStorage['ga_client_id']);
+            req.flush('', { status: 204, statusText: 'No Content' });
         });
     });
 });
