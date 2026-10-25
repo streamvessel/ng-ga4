@@ -49,12 +49,12 @@ jobs:
             exit 1
           fi
 
-      # Trusted Publishing (OIDC) requires a recent npm; Node 22 ships npm 10.x.
-      - name: Upgrade npm
-        run: npm install -g npm@latest
-
+      # Trusted Publishing (OIDC) needs npm >= 11.5.1; Node 22 ships npm 10.x. Run a pinned
+      # npm through npx rather than `npm install -g npm@latest`: npm 10 replacing itself in
+      # place breaks partway (MODULE_NOT_FOUND 'promise-retry', first seen when latest became
+      # npm 12), and a pin keeps the publishing CLI from changing under a release.
       - name: Publish to npm
-        run: npm publish --access public
+        run: npx --yes npm@11.21.0 publish --access public
         working-directory: dist/ng-ga4
 
       - name: Extract changelog section

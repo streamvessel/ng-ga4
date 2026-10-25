@@ -58,9 +58,9 @@ fails before publishing anything — bump the version rather than re-dispatching
 
 Publishing uses [npm trusted publishing](https://docs.npmjs.com/trusted-publishers) via
 GitHub OIDC. There is no `NPM_TOKEN` secret in this repository, and no maintainer needs
-npm credentials to cut a release. The workflow declares `id-token: write` and upgrades
-the npm CLI (trusted publishing requires npm ≥ 11.5.1, while the pinned Node ships
-npm 10.x); npm then attaches build provenance automatically.
+npm credentials to cut a release. The workflow declares `id-token: write` and publishes
+with a pinned npm 11 run through `npx` (trusted publishing requires npm ≥ 11.5.1, while
+the pinned Node ships npm 10.x); npm then attaches build provenance automatically.
 
 The trusted publisher is configured on npmjs.com under the package's
 **Settings → Trusted Publisher**, bound to this repository and the `publish.yml`
