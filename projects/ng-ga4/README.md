@@ -567,13 +567,14 @@ Mitigation: watch your GA4 property for unusual event volume. If abuse shows up,
 
 ## Peer Dependencies
 
-- `@angular/core` ^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
-- `@angular/common` ^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
-- `@angular/router` ^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
+- `@angular/core` ^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0 || ^20.0.0
+- `@angular/common` ^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0 || ^20.0.0
+- `@angular/router` ^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0 || ^20.0.0
 - `rxjs` ^7.0.0
 
 **Angular version support:** the peer range above is permissive, but CI tests
-against Angular 18 only. Reports of breakage on other majors are welcome.
+against Angular 18 only. Angular 20 is checked downstream, in StreamVessel's app,
+not here. Reports of breakage on other majors are welcome.
 
 ## Local development
 
