@@ -19,22 +19,21 @@ Google Analytics 4 for Angular over the [Measurement Protocol](https://developer
 - Debug mode that shows events in DebugView and still records them
 - Safe under SSR; works with NgModule and standalone apps
 
-## What the Measurement Protocol can't do
+## What you give up
 
-Google describes the Measurement Protocol as a way to *augment* tagging, not replace it. On a property fed only by this library:
+This library sends data to GA4 straight from your code, without Google's tracking script (`gtag.js`). That is why it works where the script can't, but GA4 learns less about each visit, so some reports stay empty:
 
-| GA4 report or metric | Result |
-|---|---|
-| Traffic acquisition | Everything is `(direct) / (none)` |
-| Session campaign | No rows |
-| New users | `0` |
-| Engaged sessions, engagement rate, bounce rate | `0` / unusable |
-| Demographics, interests, Ads remarketing | No data |
-| City and region | No data (country comes from the time zone) |
+- **Where visitors came from:** every visit shows as "direct", with no search, link or campaign data.
+- **New users:** always 0.
+- **Engaged sessions, engagement rate and bounce rate:** always 0, so you can't use them.
+- **Age, gender, interests, and Google Ads remarketing:** no data.
+- **City and region:** no data. The country still shows, guessed from the browser's time zone.
 
-Events, page views, active users and average engagement time work normally. These results were measured, not assumed: see [LIMITATIONS.md](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/LIMITATIONS.md).
+These work as usual: events, page views, active users and average engagement time.
 
-**If your app can load a script from `googletagmanager.com`, use `gtag.js`.** This library is for when it can't.
+We checked all of this on a real GA4 property; [LIMITATIONS.md](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/LIMITATIONS.md) has the details.
+
+**If your app can load Google's script, use `gtag.js` instead.** This library is for when it can't.
 
 ## Install
 

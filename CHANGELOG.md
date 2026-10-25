@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root, where the file isn't; the package now declares `repository.directory`.
 - The README's configuration options are a list instead of a table that needed
   scrolling sideways.
+- The README says in plain words what you give up without `gtag.js`.
 
 ## [0.2.0] - 2026-10-25
 
