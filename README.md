@@ -8,7 +8,7 @@ Google Analytics 4 for Angular over the [Measurement Protocol](https://developer
 
 It was extracted from the [Stream Vessel](https://streamvessel.com) frontend, where it runs in production.
 
-The Measurement Protocol only *augments* GA4 tagging. A property fed only by this library has no traffic attribution, New users, engaged sessions or demographics; [LIMITATIONS.md](projects/ng-ga4/LIMITATIONS.md) has the measurements. If your app can load `gtag.js`, use it; this library is for when it can't.
+Without Google's script, GA4 learns less about each visit: it can't tell where visitors came from, and it shows no new users, engaged sessions, age or interests. [What you give up](projects/ng-ga4/README.md#what-you-give-up) has the full list. If your app can load `gtag.js`, use it; this library is for when it can't.
 
 ## Install
 

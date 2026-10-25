@@ -19,22 +19,21 @@ Google Analytics 4 for Angular over the [Measurement Protocol](https://developer
 - Debug mode that shows events in DebugView and still records them
 - Safe under SSR; works with NgModule and standalone apps
 
-## What the Measurement Protocol can't do
+## What you give up
 
-Google describes the Measurement Protocol as a way to *augment* tagging, not replace it. On a property fed only by this library:
+This library sends data to GA4 straight from your code, without Google's tracking script (`gtag.js`). That is why it works where the script can't, but GA4 learns less about each visit, so some reports stay empty:
 
-| GA4 report or metric | Result |
-|---|---|
-| Traffic acquisition | Everything is `(direct) / (none)` |
-| Session campaign | No rows |
-| New users | `0` |
-| Engaged sessions, engagement rate, bounce rate | `0` / unusable |
-| Demographics, interests, Ads remarketing | No data |
-| City and region | No data (country comes from the time zone) |
+- **Where visitors came from:** every visit shows as "direct", with no search, link or campaign data.
+- **New users:** always 0.
+- **Engaged sessions, engagement rate and bounce rate:** always 0, so you can't use them.
+- **Age, gender, interests, and Google Ads remarketing:** no data.
+- **City and region:** no data. The country still shows, guessed from the browser's time zone.
 
-Events, page views, active users and average engagement time work normally. These results were measured, not assumed: see [LIMITATIONS.md](LIMITATIONS.md).
+These work as usual: events, page views, active users and average engagement time.
 
-**If your app can load a script from `googletagmanager.com`, use `gtag.js`.** This library is for when it can't.
+We checked all of this on a real GA4 property; [LIMITATIONS.md](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/LIMITATIONS.md) has the details.
+
+**If your app can load Google's script, use `gtag.js` instead.** This library is for when it can't.
 
 ## Install
 
@@ -81,21 +80,24 @@ bootstrapApplication(AppComponent, {
 
 ## Configuration
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `measurementId` | `string` | required | GA4 Measurement ID, e.g. `G-XXXXXXXXX` |
-| `apiSecret` | `string` | required | Measurement Protocol API secret |
-| `enabled` | `boolean` | required | Whether collection starts on. `false` creates no client ID and writes nothing until `setEnabled(true)`. See [Consent](#consent). |
-| `isExtension` | `boolean` | required | `true` in a Chrome extension: state goes to `chrome.storage` instead of `localStorage`. |
-| `siteUrl` | `string` | — | Base of `page_location`, e.g. `https://example.com`. Needed in extensions, where the page address is `chrome-extension://…`. Without it, `page_location` is the page's full address. |
-| `appVersion` | `string` | — | Sent as `app_version` on every event. |
-| `transport` | `'beacon' \| 'xhr'` | `'beacon'` | `'beacon'` tries `sendBeacon`, then `fetch` with `keepalive`, then XHR, so hits survive the page closing. `'xhr'` sends through `HttpClient` and your interceptors, but a request still in flight when the page closes is lost. |
-| `debug` | `boolean` | `false` | See [Debug mode](#debug-mode). |
-| `clientIdSource` | `'auto' \| 'cookie' \| 'storage'` | `'auto'` | Where the web client ID comes from. See [Client ID and gtag.js](#client-id-and-gtagjs). An unknown value logs a warning and falls back to `'auto'`, which reads `_ga`. Ignored in extensions. |
-| `writeGaCookie` | `boolean \| NgGa4CookieOptions` | `false` | Write a `_ga` cookie when there is no valid one (web only). See [Client ID and gtag.js](#client-id-and-gtagjs). |
-| `sendEngagementOnHide` | `boolean` | `true` | Send the engagement time left over when the page is hidden or closed. See [Engagement time](#engagement-time). |
-| `engagementEventName` | `string` | `'page_engagement'` | Name of that event. An invalid or reserved name (such as `user_engagement`) logs a warning and falls back to the default. |
-| `consent` | `NgGa4Consent` | storage granted | Initial consent state. See [Consent](#consent). |
+**Required**
+
+- `measurementId` (`string`): GA4 Measurement ID, e.g. `G-XXXXXXXXX`.
+- `apiSecret` (`string`): Measurement Protocol API secret.
+- `enabled` (`boolean`): whether collection starts on. `false` creates no client ID and writes nothing until `setEnabled(true)`. See [Consent](#consent).
+- `isExtension` (`boolean`): `true` in a Chrome extension, so state goes to `chrome.storage` instead of `localStorage`.
+
+**Optional**
+
+- `siteUrl` (`string`): base of `page_location`, e.g. `https://example.com`. Needed in extensions, where the page address is `chrome-extension://…`. Without it, `page_location` is the page's full address.
+- `appVersion` (`string`): sent as `app_version` on every event.
+- `transport` (`'beacon' | 'xhr'`, default `'beacon'`): `'beacon'` tries `sendBeacon`, then `fetch` with `keepalive`, then XHR, so hits survive the page closing. `'xhr'` sends through `HttpClient` and your interceptors, but a request still in flight when the page closes is lost.
+- `debug` (`boolean`, default `false`): see [Debug mode](#debug-mode).
+- `clientIdSource` (`'auto' | 'cookie' | 'storage'`, default `'auto'`): where the web client ID comes from. See [Client ID and gtag.js](#client-id-and-gtagjs). An unknown value logs a warning and falls back to `'auto'`, which reads `_ga`. Ignored in extensions.
+- `writeGaCookie` (`boolean` or `NgGa4CookieOptions`, default `false`): write a `_ga` cookie when there is no valid one (web only). See [Client ID and gtag.js](#client-id-and-gtagjs).
+- `sendEngagementOnHide` (`boolean`, default `true`): send the engagement time left over when the page is hidden or closed. See [Engagement time](#engagement-time).
+- `engagementEventName` (`string`, default `'page_engagement'`): name of that event. An invalid or reserved name (such as `user_engagement`) logs a warning and falls back to the default.
+- `consent` (`NgGa4Consent`, default: storage granted): initial consent state. See [Consent](#consent).
 
 ## Usage
 
