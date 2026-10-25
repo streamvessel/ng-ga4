@@ -42,6 +42,8 @@ describe('NgGa4Service', () => {
     let cookieAcceptsDomain: (domain: string) => boolean;
     let cookiesEnabled: boolean;
     let pageEngaged: boolean;
+    // undefined: hidden exactly when not engaged, which is what most specs mean.
+    let pageHidden: boolean | undefined;
 
     function configureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
         // Reset here, not just in the top-level beforeEach, so a reconfigureTestBed()
@@ -57,6 +59,7 @@ describe('NgGa4Service', () => {
         // via a controllable flag, not a one-off spyOn, so individual specs can flip
         // it (Jasmine forbids spying on an already-spied method) to exercise blur.
         pageEngaged = true;
+        pageHidden = undefined;
 
         routerEvents$ = new Subject<any>();
 
@@ -84,6 +87,7 @@ describe('NgGa4Service', () => {
         // (or even reliably true) under headless Karma, so the seam is stubbed here
         // for every spec, the same way getCookieJar/setCookie are below.
         spyOn(service as any, 'isPageEngaged').and.callFake(() => pageEngaged);
+        spyOn(service as any, 'isPageHidden').and.callFake(() => pageHidden ?? !pageEngaged);
 
         // The engagement timer is built from monotonicNow() (performance.now() in
         // production), not Date.now(), so it keeps ticking across an OS suspend —
@@ -1163,6 +1167,40 @@ describe('NgGa4Service', () => {
             expect(sentParams()['engagement_time_msec']).toBe(5000);
         });
 
+        // Back on a tab whose focus sits in a child frame, the page is disengaged but
+        // not hidden: nothing ends there, so nothing is sent.
+        it('does not flush a visibilitychange that leaves the page visible', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(3000);
+
+            pageEngaged = false;
+            pageHidden = false;
+            document.dispatchEvent(new Event('visibilitychange'));
+
+            httpMock.expectNone(() => true);
+        });
+
+        // The listener path the frame check exists for, with the real predicate:
+        // the tab is shown again while a child frame holds focus.
+        it('does not reopen the clock when the tab is shown with focus in a child frame', async () => {
+            await service.init();
+            window.dispatchEvent(new Event('blur'));
+            (service as any).isPageEngaged.and.callThrough();
+            spyOn(service as any, 'getDocument').and.returnValue({
+                visibilityState: 'visible',
+                hasFocus: () => true,
+                activeElement: { localName: 'iframe', shadowRoot: null }
+            });
+            pageHidden = false;
+
+            document.dispatchEvent(new Event('visibilitychange'));
+            jasmine.clock().tick(10000);
+
+            service.trackEvent('after_return_into_a_frame');
+            expect(sentParams()['engagement_time_msec']).toBe(0);
+        });
+
         it('forces the beacon transport for the hide flush even under transport: xhr', async () => {
             await service.init();
             jasmine.clock().tick(3000);
@@ -1331,12 +1369,16 @@ describe('NgGa4Service', () => {
     // anywhere else, so it is exercised here directly — via callThrough(), which
     // restores the spy's original implementation — against a fake document.
     describe('isPageEngaged() (real implementation)', () => {
-        function fakeDocument(overrides: { visibilityState?: string; hasFocus?: () => boolean; activeTag?: string }): Document {
+        function fakeDocument(overrides: { visibilityState?: string; hasFocus?: () => boolean; active?: object | null }): Document {
             return {
                 visibilityState: overrides.visibilityState ?? 'visible',
-                activeElement: { tagName: overrides.activeTag ?? 'BODY' },
+                activeElement: overrides.active === undefined ? element('body') : overrides.active,
                 ...(overrides.hasFocus ? { hasFocus: overrides.hasFocus } : {})
             } as unknown as Document;
+        }
+
+        function element(localName: string, shadowActive?: object): object {
+            return { localName, shadowRoot: shadowActive ? { activeElement: shadowActive } : null };
         }
 
         beforeEach(() => {
@@ -1372,11 +1414,26 @@ describe('NgGa4Service', () => {
         // until the page was next hidden.
         it('is not engaged while focus is inside a child frame', () => {
             const getDocument = spyOn(service as any, 'getDocument');
-            for (const activeTag of ['IFRAME', 'FRAME']) {
-                getDocument.and.returnValue(fakeDocument({ visibilityState: 'visible', hasFocus: () => true, activeTag }));
+            for (const frame of ['iframe', 'frame', 'object', 'embed', 'fencedframe']) {
+                getDocument.and.returnValue(fakeDocument({ hasFocus: () => true, active: element(frame) }));
 
-                expect((service as any).isPageEngaged()).withContext(activeTag).toBe(false);
+                expect((service as any).isPageEngaged()).withContext(frame).toBe(false);
             }
+        });
+
+        // activeElement is retargeted to the shadow host.
+        it('is not engaged while focus is inside a child frame in a shadow root', () => {
+            spyOn(service as any, 'getDocument').and.returnValue(
+                fakeDocument({ hasFocus: () => true, active: element('my-embed', element('iframe')) })
+            );
+
+            expect((service as any).isPageEngaged()).toBe(false);
+        });
+
+        it('is engaged when nothing holds focus', () => {
+            spyOn(service as any, 'getDocument').and.returnValue(fakeDocument({ hasFocus: () => true, active: null }));
+
+            expect((service as any).isPageEngaged()).toBe(true);
         });
 
         it('assumes engaged when hasFocus is unavailable', () => {

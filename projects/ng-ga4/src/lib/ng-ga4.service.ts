@@ -52,6 +52,8 @@ export class NgGa4Service implements OnDestroy {
     // Below this, a flush is noise — the time is not discarded, it rides out on
     // the next flush or hit. Blur never reaches this check (see registerEngagementListeners).
     private readonly MIN_ENGAGEMENT_FLUSH_MS = 1000;
+    // Elements that host a nested browsing context, which can hold focus.
+    private readonly CHILD_FRAME_ELEMENTS = new Set(['iframe', 'frame', 'object', 'embed', 'fencedframe']);
     // gtag.js's own default _ga lifetime.
     private readonly GA_COOKIE_MAX_AGE_SECONDS = 63072000;
     private readonly GA4_ENDPOINT = 'https://www.google-analytics.com/mp/collect';
@@ -635,14 +637,27 @@ export class NgGa4Service implements OnDestroy {
         // rather than silently reporting zero engagement everywhere — unlike
         // the missing-document case above, visibilitychange still fires here.
         const focused = typeof doc.hasFocus === 'function' ? doc.hasFocus() : true;
-        // Focus inside a child frame is not engagement here, on every path: moving
-        // focus into a frame fires blur on this window, which already stops the
-        // clock, but a stretch reopened while a frame holds focus (a tab switched
-        // back to, pageshow, setEnabled, init) would read hasFocus() as true — and
-        // leaving the app from inside the frame raises its blur there, not here, so
-        // that stretch would run until the page was next hidden.
-        const tag = doc.activeElement?.tagName;
-        return visible && focused && tag !== 'IFRAME' && tag !== 'FRAME';
+        return visible && focused && !this.focusInChildFrame(doc);
+    }
+
+    // Focus inside a child frame is not engagement here. Moving focus into a frame
+    // fires blur on this window, which already stops the clock, but a stretch
+    // reopened while a frame holds focus (a tab switched back to, pageshow,
+    // setEnabled, init) would read hasFocus() as true — and leaving the app from
+    // inside the frame raises its blur there, not here, so that stretch would run
+    // until the page was next hidden. A frame focused inside a shadow root shows
+    // up here as its host, hence the walk down; localName, unlike tagName, is
+    // lower-case in XHTML documents too.
+    private focusInChildFrame(doc: Document): boolean {
+        let el: Element | null = doc.activeElement;
+        while (el?.shadowRoot?.activeElement) {
+            el = el.shadowRoot.activeElement;
+        }
+        return !!el && this.CHILD_FRAME_ELEMENTS.has(el.localName);
+    }
+
+    private isPageHidden(): boolean {
+        return this.getDocument()?.visibilityState === 'hidden';
     }
 
     private getDocument(): Document | undefined {
@@ -820,9 +835,11 @@ export class NgGa4Service implements OnDestroy {
             // visibilitychange closes the interval and flushes on disengagement — a
             // hidden tab is a real end of the visit-so-far, worth a network hit.
             this.visibilityListener = () => {
-                const engaged = this.isPageEngaged();
-                this.setEngagementActive(engaged);
-                if (!engaged) {
+                this.setEngagementActive(this.isPageEngaged());
+                // Only a hide ends the visit-so-far. A tab shown again while its
+                // focus sits in a child frame is disengaged too, and must not send
+                // on the way back in.
+                if (this.isPageHidden()) {
                     this.flushEngagement();
                 }
             };
