@@ -69,7 +69,7 @@ To try an unreleased change in a consuming app without publishing, see [Local de
 
 Bug reports, feature requests, and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing expectations, and the release process, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.
 
-Angular support: the peer range is permissive (`^16 || ^17 || ^18 || ^19`), but CI tests against Angular 18 only. Reports of breakage on other majors are welcome.
+Angular support: see [Peer Dependencies](projects/ng-ga4/README.md#peer-dependencies) for the range and what CI tests.
 
 Released versions are recorded in [CHANGELOG.md](CHANGELOG.md).
 
