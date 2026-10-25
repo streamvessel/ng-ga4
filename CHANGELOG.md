@@ -167,7 +167,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The peer dependency ranges admit Angular 20. CI still tests Angular 18 only.
+- The peer dependency ranges admit Angular 20.
 - Debug mode sends the real hit over the configured transport instead of always
   forcing XHR, so debug traffic exercises the same delivery path as production.
 - Validation responses are reported with `console.warn` only when
