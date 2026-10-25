@@ -118,13 +118,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Leaving the app with focus inside a child frame (an embedded viewer, a payment
-  form) no longer counts the time away as engagement. `hasFocus()` stays true
-  while a frame has focus, and the blur on leaving fires in the frame, not on
-  the page, so the interval stayed open until the page was next hidden or
-  focused. While engaged the page now asks again every 5 seconds, which is the
-  most such a stretch can overcount; one interval per engaged stretch, outside
-  the Angular zone, and none while hidden, blurred or disabled.
+- Focus inside a child frame no longer counts as engagement on any path. A
+  stretch reopened while a frame held focus (switching back to the tab, for one)
+  ran on after the user left the app from that frame, until the page was next
+  hidden; clicking into a frame already stopped the clock.
 - `chrome.storage` writes are serialised instead of issued and abandoned.
   `saveSessionNumber`, `saveSessionState`, `repersistIdentity` and
   `clearPersistedIdentity` each fired a write with only a `.catch()` attached and

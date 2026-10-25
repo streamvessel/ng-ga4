@@ -1163,64 +1163,6 @@ describe('NgGa4Service', () => {
             expect(sentParams()['engagement_time_msec']).toBe(5000);
         });
 
-        // Focus inside a child frame keeps hasFocus() true, and leaving the app from
-        // there raises its blur in the frame, not on this window: without the
-        // periodic check the interval stayed open until the page was next hidden.
-        // pageEngaged flips with no event dispatched, which is exactly that case.
-        it('stops accruing within one focus check once focus is lost without a blur', async () => {
-            await service.init();
-
-            jasmine.clock().tick(2000);
-            pageEngaged = false;
-            jasmine.clock().tick(3000);   // the first check, 5s after init
-            jasmine.clock().tick(60000);  // away from the app, no event of any kind
-
-            service.trackEvent('after_leaving_from_a_frame');
-            expect(sentParams()['engagement_time_msec']).toBe(5000);
-        });
-
-        it('checks focus only while the page is engaged', async () => {
-            await service.init();
-            pageEngaged = false;
-            window.dispatchEvent(new Event('blur'));
-            const isPageEngaged = (service as any).isPageEngaged as jasmine.Spy;
-            const checksBefore = isPageEngaged.calls.count();
-
-            jasmine.clock().tick(30000);
-
-            expect(isPageEngaged.calls.count()).toBe(checksBefore);
-        });
-
-        // A focus event while already engaged must not start a second interval: two
-        // would each re-check, and stopping the stretch would clear only one.
-        it('runs one focus check per engaged stretch, however often focus fires', async () => {
-            await service.init();
-            window.dispatchEvent(new Event('focus'));
-            window.dispatchEvent(new Event('focus'));
-            const isPageEngaged = (service as any).isPageEngaged as jasmine.Spy;
-            const checksBefore = isPageEngaged.calls.count();
-
-            jasmine.clock().tick(15000);
-
-            expect(isPageEngaged.calls.count() - checksBefore).toBe(3);
-        });
-
-        it('stops the focus check when collection is disabled and on destroy', async () => {
-            await service.init();
-            const isPageEngaged = (service as any).isPageEngaged as jasmine.Spy;
-
-            service.setEnabled(false);
-            let checksBefore = isPageEngaged.calls.count();
-            jasmine.clock().tick(15000);
-            expect(isPageEngaged.calls.count()).withContext('disabled').toBe(checksBefore);
-
-            service.setEnabled(true);
-            service.ngOnDestroy();
-            checksBefore = isPageEngaged.calls.count();
-            jasmine.clock().tick(15000);
-            expect(isPageEngaged.calls.count()).withContext('destroyed').toBe(checksBefore);
-        });
-
         it('forces the beacon transport for the hide flush even under transport: xhr', async () => {
             await service.init();
             jasmine.clock().tick(3000);
@@ -1389,9 +1331,10 @@ describe('NgGa4Service', () => {
     // anywhere else, so it is exercised here directly — via callThrough(), which
     // restores the spy's original implementation — against a fake document.
     describe('isPageEngaged() (real implementation)', () => {
-        function fakeDocument(overrides: { visibilityState?: string; hasFocus?: () => boolean }): Document {
+        function fakeDocument(overrides: { visibilityState?: string; hasFocus?: () => boolean; activeTag?: string }): Document {
             return {
                 visibilityState: overrides.visibilityState ?? 'visible',
+                activeElement: { tagName: overrides.activeTag ?? 'BODY' },
                 ...(overrides.hasFocus ? { hasFocus: overrides.hasFocus } : {})
             } as unknown as Document;
         }
@@ -1422,6 +1365,18 @@ describe('NgGa4Service', () => {
             );
 
             expect((service as any).isPageEngaged()).toBe(false);
+        });
+
+        // hasFocus() stays true while a child frame has focus, and leaving the app
+        // from there fires no blur on the page: counted, that time would run on
+        // until the page was next hidden.
+        it('is not engaged while focus is inside a child frame', () => {
+            const getDocument = spyOn(service as any, 'getDocument');
+            for (const activeTag of ['IFRAME', 'FRAME']) {
+                getDocument.and.returnValue(fakeDocument({ visibilityState: 'visible', hasFocus: () => true, activeTag }));
+
+                expect((service as any).isPageEngaged()).withContext(activeTag).toBe(false);
+            }
         });
 
         it('assumes engaged when hasFocus is unavailable', () => {
