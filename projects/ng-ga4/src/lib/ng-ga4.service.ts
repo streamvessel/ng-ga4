@@ -37,6 +37,8 @@ export class NgGa4Service implements OnDestroy {
     private focusListener?: () => void;
     private blurListener?: () => void;
     private pageshowListener?: () => void;
+    // Set while the page is engaged; see setFocusCheck().
+    private focusCheck?: ReturnType<typeof setInterval>;
     private chromeStorageListener?: (changes: Record<string, { newValue?: unknown }>, areaName: string) => void;
     // Set by trackPageView(); read by flushEngagement() to attribute the
     // hide-time event's page_location (see flushEngagement for the null case).
@@ -52,6 +54,9 @@ export class NgGa4Service implements OnDestroy {
     // Below this, a flush is noise — the time is not discarded, it rides out on
     // the next flush or hit. Blur never reaches this check (see registerEngagementListeners).
     private readonly MIN_ENGAGEMENT_FLUSH_MS = 1000;
+    // How often an engaged page asks again whether it still has focus, which is
+    // also the most a missed blur can overcount (see setFocusCheck).
+    private readonly FOCUS_CHECK_MS = 5000;
     // gtag.js's own default _ga lifetime.
     private readonly GA_COOKIE_MAX_AGE_SECONDS = 63072000;
     private readonly GA4_ENDPOINT = 'https://www.google-analytics.com/mp/collect';
@@ -201,7 +206,7 @@ export class NgGa4Service implements OnDestroy {
             // Close the interval so the disabled window is not measured. Time
             // accrued before this point was collected under consent and stays in
             // the accumulator to ride out on a later hit.
-            this.engagement?.setEngaged(false);
+            this.setEngagementActive(false);
             return;
         }
         if (!this.isBrowser) {
@@ -378,6 +383,7 @@ export class NgGa4Service implements OnDestroy {
         if (this.pageshowListener && typeof window !== 'undefined') {
             window.removeEventListener('pageshow', this.pageshowListener);
         }
+        this.setFocusCheck(false);
         if (this.chromeStorageListener && chrome?.storage?.onChanged) {
             chrome.storage.onChanged.removeListener(this.chromeStorageListener);
         }
@@ -788,7 +794,26 @@ export class NgGa4Service implements OnDestroy {
     // first hit after re-enabling would report time the user spent while collection
     // was supposedly off.
     private setEngagementActive(engaged: boolean): void {
-        this.engagement?.setEngaged(engaged && this.enabled);
+        const active = engaged && this.enabled;
+        this.engagement?.setEngaged(active);
+        this.setFocusCheck(active);
+    }
+
+    // Focus inside a child frame (an embedded viewer, a payment form) keeps
+    // hasFocus() true, but when the user then leaves for another window or app the
+    // blur fires in the frame, not here: nothing would close the interval until the
+    // page is next hidden or focused, and a user who alt-tabs away for an hour from
+    // inside a frame would report the hour. So while engaged, the page asks again
+    // every FOCUS_CHECK_MS — one interval per engaged stretch, none otherwise, and
+    // outside the zone for the same reason as the listeners.
+    private setFocusCheck(on: boolean): void {
+        if (on && this.focusCheck === undefined && this.engagement && typeof window !== 'undefined') {
+            this.focusCheck = this.zone.runOutsideAngular(() =>
+                setInterval(() => this.setEngagementActive(this.isPageEngaged()), this.FOCUS_CHECK_MS));
+        } else if (!on && this.focusCheck !== undefined) {
+            clearInterval(this.focusCheck);
+            this.focusCheck = undefined;
+        }
     }
 
     private registerEngagementListeners(): void {
@@ -851,6 +876,8 @@ export class NgGa4Service implements OnDestroy {
             window.addEventListener('pageshow', this.pageshowListener);
             window.addEventListener('pagehide', this.pagehideListener);
         });
+        // The timer may start engaged, with no event to start the focus check.
+        this.setEngagementActive(this.isPageEngaged());
     }
 
     // Flushes the trailing chunk of foreground time a page_view-only visit
