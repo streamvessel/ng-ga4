@@ -1,7 +1,7 @@
 {
     "name": "@stream-vessel/ng-ga4",
     "description": "Angular library for Google Analytics 4 via Measurement Protocol, with support for Angular web apps and Chrome extensions.",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "license": "Apache-2.0",
     "author": "Stream Vessel",
     "homepage": "https://github.com/streamvessel/ng-ga4#readme",
