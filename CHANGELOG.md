@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-25
+
 ### Fixed
 
 - The README's link to LIMITATIONS.md works on npm. npm resolved it against the repo
@@ -215,6 +217,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `beacon` and `xhr` transports; debug mode against the GA4 validation endpoint.
 - NgModule (`NgGa4Module.forRoot`) and standalone (`provideNgGa4`) APIs.
 
-[Unreleased]: https://github.com/streamvessel/ng-ga4/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/streamvessel/ng-ga4/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/streamvessel/ng-ga4/releases/tag/v0.2.1
 [0.2.0]: https://github.com/streamvessel/ng-ga4/releases/tag/v0.2.0
 [0.1.0]: https://github.com/streamvessel/ng-ga4/releases/tag/v0.1.0
