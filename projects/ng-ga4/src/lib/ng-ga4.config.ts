@@ -31,12 +31,13 @@ export interface NgGa4Config {
     debug?: boolean;
     appVersion?: string;
     /**
-     * Network transport for production (non-debug) hits.
+     * Network transport for hits, debug ones included.
      * - 'beacon' (default): navigator.sendBeacon, falling back to fetch(keepalive) then XHR.
      *   Survives page/tab unload, so events fired right before the user leaves are not lost.
      * - 'xhr': Angular HttpClient (XHR). Goes through the app's HTTP interceptors (retry),
      *   but in-flight requests are aborted when the document unloads.
-     * Debug mode always uses XHR so the validation response can be read.
+     * The hide-time engagement event always takes the 'beacon' chain. In debug mode the
+     * validation request is a separate HttpClient call.
      */
     transport?: 'beacon' | 'xhr';
     /**
@@ -102,7 +103,7 @@ export interface NgGa4Config {
      * not send this event; the accrued time rides out on the next hit or the
      * eventual hide. Always sent over the unload-safe transport chain
      * (`sendBeacon` → `fetch(keepalive)` → XHR), regardless of the configured
-     * `transport`. See "Engagement measurement" in the README for the full
+     * `transport`. See "Engagement time" in the README for the full
      * reasoning.
      */
     sendEngagementOnHide?: boolean;
@@ -113,7 +114,7 @@ export interface NgGa4Config {
      * it appears as an ordinary custom event in Events reports. Validated at
      * startup against the Measurement Protocol's naming rules; an invalid or
      * reserved value logs a console warning and falls back to the default.
-     * See "Engagement measurement" in the README for the full reasoning.
+     * See "Engagement time" in the README for the full reasoning.
      */
     engagementEventName?: string;
 

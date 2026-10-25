@@ -4,11 +4,11 @@
 [![CI](https://github.com/streamvessel/ng-ga4/actions/workflows/ci.yml/badge.svg)](https://github.com/streamvessel/ng-ga4/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-Google Analytics 4 for Angular, over the [Measurement Protocol](https://developers.google.com/analytics/devguides/collection/protocol/ga4) instead of `gtag.js`. Because it never loads a remote script, it works where the usual GA4 snippet cannot: under a strict Content Security Policy, and inside Chrome extensions (Manifest V3), where remotely-hosted code is forbidden outright. It handles the parts you would otherwise write yourself — a persistent client ID, session tracking with a 30-minute timeout, and automatic page views from the Angular Router — and stores its state in `chrome.storage` when running as an extension, or in `localStorage` on the web, preferring an existing `_ga` cookie for the client ID where one is present without copying it into storage.
+Google Analytics 4 for Angular over the [Measurement Protocol](https://developers.google.com/analytics/devguides/collection/protocol/ga4) instead of `gtag.js`. It loads no remote script, so it works under a strict Content Security Policy and in Chrome extensions (Manifest V3). It takes care of the client ID, 30-minute sessions, page views from the Angular Router, real engagement time and consent, and stores its state in `chrome.storage` in an extension or `localStorage` on the web.
 
-Extracted from the [Stream Vessel](https://streamvessel.com) frontend, where it runs in production.
+It was extracted from the [Stream Vessel](https://streamvessel.com) frontend, where it runs in production.
 
-The same trade-off has a cost: the Measurement Protocol is designed to *augment* tagging rather than replace it, so a property fed only by this library cannot report traffic attribution, New users, or engaged sessions, and shows no demographics. That is measured, not assumed — **[LIMITATIONS.md](projects/ng-ga4/LIMITATIONS.md)** has the evidence and the full list. If your app can load a script from `googletagmanager.com`, use `gtag.js`; this library is for when it cannot.
+The Measurement Protocol only *augments* GA4 tagging. A property fed only by this library has no traffic attribution, New users, engaged sessions or demographics; [LIMITATIONS.md](projects/ng-ga4/LIMITATIONS.md) has the measurements. If your app can load `gtag.js`, use it; this library is for when it can't.
 
 ## Install
 
@@ -32,20 +32,20 @@ import { NgGa4Module } from '@stream-vessel/ng-ga4';
 export class AppModule {}
 ```
 
-**[→ Full documentation](projects/ng-ga4/README.md)** — standalone (`provideNgGa4`) setup, every config option, event and page-view tracking, Chrome extension notes including service-worker teardown, debug mode, and the API-secret security model.
+**[Full documentation](projects/ng-ga4/README.md)**: standalone setup, every option, engagement time, `gtag.js` interop, consent, Chrome extensions and debug mode.
 
 ## Repository layout
 
-This is an Angular CLI workspace whose only project is the library.
+An Angular CLI workspace whose only project is the library.
 
 ```
-projects/ng-ga4/          # the library — the only publishable artifact
-├── src/lib/              #   service, module, providers, config, timezone→country map
-├── src/public-api.ts     #   public API surface
+projects/ng-ga4/          # the library, the only published package
+├── src/lib/              #   service, module, providers, config
+├── src/public-api.ts     #   public API
 ├── README.md             #   the docs published to npm
-├── LIMITATIONS.md        #   what MP cannot do, with the measurements
+├── LIMITATIONS.md        #   what the Measurement Protocol can't do, with measurements
 └── ng-package.json       #   ng-packagr config (builds to dist/ng-ga4)
-.github/workflows/        # ci.yml (lint + test + build), publish.yml (manual release)
+.github/workflows/        # ci.yml (lint, test, build), publish.yml (manual release)
 ```
 
 ## Development
@@ -56,22 +56,18 @@ Requires Node (see [`.nvmrc`](.nvmrc)) and pnpm via Corepack:
 corepack enable
 pnpm install
 
-pnpm run build    # ng-packagr build into dist/ng-ga4
-pnpm test         # Karma/Jasmine in headless Chrome
+pnpm run build    # builds into dist/ng-ga4
+pnpm test         # Karma/Jasmine, headless Chrome
 pnpm run lint
 ```
 
-CI runs exactly those three, and all must pass before a pull request merges.
-
-To try an unreleased change in a consuming app without publishing, see [Local development](projects/ng-ga4/README.md#local-development).
+CI runs those three, and all must pass before a pull request merges. To try an unreleased build in another app, see [Local development](projects/ng-ga4/README.md#local-development).
 
 ## Contributing
 
-Bug reports, feature requests, and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing expectations, and the release process, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.
+Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests and releases, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
-Angular support: see [Peer Dependencies](projects/ng-ga4/README.md#peer-dependencies) for the range and what CI tests.
-
-Released versions are recorded in [CHANGELOG.md](CHANGELOG.md).
+Supported Angular versions are under [Peer dependencies](projects/ng-ga4/README.md#peer-dependencies). Releases are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

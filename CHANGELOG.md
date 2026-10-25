@@ -157,7 +157,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Measurement-Protocol-only property a custom event carrying
   `engagement_time_msec` raised average engagement time while engaged sessions
   stayed at zero — measured three times over 54 hours, past GA4's full
-  processing window, with identical results. See "Engagement measurement" in
+  processing window, with identical results. See "Engagement time" in
   the README and
   [#43](https://github.com/streamvessel/ng-ga4/issues/43).
   ([#14](https://github.com/streamvessel/ng-ga4/issues/14))
@@ -169,11 +169,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to be cached in memory at `init()`, so once one tab rolled to a new
   session, every other open tab kept sending the dead one indefinitely. Every
   hit now re-reads persisted session state first and adopts anything newer
-  (see "Cross-tab session sync" in the README).
+  (see "Sessions across tabs" in the README).
   ([#16](https://github.com/streamvessel/ng-ga4/issues/16))
 
 ### Changed
 
+- The README is rewritten shorter and plainer, and now lists the `appVersion`
+  and `transport` options.
 - The peer dependency ranges admit Angular 20.
 - Debug mode sends the real hit over the configured transport instead of always
   forcing XHR, so debug traffic exercises the same delivery path as production.
