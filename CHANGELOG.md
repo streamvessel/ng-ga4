@@ -118,6 +118,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Focus inside a child frame (`iframe`, `frame`, `object`, `embed`,
+  `fencedframe`, including one inside a shadow root) no longer counts as
+  engagement. A stretch reopened while a frame held focus (switching back to the
+  tab, for one) ran on after the user left the app from that frame, until the
+  page was next hidden; clicking into a frame already stopped the clock.
+- The engagement event is sent only when the page is hidden, no longer on a
+  `visibilitychange` that leaves it visible but disengaged.
 - `chrome.storage` writes are serialised instead of issued and abandoned.
   `saveSessionNumber`, `saveSessionState`, `repersistIdentity` and
   `clearPersistedIdentity` each fired a write with only a `.catch()` attached and

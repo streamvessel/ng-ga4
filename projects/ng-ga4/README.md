@@ -138,6 +138,7 @@ definition of engagement: switching tabs or windows, or minimising the
 browser, stops the clock even though the tab may stay visible; refocusing
 resumes it. An unfocused iframe accrues zero engagement, since
 `document.hasFocus()` is `false` there even while the embed is fully visible.
+Focus inside a child frame of the page does not count either.
 
 Losing focus alone stops the clock but sends nothing; the accrued time stays
 in the accumulator and rides out on the next hit or the eventual hide.
