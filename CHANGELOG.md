@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-25
+
 ### Added
 
 - `seedNgGa4ClientId()` and `flushStorage()`, for Manifest V3 service-worker
@@ -174,6 +176,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking for subclasses:** `NgGa4Service`'s constructor now takes
+  `(HttpClient, Router, NgZone, NgGa4Config, PLATFORM_ID)`. A class that extends
+  the service must pass the two new arguments to `super()`.
 - The README is rewritten shorter and plainer, and now lists the `appVersion`
   and `transport` options.
 - The peer dependency ranges admit Angular 20.
@@ -202,4 +207,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `beacon` and `xhr` transports; debug mode against the GA4 validation endpoint.
 - NgModule (`NgGa4Module.forRoot`) and standalone (`provideNgGa4`) APIs.
 
+[Unreleased]: https://github.com/streamvessel/ng-ga4/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/streamvessel/ng-ga4/releases/tag/v0.2.0
 [0.1.0]: https://github.com/streamvessel/ng-ga4/releases/tag/v0.1.0
