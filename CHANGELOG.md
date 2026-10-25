@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The README's link to LIMITATIONS.md works on npm. npm resolved it against the repo
+  root, where the file isn't; the package now declares `repository.directory`.
+
 ## [0.2.0] - 2026-10-25
 
 ### Added

@@ -32,7 +32,7 @@ Google describes the Measurement Protocol as a way to *augment* tagging, not rep
 | Demographics, interests, Ads remarketing | No data |
 | City and region | No data (country comes from the time zone) |
 
-Events, page views, active users and average engagement time work normally. These results were measured, not assumed: see [LIMITATIONS.md](LIMITATIONS.md).
+Events, page views, active users and average engagement time work normally. These results were measured, not assumed: see [LIMITATIONS.md](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/LIMITATIONS.md).
 
 **If your app can load a script from `googletagmanager.com`, use `gtag.js`.** This library is for when it can't.
 
