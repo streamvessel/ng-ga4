@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/@stream-vessel/ng-ga4)](https://www.npmjs.com/package/@stream-vessel/ng-ga4)
 [![CI](https://github.com/streamvessel/ng-ga4/actions/workflows/ci.yml/badge.svg)](https://github.com/streamvessel/ng-ga4/actions/workflows/ci.yml)
-[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/streamvessel/ng-ga4/blob/master/LICENSE)
 
 Google Analytics 4 for Angular over the [Measurement Protocol](https://developers.google.com/analytics/devguides/collection/protocol/ga4). It loads no remote script, so it works under a strict CSP and in Chrome extensions (Manifest V3), following Google's [Chrome Extensions GA4 guide](https://developer.chrome.com/docs/extensions/how-to/integrate/google-analytics-4).
 
@@ -91,8 +91,8 @@ bootstrapApplication(AppComponent, {
 | `appVersion` | `string` | — | Sent as `app_version` on every event. |
 | `transport` | `'beacon' \| 'xhr'` | `'beacon'` | `'beacon'` tries `sendBeacon`, then `fetch` with `keepalive`, then XHR, so hits survive the page closing. `'xhr'` sends through `HttpClient` and your interceptors, but a request still in flight when the page closes is lost. |
 | `debug` | `boolean` | `false` | See [Debug mode](#debug-mode). |
-| `clientIdSource` | `'auto' \| 'cookie' \| 'storage'` | `'auto'` | Where the web client ID comes from. See [Client ID and gtag.js](#client-id-and-gtagjs). Ignored in extensions. |
-| `writeGaCookie` | `boolean \| NgGa4CookieOptions` | `false` | Write a `_ga` cookie when there is none (web only). See [Client ID and gtag.js](#client-id-and-gtagjs). |
+| `clientIdSource` | `'auto' \| 'cookie' \| 'storage'` | `'auto'` | Where the web client ID comes from. See [Client ID and gtag.js](#client-id-and-gtagjs). An unknown value logs a warning and falls back to `'auto'`, which reads `_ga`. Ignored in extensions. |
+| `writeGaCookie` | `boolean \| NgGa4CookieOptions` | `false` | Write a `_ga` cookie when there is no valid one (web only). See [Client ID and gtag.js](#client-id-and-gtagjs). |
 | `sendEngagementOnHide` | `boolean` | `true` | Send the engagement time left over when the page is hidden or closed. See [Engagement time](#engagement-time). |
 | `engagementEventName` | `string` | `'page_engagement'` | Name of that event. An invalid or reserved name (such as `user_engagement`) logs a warning and falls back to the default. |
 | `consent` | `NgGa4Consent` | storage granted | Initial consent state. See [Consent](#consent). |
@@ -128,7 +128,7 @@ export class MyComponent {
 | `flushStorage()` | Resolves once pending `chrome.storage` writes have landed. Resolves at once on the web. |
 | `init()` | Starts the library. Runs for you at app start. |
 
-Calls made while collection is off are dropped. Calls made during start-up are queued and sent once it finishes.
+Calls made while collection is off are dropped. Calls made after `init()` has started but before it finishes are queued and sent once it does; calls made before it starts (for example from an earlier `APP_INITIALIZER`) are dropped.
 
 Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](#chrome-extensions)), `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState` and `NG_GA4_CONFIG`.
 
@@ -138,6 +138,7 @@ Every hit carries `engagement_time_msec`: the time since the previous hit during
 
 - Switching tabs, windows or apps, or minimising the browser, stops the clock. Coming back starts it again.
 - Focus inside a child frame (an `iframe`, an embedded viewer) doesn't count.
+- If your app itself runs inside another page's iframe, it only counts while that iframe has focus, so a reader who never clicks into it reports no engagement.
 - Losing focus sends nothing; the time rides on the next hit.
 - When the page is hidden or closed, the time left over goes out as one `page_engagement` event (see `sendEngagementOnHide`), always over the unload-safe transport. That event waits until at least 1 second has built up; anything shorter rides on the next hit. Without this event, a visit with a single page view would report almost no engagement.
 
@@ -148,16 +149,16 @@ This feeds GA4's **average engagement time**. It does **not** make sessions coun
 On the web the client ID comes from `clientIdSource`:
 
 - **`'auto'`** (default): use the `_ga` cookie when it is present and well formed, else this library's own ID in `localStorage`. A site running both `gtag.js` and this library counts each person once, across subdomains too. The adopted ID is never copied into storage, so deleting `_ga` returns to the library's own ID.
-- **`'cookie'`**: `_ga` is the only source. One is created if missing (this implies `writeGaCookie`). An ID already in `localStorage` is ignored, so existing users are counted as new once.
+- **`'cookie'`**: `_ga` is the only source. One is created if missing (this implies `writeGaCookie`), reusing an ID already stored in `gtag.js`'s format. An older UUID-style ID is replaced, so those users are counted as new once.
 - **`'storage'`**: `localStorage` only. `_ga` is never read or written.
 
 Reading an existing cookie is itself a consent-relevant act. Use `'storage'` if this library must never read `_ga`.
 
-A `_ga` value is accepted only in `gtag.js`'s own format, with an ID of at most 64 characters (letters, digits, `.`, `_`, `-`). Anything else is ignored, so a cookie planted from a sibling subdomain can't pin every visitor to one ID.
+A `_ga` value is accepted only in `gtag.js`'s own format, with an ID of at most 64 characters (letters, digits, `.`, `_`, `-`). Anything else is ignored. This keeps out malformed and oversized values; it can't tell a well-formed cookie planted from another subdomain from a real one.
 
-**`writeGaCookie`** writes `_ga` when there is none, using the library's own ID, on the registrable domain, with `SameSite=Lax`, `Secure` on HTTPS and `gtag.js`'s two-year expiry. An ID adopted from a cookie is never written back. Pass `NgGa4CookieOptions` to change the defaults:
+**`writeGaCookie`** writes `_ga` when there is none or it fails the check above, using the library's own ID, on the registrable domain, with `SameSite=Lax`, `Secure` on HTTPS and `gtag.js`'s two-year expiry. An ID adopted from a cookie is never written back. Pass `NgGa4CookieOptions` to change the defaults:
 
-- `domain`: e.g. `'.example.com'`. Without it, the library finds the registrable domain by setting a short-lived probe cookie (`_ng_ga4_probe_<random>`) at each candidate and keeping the first the browser accepts. Set `domain` to avoid the probe, for instance if a consent platform needs a fixed list of cookie names.
+- `domain`: e.g. `'.example.com'`. Without it, the library finds the registrable domain by setting a short-lived probe cookie (`_ng_ga4_probe_<random>`) at each candidate and keeping the first the browser accepts. If the browser refuses every candidate, no `_ga` is written at all; a single-label host such as `localhost` gets a host-only cookie. Set `domain` to skip the probe, for instance if a consent platform needs a fixed list of cookie names.
 - `flags`: replaces the default attributes, e.g. `'SameSite=None; Secure'` for a cross-site iframe.
 - `maxAgeSeconds`: lifetime, two years by default.
 
@@ -170,7 +171,11 @@ With no `consent` option and no `setConsent()` call, nothing changes: no `consen
 For a consent banner, start disabled and enable when the user accepts:
 
 ```typescript
-provideNgGa4({ ...config, enabled: false }); // no client ID, nothing stored
+// In your providers: no client ID is created and nothing is stored yet.
+provideNgGa4({ measurementId: 'G-XXXXXXXXX', apiSecret: 'your-api-secret', enabled: false, isExtension: false })
+
+// In your consent banner component:
+constructor(private ga4: NgGa4Service) {}
 
 onBannerAccepted(): void {
     this.ga4.setConsent({ analyticsStorage: 'granted', adUserData: 'granted', adPersonalization: 'denied' });
@@ -190,7 +195,7 @@ Denying `analyticsStorage` stops every write to `localStorage`, `chrome.storage`
 
 Things to know:
 
-- **This library doesn't store consent.** Call `setConsent()` on every start-up from your own record of the user's choice, in every tab and extension context.
+- **This library doesn't store consent, and each tab or extension context has its own.** Call `setConsent()` on every start-up from your own record of the user's choice, in every context. A tab that is still granted keeps writing session data to the shared store after another tab denies.
 - **`setEnabled(false)` stops sending but deletes nothing.** To remove stored identifiers, deny `analyticsStorage`.
 - **Granting again restores the client ID and session at once, but `_ga` only on the next page load.**
 - An invalid consent value counts as `denied`, with a warning.
@@ -250,7 +255,7 @@ Every hit first reads the stored session and adopts a newer one, so tabs agree o
 `debug: true` tags every event with `debug_mode`, so it shows in [DebugView](https://support.google.com/analytics/answer/7201382). **Events are still recorded** and go out over your configured transport. Each payload is also posted to the [validation endpoint](https://developers.google.com/analytics/devguides/collection/protocol/ga4/validating-events), and any problems it reports are logged with `console.warn`.
 
 ```typescript
-provideNgGa4({ ...config, debug: !environment.production });
+provideNgGa4({ ...config, debug: !environment.production })
 ```
 
 ## Other notes
@@ -279,4 +284,4 @@ To try an unreleased build in another app, run `pnpm run build` here and `pnpm a
 
 ## License
 
-Apache-2.0. See [LICENSE](../../LICENSE).
+Apache-2.0. See [LICENSE](https://github.com/streamvessel/ng-ga4/blob/master/LICENSE).
