@@ -1269,13 +1269,25 @@ describe('NgGa4Service', () => {
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
-        // lastPagePath used to default to '/', so with siteUrl configured and no
-        // router-driven page_view — an extension popup, a non-routed app,
-        // initialNavigation: 'disabled' — every hide-time event was attributed to
-        // siteUrl + '/', a page nobody actually visited. It now starts null and
-        // falls back to window.location.href instead, the same as the no-siteUrl path.
-        it('falls back to window.location.href when no page_view has fired yet, even with siteUrl configured', async () => {
+        // With siteUrl configured, page_location comes only from a path the app passed
+        // to trackPageView, where it strips what must not reach Google. Before the first
+        // page view there is none: window.location.href would bypass that (a query with
+        // customer data), and siteUrl + '/' names a page nobody visited, so the event
+        // is sent without page_location.
+        it('sends no page_location when no page_view has fired yet and siteUrl is configured', async () => {
             reconfigureTestBed({ siteUrl: 'https://example.com' });
+            observeFlushViaXhr();
+            await service.init();
+
+            jasmine.clock().tick(5000);
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect('page_location' in req.request.body.events[0].params).toBe(false);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('falls back to window.location.href when no siteUrl is configured, as page views do', async () => {
             observeFlushViaXhr();
             await service.init();
 

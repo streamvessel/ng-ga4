@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- With `siteUrl` set, the hide-time engagement event no longer sends
+  `window.location.href` as `page_location` before the first page view. That
+  address skipped whatever the app strips from the paths it reports (a query with
+  customer data, for one); the event now goes without `page_location` until a page
+  view has been reported.
+
 ## [0.2.1] - 2026-10-25
 
 ### Fixed

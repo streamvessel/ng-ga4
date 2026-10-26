@@ -656,6 +656,21 @@ export class NgGa4Service implements OnDestroy {
         return !!el && this.CHILD_FRAME_ELEMENTS.has(el.localName);
     }
 
+    // With siteUrl set, page_location is only ever built from a path the app handed
+    // to trackPageView, which is where an app strips what must not reach Google (a
+    // query holding customer data, say). Before the first page view there is no such
+    // path, so the event goes without page_location rather than with
+    // window.location.href, which would bypass that, or with siteUrl + '/', a page
+    // nobody visited. Without siteUrl, page views report window.location.href too.
+    private engagementPageLocation(): { page_location?: string } {
+        if (!this.config.siteUrl) {
+            return { page_location: window.location.href };
+        }
+        return this.lastPagePath === null
+            ? {}
+            : { page_location: this.joinSiteUrl(this.config.siteUrl, this.lastPagePath) };
+    }
+
     private isPageHidden(): boolean {
         return this.getDocument()?.visibilityState === 'hidden';
     }
@@ -911,12 +926,7 @@ export class NgGa4Service implements OnDestroy {
                 engagement_time_msec: engagementTime,
                 session_id: this.sessionId,
                 session_number: this.sessionNumber,
-                // Falls back to window.location.href when no page_view has fired yet
-                // (or ever will — an extension popup, a non-routed app), so this event
-                // is never attributed to siteUrl + '/', a page nobody visited.
-                page_location: this.config.siteUrl && this.lastPagePath !== null
-                    ? this.joinSiteUrl(this.config.siteUrl, this.lastPagePath)
-                    : window.location.href,
+                ...this.engagementPageLocation(),
                 ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
             }
         }], true);
