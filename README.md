@@ -6,7 +6,7 @@
 
 Google Analytics 4 for Angular over the [Measurement Protocol](https://developers.google.com/analytics/devguides/collection/protocol/ga4) instead of `gtag.js`. It loads no remote script, so it works under a strict Content Security Policy and in Chrome extensions (Manifest V3). It takes care of the client ID, 30-minute sessions, page views from the Angular Router, real engagement time and consent, and stores its state in `chrome.storage` in an extension or `localStorage` on the web.
 
-It was extracted from the [Stream Vessel](https://streamvessel.com) frontend, where it runs in production.
+It was extracted from the [Stream Vessel](https://streamvessel.com) frontend and runs in production in its Chrome extension.
 
 Without Google's script, GA4 learns less about each visit: it can't tell where visitors came from, and it shows no new users, engaged sessions, age or interests. [What you give up](projects/ng-ga4/README.md#what-you-give-up) has the full list. If your app can load `gtag.js`, use it; this library is for when it can't.
 
