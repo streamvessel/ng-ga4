@@ -3144,7 +3144,7 @@ describe('NgGa4Service', () => {
             expect(await result.delivered).toBe('sent');
         });
 
-        it('reports failed on a network error, without rejecting', async () => {
+        it('reports stored on a network error, without rejecting', async () => {
             await service.init();
             spyOn(console, 'error');
 
@@ -3152,7 +3152,7 @@ describe('NgGa4Service', () => {
             httpMock.expectOne((r) => r.url.includes('mp/collect'))
                 .error(new ProgressEvent('error'), { status: 0, statusText: 'Unknown Error' });
 
-            expect(await result.delivered).toBe('failed');
+            expect(await result.delivered).toBe('stored');
         });
 
         it('reports disabled, with delivery dropped', async () => {
@@ -3242,7 +3242,7 @@ describe('NgGa4Service', () => {
                 expect(settled).toBeTrue();
             });
 
-            it('reports failed when the fetch(keepalive) fallback rejects', async () => {
+            it('reports stored when the fetch(keepalive) fallback rejects', async () => {
                 spyOn<any>(service, 'getNavigator').and.returnValue({});
                 spyOn<any>(service, 'getFetch').and.returnValue(() => Promise.reject(new TypeError('Failed to fetch')));
                 spyOn(console, 'error');
@@ -3251,7 +3251,7 @@ describe('NgGa4Service', () => {
                 const result = service.trackEvent('a');
                 jasmine.clock().tick(BATCH_DELAY_MS);
 
-                expect(await result.delivered).toBe('failed');
+                expect(await result.delivered).toBe('stored');
             });
 
             // Not GA4 itself, which answers 2xx to anything: a proxy or blocker.
@@ -3396,6 +3396,234 @@ describe('NgGa4Service', () => {
             reconfigureTestBed({}, 'server');
 
             await expectAsync(service.flush()).toBeResolved();
+        });
+    });
+
+    // --- offline outbox (#25) ---
+
+    describe('offline outbox', () => {
+        const ok = { status: 204, statusText: 'No Content' };
+        const HOUR_MS = 60 * 60 * 1000;
+        const isCollect = (r: any) => r.url.includes('mp/collect') && !r.url.includes('debug/');
+
+        function failOffline(req: TestRequest): void {
+            req.error(new ProgressEvent('error'), { status: 0, statusText: 'Unknown Error' });
+        }
+
+        function storedOutbox(): any[] {
+            return JSON.parse(mockLocalStorage['ga_outbox'] ?? '[]');
+        }
+
+        function storedBody(names: string[], ageMs: number, clientId = 'earlier-cid'): any {
+            const ts = (MOCK_TIMESTAMP - ageMs) * 1000;
+            return { client_id: clientId, timestamp_micros: ts, events: names.map(name => ({ name, timestamp_micros: ts, params: { p: 1 } })) };
+        }
+
+        beforeEach(() => {
+            spyOn(console, 'error');
+        });
+
+        it('stores a request that could not reach GA4, whole', async () => {
+            await service.init();
+            jasmine.clock().tick(1000);
+            const result = service.trackEvent('offline_event', { a: 1 });
+
+            const req = httpMock.expectOne(isCollect);
+            failOffline(req);
+
+            expect(await result.delivered).toBe('stored');
+            await service.flushStorage();
+            const [stored] = storedOutbox();
+            expect(stored).toEqual(JSON.parse(JSON.stringify(req.request.body)));
+            expect(stored.events[0].timestamp_micros).toBe((MOCK_TIMESTAMP + 1000) * 1000);
+        });
+
+        // GA4 answers 2xx to whatever it receives; a non-2xx is not worth replaying.
+        it('does not store a request that got an HTTP error', async () => {
+            await service.init();
+            const result = service.trackEvent('x');
+
+            httpMock.expectOne(isCollect).flush('', { status: 500, statusText: 'Server Error' });
+
+            expect(await result.delivered).toBe('failed');
+            await service.flushStorage();
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+        });
+
+        it('does not store anything with analyticsStorage denied', async () => {
+            reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+            await service.init();
+            const result = service.trackEvent('x');
+
+            failOffline(httpMock.expectOne(isCollect));
+
+            expect(await result.delivered).toBe('failed');
+            await service.flushStorage();
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+        });
+
+        it('replays stored requests on init(), with their original identity and time', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['earlier'], 5 * HOUR_MS)]);
+
+            await service.init();
+            const req = httpMock.expectOne(isCollect);
+
+            expect(req.request.body.client_id).toBe('earlier-cid');
+            expect(req.request.body.events[0].name).toBe('earlier');
+            expect(req.request.body.events[0].timestamp_micros).toBe((MOCK_TIMESTAMP - 5 * HOUR_MS) * 1000);
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+            req.flush('', ok);
+        });
+
+        it('drops stored events older than 72 hours instead of replaying them', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([
+                storedBody(['too_old'], 73 * HOUR_MS),
+                storedBody(['recent'], 71 * HOUR_MS)
+            ]);
+
+            await service.init();
+
+            const req = httpMock.expectOne(isCollect);
+            expect(req.request.body.events.map((e: any) => e.name)).toEqual(['recent']);
+            req.flush('', ok);
+        });
+
+        it('replays when the browser comes back online', async () => {
+            await service.init();
+            service.trackEvent('while_offline');
+            failOffline(httpMock.expectOne(isCollect));
+            await service.flushStorage();
+            expect(storedOutbox().length).toBe(1);
+
+            window.dispatchEvent(new Event('online'));
+            await service.flushStorage();
+
+            const replay = httpMock.expectOne(isCollect);
+            expect(replay.request.body.events[0].name).toBe('while_offline');
+            replay.flush('', ok);
+            await service.flush();
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+        });
+
+        it('puts a replay that fails again back in the outbox', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['earlier'], HOUR_MS)]);
+
+            await service.init();
+            failOffline(httpMock.expectOne(isCollect));
+            await service.flush();
+
+            expect(storedOutbox().map(b => b.events[0].name)).toEqual(['earlier']);
+            // And it is not retried in a loop: only init() and 'online' drain.
+            httpMock.expectNone(isCollect);
+        });
+
+        it('keeps no more than the cap, evicting the oldest', async () => {
+            const many = Array.from({ length: 499 }, (_, i) => storedBody([`old${i}`], HOUR_MS));
+            mockLocalStorage['ga_outbox'] = JSON.stringify(many);
+            await service.init();
+            const replays = httpMock.match(isCollect);
+            replays.forEach(failOffline);
+            await service.flush();
+
+            service.trackEvent('newest_1');
+            service.trackEvent('newest_2');
+            httpMock.match(isCollect).forEach(failOffline);
+            await service.flush();
+
+            const names = storedOutbox().flatMap(b => b.events.map((e: any) => e.name));
+            expect(names.length).toBe(500);
+            expect(names[0]).toBe('old1');
+            expect(names.slice(-2)).toEqual(['newest_1', 'newest_2']);
+        });
+
+        it('is deleted when analyticsStorage is withdrawn — it holds the client ID', async () => {
+            await service.init();
+            service.trackEvent('x');
+            failOffline(httpMock.expectOne(isCollect));
+            await service.flushStorage();
+            expect(mockLocalStorage['ga_outbox']).toBeDefined();
+
+            service.setConsent({ analyticsStorage: 'denied' });
+            await service.flushStorage();
+
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+        });
+
+        it('costs no storage write on init() when empty', async () => {
+            await service.init();
+
+            expect(localStorage.setItem).not.toHaveBeenCalledWith('ga_outbox', jasmine.anything());
+            expect(localStorage.removeItem).not.toHaveBeenCalledWith('ga_outbox');
+        });
+
+        it('ignores a corrupt outbox rather than failing init()', async () => {
+            mockLocalStorage['ga_outbox'] = '{not json';
+
+            await expectAsync(service.init()).toBeResolved();
+            httpMock.expectNone(isCollect);
+        });
+
+        it('lets flush() wait for the replay', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['earlier'], HOUR_MS)]);
+            await service.init();
+            let flushed = false;
+            service.flush().then(() => { flushed = true; });
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+            expect(flushed).toBeFalse();
+
+            httpMock.expectOne(isCollect).flush('', ok);
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+            expect(flushed).toBeTrue();
+        });
+
+        it('does not replay on online once collection is disabled', async () => {
+            await service.init();
+            service.trackEvent('x');
+            failOffline(httpMock.expectOne(isCollect));
+            await service.flushStorage();
+
+            service.setEnabled(false);
+            window.dispatchEvent(new Event('online'));
+            await service.flush();
+
+            httpMock.expectNone(isCollect);
+            expect(storedOutbox().length).toBe(1);
+        });
+
+        it('stops listening for online after destroy', async () => {
+            await service.init();
+            const drain = spyOn<any>(service, 'drainOutbox').and.returnValue(Promise.resolve());
+
+            service.ngOnDestroy();
+            window.dispatchEvent(new Event('online'));
+
+            expect(drain).not.toHaveBeenCalled();
+        });
+
+        describe('in an extension', () => {
+            it('stores in chrome.storage.local and replays from it on init()', async () => {
+                reconfigureTestBed({ isExtension: true });
+                const chromeLocal: Record<string, any> = { ga_client_id: 'ext-cid' };
+                setupChromeMock(chromeLocal, {});
+                await service.init();
+
+                service.trackEvent('offline_in_worker');
+                failOffline(httpMock.expectOne(isCollect));
+                await service.flush();
+                expect(chromeLocal['ga_outbox'][0].events[0].name).toBe('offline_in_worker');
+                expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+
+                // A later worker lifetime.
+                reconfigureTestBed({ isExtension: true });
+                setupChromeMock(chromeLocal, {});
+                await service.init();
+                await service.flushStorage();
+
+                const replay = httpMock.expectOne(isCollect);
+                expect(replay.request.body.events[0].name).toBe('offline_in_worker');
+                expect(chromeLocal['ga_outbox']).toBeUndefined();
+                replay.flush('', ok);
+            });
         });
     });
 
@@ -4007,7 +4235,7 @@ describe('NgGa4Service', () => {
 
             expect(mock.calls).toEqual([
                 'local.set:ga_session_number',
-                'local.remove:ga_client_id,ga_session_number',
+                'local.remove:ga_client_id,ga_session_number,ga_outbox',
                 'session.remove:ga_session_id,ga_last_activity'
             ]);
             expect(mock.localStore['ga_session_number']).toBeUndefined();

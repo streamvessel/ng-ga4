@@ -12,6 +12,13 @@ import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCo
 import { clampToNow, isWithinBackdateWindow, toTimestampMicros } from './timestamp';
 import { EventBatcher } from './event-batcher';
 import { NgGa4Delivery, NgGa4TrackResult, NgGa4TrackStatus } from './track-result';
+import { OUTBOX_STORAGE_KEY, parseOutbox, pruneOutbox } from './outbox';
+
+// A transport outcome before dispatch() decides what to do with it:
+// 'unreachable' is a genuine network failure, the only one worth retrying —
+// GA4 answers 2xx to whatever it receives, and its docs say not to retry a
+// non-2xx, so there is no server-side signal to retry on (#25).
+type SendOutcome = Exclude<NgGa4Delivery, 'stored'> | 'unreachable';
 
 interface Ga4Device {
     language?: string;
@@ -107,7 +114,8 @@ export class NgGa4Service implements OnDestroy {
     // Each ticket settles one call's `delivered` with its batch's outcome.
     private readonly batcher = new EventBatcher<Ga4RequestBody, (outcome: Promise<NgGa4Delivery>) => void>();
     // Requests on the wire, for flush() to wait on.
-    private readonly inFlight = new Set<Promise<NgGa4Delivery>>();
+    private readonly inFlight = new Set<Promise<unknown>>();
+    private onlineListener?: () => void;
     private batchTimer: ReturnType<typeof setTimeout> | null = null;
     private readonly DEFAULT_BATCH_DELAY_MS = 300;
 
@@ -182,6 +190,11 @@ export class NgGa4Service implements OnDestroy {
             });
 
         this.registerSessionSyncListener();
+        this.registerOnlineListener();
+        // Events that failed to send in an earlier page or worker lifetime. Not
+        // awaited: init() is an APP_INITIALIZER and must not wait on the network.
+        // flush() waits for it.
+        this.track(this.drainOutbox());
         // Closes the gap between "another context wrote during the awaits above"
         // and "the listener just registered above can observe it" — see
         // catchUpSessionState() for why this can't simply be moved earlier instead.
@@ -354,7 +367,8 @@ export class NgGa4Service implements OnDestroy {
         if (this.config.isExtension && chrome?.storage) {
             this.enqueueStorageWrite(
                 'chrome.storage.local.remove',
-                () => chrome.storage.local.remove(['ga_client_id', 'ga_session_number'])
+                // The outbox holds the client ID too, on every stored request.
+                () => chrome.storage.local.remove(['ga_client_id', 'ga_session_number', OUTBOX_STORAGE_KEY])
             );
             this.enqueueStorageWrite(
                 'chrome.storage.session.remove',
@@ -373,6 +387,7 @@ export class NgGa4Service implements OnDestroy {
         localStorage.removeItem('ga_session_id');
         localStorage.removeItem('ga_last_activity');
         localStorage.removeItem('ga_session_number');
+        localStorage.removeItem(OUTBOX_STORAGE_KEY);
         this.deleteGaCookie();
     }
 
@@ -455,6 +470,9 @@ export class NgGa4Service implements OnDestroy {
         }
         if (this.chromeStorageListener && chrome?.storage?.onChanged) {
             chrome.storage.onChanged.removeListener(this.chromeStorageListener);
+        }
+        if (this.onlineListener) {
+            this.getGlobalScope()?.removeEventListener?.('online', this.onlineListener);
         }
     }
 
@@ -666,13 +684,18 @@ export class NgGa4Service implements OnDestroy {
     // One request on the wire: a single event under 'xhr', a batch otherwise.
     // The promise never rejects, and is tracked until it settles for flush().
     private dispatch(body: Ga4RequestBody, transport: 'beacon' | 'xhr'): Promise<NgGa4Delivery> {
-        const outcome = this.send(body, transport);
-        this.inFlight.add(outcome);
-        outcome.then(() => this.inFlight.delete(outcome));
-        return outcome;
+        return this.track(this.send(body, transport).then(outcome =>
+            outcome === 'unreachable' ? this.storeInOutbox(body) : outcome));
     }
 
-    private send(body: Ga4RequestBody, transport: 'beacon' | 'xhr'): Promise<NgGa4Delivery> {
+    // Registers work for flush() to wait on, until it settles.
+    private track<T>(work: Promise<T>): Promise<T> {
+        this.inFlight.add(work);
+        work.then(() => this.inFlight.delete(work), () => this.inFlight.delete(work));
+        return work;
+    }
+
+    private send(body: Ga4RequestBody, transport: 'beacon' | 'xhr'): Promise<SendOutcome> {
         const url = this.collectUrl(this.GA4_ENDPOINT);
 
         // The validation endpoint records nothing — "events sent to the validation
@@ -717,13 +740,15 @@ export class NgGa4Service implements OnDestroy {
         });
     }
 
-    private sendViaXhr(url: string, body: object): Promise<NgGa4Delivery> {
+    private sendViaXhr(url: string, body: object): Promise<SendOutcome> {
         return new Promise(resolve => {
             this.http.post(url, body, { responseType: 'text' }).subscribe({
                 next: () => resolve('sent'),
                 error: (err) => {
                     this.logHttpError(err);
-                    resolve('failed');
+                    // HttpClient reports a request that never got a response —
+                    // offline, DNS, connection reset — as status 0.
+                    resolve(err?.status === 0 ? 'unreachable' : 'failed');
                 },
                 // An interceptor that completes without emitting sent nothing we
                 // can see; resolve() after next() is a no-op.
@@ -752,7 +777,7 @@ export class NgGa4Service implements OnDestroy {
 
     // null when fetch is unavailable or throws synchronously, so the caller
     // falls back to XHR; otherwise the request's eventual outcome.
-    private tryFetchKeepalive(url: string, payload: string): Promise<NgGa4Delivery> | null {
+    private tryFetchKeepalive(url: string, payload: string): Promise<SendOutcome> | null {
         const fetchFn = this.getFetch();
         if (!fetchFn) {
             return null;
@@ -768,7 +793,7 @@ export class NgGa4Service implements OnDestroy {
                 keepalive: true,
                 headers: { 'Content-Type': 'application/json' }
             }).then(
-                (response: Response | undefined): NgGa4Delivery => {
+                (response: Response | undefined): SendOutcome => {
                     // GA4 answers 2xx to anything it receives, even a payload it then
                     // discards, so a non-2xx is a proxy or blocker in the way.
                     if (response && response.ok === false) {
@@ -777,14 +802,116 @@ export class NgGa4Service implements OnDestroy {
                     }
                     return 'sent';
                 },
-                (err: unknown): NgGa4Delivery => {
+                // fetch() rejects only when no response arrived at all.
+                (err: unknown): SendOutcome => {
                     this.logHttpError(err);
-                    return 'failed';
+                    return 'unreachable';
                 }
             );
         } catch {
             return null;
         }
+    }
+
+    // --- Offline outbox (#25) ---
+    //
+    // A request that could not reach GA4 at all is persisted whole — client_id,
+    // consent, device and each event's timestamp_micros — so a replay hours
+    // later, from another page or worker lifetime, sends exactly what would
+    // have been sent. Every read-modify-write runs on the storage chain, so two
+    // in this context can never interleave and lose an entry.
+
+    private storeInOutbox(body: Ga4RequestBody): Promise<NgGa4Delivery> {
+        // The outbox is storage like any other, and a stored request carries
+        // the client ID.
+        if (!this.consent.storageAllowed) {
+            return Promise.resolve('failed');
+        }
+        return this.updateOutbox(stored => [...stored, body])
+            .then((): NgGa4Delivery => 'stored', (err: unknown): NgGa4Delivery => {
+                console.warn('[ng-ga4] could not store the request for retry', err);
+                return 'failed';
+            });
+    }
+
+    // Sends what earlier lifetimes could not. Runs on init() and on 'online';
+    // never on a failure, so an unreachable network cannot spin it.
+    private async drainOutbox(): Promise<void> {
+        if (!this.enabled || !this.isBrowser) {
+            return;
+        }
+        let pending: Ga4RequestBody[] = [];
+        try {
+            await this.updateOutbox(stored => {
+                pending = stored;
+                return [];
+            });
+        } catch (err) {
+            console.warn('[ng-ga4] could not read the outbox', err);
+            return;
+        }
+        // Each replayed request that fails again goes back in through dispatch().
+        const transport = this.config.transport === 'xhr' ? 'xhr' : 'beacon';
+        await Promise.all(pending.map(body => this.dispatch(body, transport)));
+    }
+
+    // The single read-modify-write for the outbox. Prunes on every write, so
+    // the stored size is bounded however it is reached. Rejects if storage does.
+    private updateOutbox(change: (stored: Ga4RequestBody[]) => Ga4RequestBody[]): Promise<void> {
+        const apply = (raw: unknown) =>
+            pruneOutbox(change(pruneOutbox(parseOutbox<Ga4RequestBody>(raw), Date.now())), Date.now());
+        // Nothing stored and nothing to store — the usual case on every init() —
+        // must not cost a write.
+        const absent = (raw: unknown) => raw === undefined || raw === null;
+        if (this.config.isExtension && chrome?.storage) {
+            return this.enqueueStorageWrite('chrome.storage.local (outbox)', async () => {
+                const raw = (await chrome.storage.local.get([OUTBOX_STORAGE_KEY]))[OUTBOX_STORAGE_KEY];
+                const next = apply(raw);
+                if (next.length) {
+                    await chrome.storage.local.set({ [OUTBOX_STORAGE_KEY]: next });
+                } else if (!absent(raw)) {
+                    await chrome.storage.local.remove([OUTBOX_STORAGE_KEY]);
+                }
+            });
+        }
+        // Chained even though localStorage is synchronous, so its order against
+        // a consent withdrawal's removal holds on this path too.
+        return this.enqueueStorageWrite('localStorage (outbox)', async () => {
+            const raw = localStorage.getItem(OUTBOX_STORAGE_KEY);
+            const next = apply(raw);
+            if (absent(raw) && !next.length) {
+                return;
+            }
+            if (next.length) {
+                // Throws on quota exhaustion or in Safari private mode; the
+                // caller reports it, and the request is lost as it was before.
+                localStorage.setItem(OUTBOX_STORAGE_KEY, JSON.stringify(next));
+            } else {
+                localStorage.removeItem(OUTBOX_STORAGE_KEY);
+            }
+        });
+    }
+
+    // 'online' fires on window in a page and on the global scope in a worker,
+    // so the global scope covers both, including an MV3 service worker.
+    private registerOnlineListener(): void {
+        // See registerEngagementListeners: runInit() can run more than once.
+        if (this.onlineListener) {
+            return;
+        }
+        const scope = this.getGlobalScope();
+        if (!scope?.addEventListener) {
+            return;
+        }
+        this.onlineListener = () => {
+            this.track(this.drainOutbox());
+        };
+        // Outside Angular for the same reason as the engagement listeners.
+        this.zone.runOutsideAngular(() => scope.addEventListener('online', this.onlineListener!));
+    }
+
+    private getGlobalScope(): Pick<EventTarget, 'addEventListener' | 'removeEventListener'> | undefined {
+        return typeof globalThis !== 'undefined' ? globalThis as unknown as EventTarget : undefined;
     }
 
     // Indirection seams (mirrors getUserAgentData/getTimeZone) so tests can stub the

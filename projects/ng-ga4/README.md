@@ -141,7 +141,7 @@ The returned `NgGa4TrackResult` tells you which of those happened, for debugging
 ```typescript
 const { status, delivered } = this.analytics.trackEvent('purchase', { value: 9.99 });
 // status: 'accepted' | 'deferred' | 'disabled' | 'uninitialized' | 'server'
-console.log(status, await delivered); // delivered: 'sent' | 'failed' | 'dropped'
+console.log(status, await delivered); // delivered: 'sent' | 'stored' | 'failed' | 'dropped'
 ```
 
 `delivered` never rejects. `'sent'` means the transport accepted the request; GA4 answers 2xx even to payloads it discards, so nothing can confirm more than that. Use [debug mode](#debug-mode) to see what GA4 thinks of a payload.
@@ -169,6 +169,16 @@ A batch goes out early when it reaches 25 events, when the page is hidden or clo
 In an MV3 service worker there's no page to hide, so a batch relies on its timer, and a worker stopped inside that window loses it. `await flush()` before a handler returns (see [Service-worker teardown](#service-worker-teardown)).
 
 `transport: 'xhr'` doesn't batch: every call is its own request, sent at once.
+
+### Offline outbox
+
+A request that can't reach GA4 at all (no network, DNS failure, connection reset) is saved and sent again on the next `init()` and when the browser comes back `online`. Its `delivered` resolves to `'stored'`. A replay is the original request: same client ID, consent and event times.
+
+- It lives in `chrome.storage.local` in an extension and `localStorage` on the web, under `ga_outbox`.
+- It holds at most 500 events, dropping the oldest first. Events older than 72 hours are dropped, since GA4 would record them at the wrong time.
+- Only network failures are retried. GA4 answers 2xx to anything it receives, so an error status comes from something in between (a proxy, a blocker) and is not retried.
+- With `analyticsStorage` denied nothing is saved, and withdrawing it deletes the outbox along with the client ID.
+- In an extension, a popup and the service worker each replay on their own `init()`. If both start while the outbox holds requests, those requests can be sent twice.
 
 ## Client ID and gtag.js
 
@@ -243,6 +253,7 @@ NgGa4Module.forRoot({
 
 | Data | Web | Extension |
 |---|---|---|
+| Unsent requests ([outbox](#offline-outbox)) | `localStorage` | `chrome.storage.local` |
 | Client ID | `_ga` if present (default), else `localStorage` | `chrome.storage.local` |
 | Session number | `localStorage` | `chrome.storage.local` |
 | Session ID and last activity | `localStorage` | `chrome.storage.session` |
