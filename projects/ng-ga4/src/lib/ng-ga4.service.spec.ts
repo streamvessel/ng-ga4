@@ -1973,6 +1973,124 @@ describe('NgGa4Service', () => {
         });
     });
 
+    // --- timestamp_micros (#21) ---
+
+    describe('timestamp_micros', () => {
+        const NOW_MICROS = MOCK_TIMESTAMP * 1000;
+        const HOUR_MS = 60 * 60 * 1000;
+
+        beforeEach(async () => {
+            await service.init();
+        });
+
+        function takeBody(): any {
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            req.flush('', { status: 204, statusText: 'No Content' });
+            return req.request.body;
+        }
+
+        it('stamps a custom event, and the request, with the time it was tracked', () => {
+            service.trackEvent('cta_click');
+
+            const body = takeBody();
+            expect(body.timestamp_micros).toBe(NOW_MICROS);
+            expect(body.events[0].timestamp_micros).toBe(NOW_MICROS);
+        });
+
+        it('stamps a page view', () => {
+            jasmine.clock().tick(1234);
+            service.trackPageView('/a');
+
+            expect(takeBody().events[0].timestamp_micros).toBe((MOCK_TIMESTAMP + 1234) * 1000);
+        });
+
+        it('stamps the hide-time engagement event with the time the page hid', () => {
+            spyOn(service as any, 'getNavigator').and.returnValue({});
+            spyOn(service as any, 'getFetch').and.returnValue(undefined);
+            jasmine.clock().tick(5000);
+
+            (service as any).flushEngagement();
+
+            expect(takeBody().events[0].timestamp_micros).toBe((MOCK_TIMESTAMP + 5000) * 1000);
+        });
+
+        it('keeps the earlier of two event times on the request, and each event its own', () => {
+            (service as any).sendToGA4([
+                { name: 'later', timestamp_micros: NOW_MICROS - 1000 },
+                { name: 'earlier', timestamp_micros: NOW_MICROS - 5000 }
+            ]);
+
+            const body = takeBody();
+            expect(body.timestamp_micros).toBe(NOW_MICROS - 5000);
+            expect(body.events.map((e: any) => e.timestamp_micros)).toEqual([NOW_MICROS - 1000, NOW_MICROS - 5000]);
+        });
+
+        // GA4 would re-stamp it to exactly 72 hours ago, a time it did not happen at.
+        it('drops an event older than 72 hours and sends the rest', () => {
+            (service as any).sendToGA4([
+                { name: 'stale', timestamp_micros: (MOCK_TIMESTAMP - 72 * HOUR_MS - 1) * 1000 },
+                { name: 'fresh', timestamp_micros: (MOCK_TIMESTAMP - 71 * HOUR_MS) * 1000 }
+            ]);
+
+            const body = takeBody();
+            expect(body.events.map((e: any) => e.name)).toEqual(['fresh']);
+            expect(body.timestamp_micros).toBe((MOCK_TIMESTAMP - 71 * HOUR_MS) * 1000);
+        });
+
+        it('sends nothing when every event is older than 72 hours', () => {
+            (service as any).sendToGA4([{ name: 'stale', timestamp_micros: (MOCK_TIMESTAMP - 73 * HOUR_MS) * 1000 }]);
+
+            httpMock.expectNone(() => true);
+        });
+
+        it('clamps a timestamp in the future to the send time', () => {
+            (service as any).sendToGA4([{ name: 'ahead', timestamp_micros: NOW_MICROS + 60_000_000 }]);
+
+            const body = takeBody();
+            expect(body.events[0].timestamp_micros).toBe(NOW_MICROS);
+            expect(body.timestamp_micros).toBe(NOW_MICROS);
+        });
+
+        it('lets a caller-supplied timestamp_micros param through untouched as a param', () => {
+            service.trackEvent('custom', { timestamp_micros: 1 });
+
+            const body = takeBody();
+            // Params are not the event-level field; only the latter is ours.
+            expect(body.events[0].params.timestamp_micros).toBe(1);
+            expect(body.events[0].timestamp_micros).toBe(NOW_MICROS);
+        });
+    });
+
+    describe('timestamp_micros for calls queued during init()', () => {
+        it('keeps the time of the call, not the time init() finished', async () => {
+            let resolveContext!: () => void;
+            spyOn<any>(service, 'collectContext').and.returnValue(new Promise<void>(r => { resolveContext = r; }));
+
+            const initPromise = service.init();
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+
+            service.trackEvent('during_init');
+            service.trackPageView('/during-init');
+            jasmine.clock().tick(4000);
+
+            resolveContext();
+            await initPromise;
+
+            const reqs = httpMock.match((r) => r.url.includes('mp/collect'));
+            expect(reqs.length).toBe(2);
+            for (const req of reqs) {
+                expect(req.request.body.events[0].timestamp_micros).toBe(MOCK_TIMESTAMP * 1000);
+                req.flush('', { status: 204, statusText: 'No Content' });
+            }
+
+            // And the replay stamp does not leak onto calls made afterwards.
+            service.trackEvent('after_init');
+            const after = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(after.request.body.events[0].timestamp_micros).toBe((MOCK_TIMESTAMP + 4000) * 1000);
+            after.flush('', { status: 204, statusText: 'No Content' });
+        });
+    });
+
     // --- session management ---
 
     describe('session management', () => {

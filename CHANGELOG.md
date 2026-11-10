@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Every event now carries `timestamp_micros`, the time it was tracked, and each
+  request carries the earliest of its events'. GA4 used to stamp events with
+  their arrival time, which is wrong for anything sent later than it happened —
+  a call made while `init()` was still running, and soon batched and replayed
+  events. An event older than the Measurement Protocol's 72-hour backdating
+  window is dropped rather than sent, since GA4 would re-stamp it to exactly 72
+  hours ago; a timestamp in the future is clamped to the send time.
+  ([#21](https://github.com/streamvessel/ng-ga4/issues/21))
+
 ## [0.2.2] - 2026-10-27
 
 ### Fixed

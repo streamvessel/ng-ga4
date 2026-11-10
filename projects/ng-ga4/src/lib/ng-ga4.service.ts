@@ -9,6 +9,7 @@ import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
+import { clampToNow, isWithinBackdateWindow, toTimestampMicros } from './timestamp';
 
 interface Ga4Device {
     language?: string;
@@ -22,6 +23,15 @@ interface Ga4Device {
 
 interface Ga4UserLocation {
     country_id?: string;
+}
+
+interface Ga4Event {
+    name: string;
+    params?: Record<string, any>;
+    // When the event happened, not when it was sent. Stamped in sendToGA4(),
+    // which every track path reaches synchronously, so the two only differ for a
+    // call replayed from pendingCalls — see replayTimestampMicros.
+    timestamp_micros?: number;
 }
 
 @Injectable()
@@ -44,6 +54,11 @@ export class NgGa4Service implements OnDestroy {
     private device: Ga4Device | null = null;
     private userLocation: Ga4UserLocation | null = null;
     private pendingCalls: Array<() => void> = [];
+    // Set only while drainPendingCalls() replays a call buffered during init(),
+    // so the event keeps the time it was tracked rather than the time init()
+    // finished. Ambient rather than threaded through as a parameter to keep the
+    // public track* signatures, and their bodies, untouched.
+    private replayTimestampMicros: number | null = null;
     private engagement: EngagementTimer | null = null;
     // Resolved once, in init(), by resolveEngagementEventName() — validating on
     // every flush would warn on every window switch for a misconfigured name.
@@ -393,7 +408,7 @@ export class NgGa4Service implements OnDestroy {
         }
         if (!this.clientId) {
             if (this.initialized) {
-                this.pendingCalls.push(() => this.trackPageView(pagePath, pageTitle));
+                this.pendingCalls.push(this.replayLater(() => this.trackPageView(pagePath, pageTitle)));
             }
             return;
         }
@@ -422,7 +437,7 @@ export class NgGa4Service implements OnDestroy {
         }
         if (!this.clientId) {
             if (this.initialized) {
-                this.pendingCalls.push(() => this.trackEvent(name, params));
+                this.pendingCalls.push(this.replayLater(() => this.trackEvent(name, params)));
             }
             return;
         }
@@ -446,6 +461,19 @@ export class NgGa4Service implements OnDestroy {
         }]);
     }
 
+    // Captures the time of the call now, for drainPendingCalls() to restore.
+    private replayLater(call: () => void): () => void {
+        const timestampMicros = toTimestampMicros(Date.now());
+        return () => {
+            this.replayTimestampMicros = timestampMicros;
+            try {
+                call();
+            } finally {
+                this.replayTimestampMicros = null;
+            }
+        };
+    }
+
     private drainPendingCalls(): void {
         const calls = this.pendingCalls;
         this.pendingCalls = [];
@@ -455,24 +483,42 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private sendToGA4(
-        events: Array<{ name: string; params?: Record<string, any> }>,
+        events: Ga4Event[],
         forceBeacon = false
     ): void {
         const url = this.collectUrl(this.GA4_ENDPOINT);
 
+        // Without a timestamp GA4 stamps each event with its arrival time, which
+        // is wrong for anything delayed between the call and the request.
+        const now = Date.now();
+        const stamp = this.replayTimestampMicros ?? toTimestampMicros(now);
+        const timed = events
+            .map(event => ({ ...event, timestamp_micros: clampToNow(event.timestamp_micros ?? stamp, now) }))
+            // GA4 re-stamps an event backdated past 72 hours to a time it did not
+            // happen at; better not sent at all.
+            .filter(event => isWithinBackdateWindow(event.timestamp_micros, now));
+        if (!timed.length) {
+            return;
+        }
+
         const body: {
             client_id: string;
-            events: Array<{ name: string; params?: Record<string, any> }>;
+            timestamp_micros: number;
+            events: Ga4Event[];
             device?: Ga4Device;
             user_location?: Ga4UserLocation;
             consent?: Ga4ConsentPayload;
         } = {
             client_id: this.clientId,
+            // Request-level, for the whole batch. Each event also carries its own,
+            // which takes precedence, so a batch spanning time keeps each event's
+            // real time; the request takes the earliest.
+            timestamp_micros: Math.min(...timed.map(event => event.timestamp_micros)),
             // debug_mode has to ride on every event in the batch — DebugView only
             // surfaces the individual events that carry it, not the request.
             events: this.config.debug
-                ? events.map(event => ({ ...event, params: { ...event.params, debug_mode: 1 } }))
-                : events
+                ? timed.map(event => ({ ...event, params: { ...event.params, debug_mode: 1 } }))
+                : timed
         };
         // `device` and `user_location` are request-level fields (siblings of
         // `client_id`/`events`), not per-event params. /mp/collect does not infer
