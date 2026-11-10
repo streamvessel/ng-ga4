@@ -119,18 +119,20 @@ export class MyComponent {
 
 | `NgGa4Service` method | Description |
 |---|---|
-| `trackEvent(name, params?)` | Send a custom event. Checked against GA4's naming rules first; see [Event validation](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/event-validation.md). |
+| `trackEvent(name, params?)` | Send a custom event. Checked against GA4's naming rules first; see [Event validation](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/event-validation.md). Returns an `NgGa4TrackResult` you can ignore; see [Track results](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/delivery.md#track-results). |
 | `trackPageView(path, title?)` | Send a page view. Called for you on navigation. `title` defaults to `document.title`. |
 | `setUserId(userId)` | Send `user_id` on every hit from now on; `null` on sign-out. See [User ID](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-id). |
 | `setUserProperties(properties)` | Set user properties, sent with every later hit. See [User properties](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-properties). |
 | `setConsent(consent)` | Update consent. Keys you leave out stay as they are. See [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md). |
 | `setEnabled(enabled)` | Turn collection on or off. The first `true` runs the initialisation that `enabled: false` skipped. See [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md). |
+| `flush()` | Sends queued events now; resolves once their requests and pending `chrome.storage` writes have settled. Never rejects. See [flush()](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/delivery.md#flush). |
 | `flushStorage()` | Resolves once pending `chrome.storage` writes have landed. Resolves at once on the web. See [Service-worker teardown](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md#service-worker-teardown). |
 | `init()` | Starts the library. Runs for you at app start. |
 
 Calls made while collection is off are dropped. Calls made after `init()` has started but before it finishes are queued and sent once it does; calls made before it starts (for example from an earlier `APP_INITIALIZER`) are dropped.
 
 Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md)), `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState`, `NgGa4UserPropertyValue`, `NgGa4EnhancedMeasurement` and `NG_GA4_CONFIG`.
+Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md)), `NgGa4TrackResult`, `NgGa4TrackStatus`, `NgGa4Delivery`, `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState`, `NgGa4UserPropertyValue` and `NG_GA4_CONFIG`.
 
 ## Documentation
 
@@ -140,7 +142,7 @@ Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](https://github.com
 - [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md): setup, service-worker teardown, sessions across tabs
 - [Engagement time and debug mode](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md)
 - [Enhanced measurement](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/enhanced-measurement.md): opt-in scroll, outbound click, file download, site search, form and video events
-- [Delivery](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/delivery.md): batching
+- [Delivery](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/delivery.md): batching, `flush()`, track results
 - [Event validation](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/event-validation.md): the event and parameter name rules `trackEvent()` checks
 - [Limitations](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/limitations.md): what the Measurement Protocol can't do, with measurements
 

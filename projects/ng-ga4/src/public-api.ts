@@ -3,6 +3,7 @@ export { NgGa4Consent, NgGa4ConsentState } from './lib/consent';
 export { NgGa4EnhancedMeasurement } from './lib/enhanced-measurement';
 export { NgGa4UserPropertyValue } from './lib/user-properties';
 export { NgGa4Service } from './lib/ng-ga4.service';
+export { NgGa4Delivery, NgGa4TrackResult, NgGa4TrackStatus } from './lib/track-result';
 export { NgGa4Module } from './lib/ng-ga4.module';
 export { provideNgGa4 } from './lib/ng-ga4.providers';
 export { seedNgGa4ClientId } from './lib/seed-client-id';
