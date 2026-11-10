@@ -126,8 +126,9 @@ export class MyComponent {
 
 | `NgGa4Service` method | Description |
 |---|---|
-| `trackEvent(name, params?)` | Send a custom event. |
-| `trackPageView(path, title?)` | Send a page view. Called for you on navigation. |
+| `trackEvent(name, params?)` | Send a custom event. Returns an `NgGa4TrackResult` you can ignore. |
+| `trackPageView(path, title?)` | Send a page view. Called for you on navigation. Returns an `NgGa4TrackResult`. |
+| `flush()` | Sends queued events now. Resolves once their requests and pending `chrome.storage` writes have settled. Never rejects. |
 | `setConsent(consent)` | Update consent. Keys you leave out stay as they are. |
 | `setEnabled(enabled)` | Turn collection on or off. The first `true` runs the initialisation that `enabled: false` skipped. |
 | `flushStorage()` | Resolves once pending `chrome.storage` writes have landed. Resolves at once on the web. |
@@ -135,7 +136,17 @@ export class MyComponent {
 
 Calls made while collection is off are dropped. Calls made after `init()` has started but before it finishes are queued and sent once it does; calls made before it starts (for example from an earlier `APP_INITIALIZER`) are dropped.
 
-Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](#chrome-extensions)), `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState` and `NG_GA4_CONFIG`.
+The returned `NgGa4TrackResult` tells you which of those happened, for debugging or in your own tests:
+
+```typescript
+const { status, delivered } = this.analytics.trackEvent('purchase', { value: 9.99 });
+// status: 'accepted' | 'deferred' | 'disabled' | 'uninitialized' | 'server'
+console.log(status, await delivered); // delivered: 'sent' | 'failed' | 'dropped'
+```
+
+`delivered` never rejects. `'sent'` means the transport accepted the request; GA4 answers 2xx even to payloads it discards, so nothing can confirm more than that. Use [debug mode](#debug-mode) to see what GA4 thinks of a payload.
+
+Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](#chrome-extensions)), `NgGa4TrackResult`, `NgGa4TrackStatus`, `NgGa4Delivery`, `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState` and `NG_GA4_CONFIG`.
 
 ## Engagement time
 
@@ -155,7 +166,7 @@ With the default `'beacon'` transport, events are held for `batchDelayMs` (300 m
 
 A batch goes out early when it reaches 25 events, when the page is hidden or closed, and when the service is destroyed. Events are only combined when everything outside the events themselves (client ID, consent, device) matches, so a `setConsent()` between two calls starts a new request.
 
-In an MV3 service worker there's no page to hide, so a batch relies on its timer; a worker stopped inside that window loses it. Keep `batchDelayMs` short there.
+In an MV3 service worker there's no page to hide, so a batch relies on its timer, and a worker stopped inside that window loses it. `await flush()` before a handler returns (see [Service-worker teardown](#service-worker-teardown)).
 
 `transport: 'xhr'` doesn't batch: every call is its own request, sent at once.
 
@@ -250,16 +261,16 @@ chrome.runtime.onInstalled.addListener(() => seedNgGa4ClientId());
 
 Run it on every `onInstalled`, not only `reason === 'install'`: users of an already published extension only ever get `'update'`. The call is idempotent and never throws. It doesn't help a user who clears extension storage, since `onInstalled` doesn't fire again.
 
-**Wait for pending writes before an event handler returns**, after tracking calls and after `setConsent()`:
+**Flush before an event handler returns**, after tracking calls and after `setConsent()`:
 
 ```typescript
 chrome.action.onClicked.addListener(async () => {
     ga.trackEvent('action_clicked');
-    await ga.flushStorage();
+    await ga.flush();
 });
 ```
 
-`flushStorage()` covers storage, not event delivery ([#26](https://github.com/streamvessel/ng-ga4/issues/26)). Neither step survives a browser crash or an extension reload.
+`flush()` sends the queued batch and waits for it and for pending storage writes. `flushStorage()` waits for storage writes only. Neither survives a browser crash or an extension reload.
 
 ### Sessions across tabs
 

@@ -11,6 +11,7 @@ import { EngagementTimer } from './engagement-timer';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 import { clampToNow, isWithinBackdateWindow, toTimestampMicros } from './timestamp';
 import { EventBatcher } from './event-batcher';
+import { NgGa4Delivery, NgGa4TrackResult, NgGa4TrackStatus } from './track-result';
 
 interface Ga4Device {
     language?: string;
@@ -103,7 +104,10 @@ export class NgGa4Service implements OnDestroy {
     private storageWrites: Promise<void> = Promise.resolve();
     // Events waiting to go out together (#24). Only the 'beacon' transport
     // batches; 'xhr' sends each call as its own request, as it always has.
-    private readonly batcher = new EventBatcher<Ga4RequestBody>();
+    // Each ticket settles one call's `delivered` with its batch's outcome.
+    private readonly batcher = new EventBatcher<Ga4RequestBody, (outcome: Promise<NgGa4Delivery>) => void>();
+    // Requests on the wire, for flush() to wait on.
+    private readonly inFlight = new Set<Promise<NgGa4Delivery>>();
     private batchTimer: ReturnType<typeof setTimeout> | null = null;
     private readonly DEFAULT_BATCH_DELAY_MS = 300;
 
@@ -259,7 +263,7 @@ export class NgGa4Service implements OnDestroy {
      *
      * Resolves immediately on the web, where storage writes are synchronous.
      *
-     * This does not flush *events*: sends are still fire-and-forget (see #26).
+     * This does not flush *events*; `flush()` does both.
      * It is also not a guarantee against forced termination — a browser quit or
      * extension reload can drop an in-flight write whatever we do. For the client
      * ID specifically, `seedNgGa4ClientId()` removes the exposure entirely.
@@ -281,6 +285,39 @@ export class NgGa4Service implements OnDestroy {
             tail = this.storageWrites;
             await tail;
         } while (tail !== this.storageWrites);
+    }
+
+    /**
+     * Send every queued event now, and resolve once their requests — and any
+     * pending `chrome.storage` writes — have settled. Never rejects.
+     *
+     * Await this before an MV3 event handler returns, or before closing an
+     * extension popup or navigating away by script: a batch waiting for its
+     * timer is otherwise lost with the context. Calls made while `init()` is
+     * still running are waited for and included.
+     *
+     * Resolves as soon as `sendBeacon` accepts a batch, since the browser
+     * delivers it from there; a `fetch` or XHR fallback is waited for.
+     */
+    async flush(): Promise<void> {
+        if (!this.isBrowser) {
+            return;
+        }
+        // Sent before the first await, so a caller that cannot wait — an unload
+        // handler, a popup about to close — still gets the batch out.
+        this.flushQueue();
+        // Calls made during init() sit in pendingCalls, not the queue, until it
+        // finishes. A failed init is not this method's to report.
+        if (this.initPromise) {
+            await this.initPromise.catch(() => undefined);
+            this.flushQueue();
+        }
+        // Looped for the same reason as flushStorage(): a request started while
+        // awaiting — a call from another task — belongs to this flush too.
+        while (this.inFlight.size) {
+            await Promise.all([...this.inFlight]);
+        }
+        await this.flushStorage();
     }
 
     // Serialises chrome.storage operations: each is chained behind everything
@@ -421,17 +458,16 @@ export class NgGa4Service implements OnDestroy {
         }
     }
 
-    trackPageView(pagePath: string, pageTitle?: string): void {
+    trackPageView(pagePath: string, pageTitle?: string): NgGa4TrackResult {
         // Dropped, not queued: the server has no client identity to attach a hit to,
         // and replaying queued events after hydration would double-count the view.
         if (!this.isBrowser || !this.enabled) {
-            return;
+            return this.notAccepted(this.isBrowser ? 'disabled' : 'server');
         }
         if (!this.clientId) {
-            if (this.initialized) {
-                this.pendingCalls.push(this.replayLater(() => this.trackPageView(pagePath, pageTitle)));
-            }
-            return;
+            return this.initialized
+                ? this.deferCall(() => this.trackPageView(pagePath, pageTitle))
+                : this.notAccepted('uninitialized');
         }
         this.lastPagePath = pagePath;
 
@@ -448,24 +484,23 @@ export class NgGa4Service implements OnDestroy {
             ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
         };
 
-        this.sendToGA4([{ name: 'page_view', params }]);
+        return this.accepted(this.sendToGA4([{ name: 'page_view', params }]));
     }
 
-    trackEvent(name: string, params?: Record<string, any>): void {
+    trackEvent(name: string, params?: Record<string, any>): NgGa4TrackResult {
         // See trackPageView: inert on the server, and deliberately not queued.
         if (!this.isBrowser || !this.enabled) {
-            return;
+            return this.notAccepted(this.isBrowser ? 'disabled' : 'server');
         }
         if (!this.clientId) {
-            if (this.initialized) {
-                this.pendingCalls.push(this.replayLater(() => this.trackEvent(name, params)));
-            }
-            return;
+            return this.initialized
+                ? this.deferCall(() => this.trackEvent(name, params))
+                : this.notAccepted('uninitialized');
         }
 
         this.ensureSession();
 
-        this.sendToGA4([{
+        return this.accepted(this.sendToGA4([{
             name,
             params: {
                 // Consumed unconditionally, even though ...params below may override what
@@ -479,7 +514,24 @@ export class NgGa4Service implements OnDestroy {
                 ...params,
                 ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
             }
-        }]);
+        }]));
+    }
+
+    private accepted(delivered: Promise<NgGa4Delivery>): NgGa4TrackResult {
+        return { status: 'accepted', delivered };
+    }
+
+    private notAccepted(status: Exclude<NgGa4TrackStatus, 'accepted' | 'deferred'>): NgGa4TrackResult {
+        return { status, delivered: Promise.resolve('dropped') };
+    }
+
+    // Held until init() finishes; `delivered` follows whatever the replayed
+    // call does then — sent, or dropped if collection was disabled meanwhile.
+    private deferCall(call: () => NgGa4TrackResult): NgGa4TrackResult {
+        let settle!: (outcome: Promise<NgGa4Delivery>) => void;
+        const delivered = new Promise<NgGa4Delivery>(resolve => { settle = resolve; });
+        this.pendingCalls.push(this.replayLater(() => settle(call().delivered)));
+        return { status: 'deferred', delivered };
     }
 
     // Captures the time of the call now, for drainPendingCalls() to restore.
@@ -506,7 +558,7 @@ export class NgGa4Service implements OnDestroy {
     private sendToGA4(
         events: Ga4Event[],
         forceBeacon = false
-    ): void {
+    ): Promise<NgGa4Delivery> {
         // Without a timestamp GA4 stamps each event with its arrival time, which
         // is wrong for anything delayed between the call and the request.
         const now = Date.now();
@@ -517,7 +569,7 @@ export class NgGa4Service implements OnDestroy {
             // happen at; better not sent at all.
             .filter(event => isWithinBackdateWindow(event.timestamp_micros, now));
         if (!timed.length) {
-            return;
+            return Promise.resolve('dropped');
         }
 
         const body: Ga4RequestBody = {
@@ -554,28 +606,31 @@ export class NgGa4Service implements OnDestroy {
         // 'xhr' is also the escape hatch from batching: one call, one request,
         // through the app's interceptors, exactly as before #24.
         if (this.config.transport === 'xhr' && !forceBeacon) {
-            this.dispatch(body, 'xhr');
-            return;
+            return this.dispatch(body, 'xhr');
         }
 
         // Batched: a route change plus a few custom events becomes one request
         // instead of one (plus a CORS preflight) each. A full batch, or a send as
         // the page goes away, goes immediately; anything else waits briefly for
         // company.
-        const full = this.batcher.add(body);
+        let ticket!: (outcome: Promise<NgGa4Delivery>) => void;
+        const delivered = new Promise<NgGa4Delivery>(resolve => { ticket = resolve; });
+        const full = this.batcher.add(body, ticket);
         if (full || forceBeacon) {
             this.flushQueue();
         } else {
             this.scheduleFlush();
         }
+        return delivered;
     }
 
     // Sends everything queued, now, over the unload-safe chain. Safe to call
     // with nothing queued, and from an unload handler.
     private flushQueue(): void {
         this.cancelScheduledFlush();
-        for (const body of this.batcher.take()) {
-            this.dispatch(body, 'beacon');
+        for (const { body, tickets } of this.batcher.drain()) {
+            const outcome = this.dispatch(body, 'beacon');
+            tickets.forEach(settle => settle(outcome));
         }
     }
 
@@ -609,7 +664,15 @@ export class NgGa4Service implements OnDestroy {
     }
 
     // One request on the wire: a single event under 'xhr', a batch otherwise.
-    private dispatch(body: Ga4RequestBody, transport: 'beacon' | 'xhr'): void {
+    // The promise never rejects, and is tracked until it settles for flush().
+    private dispatch(body: Ga4RequestBody, transport: 'beacon' | 'xhr'): Promise<NgGa4Delivery> {
+        const outcome = this.send(body, transport);
+        this.inFlight.add(outcome);
+        outcome.then(() => this.inFlight.delete(outcome));
+        return outcome;
+    }
+
+    private send(body: Ga4RequestBody, transport: 'beacon' | 'xhr'): Promise<NgGa4Delivery> {
         const url = this.collectUrl(this.GA4_ENDPOINT);
 
         // The validation endpoint records nothing — "events sent to the validation
@@ -622,8 +685,7 @@ export class NgGa4Service implements OnDestroy {
         }
 
         if (transport === 'xhr') {
-            this.sendViaXhr(url, body);
-            return;
+            return this.sendViaXhr(url, body);
         }
 
         // Default ('beacon'): prefer transports that survive page/tab unload so events
@@ -631,12 +693,9 @@ export class NgGa4Service implements OnDestroy {
         // → XHR (last resort, aborted on unload but better than silently losing the hit).
         const payload = JSON.stringify(body);
         if (this.trySendBeacon(url, payload)) {
-            return;
+            return Promise.resolve('sent');
         }
-        if (this.tryFetchKeepalive(url, payload)) {
-            return;
-        }
-        this.sendViaXhr(url, body);
+        return this.tryFetchKeepalive(url, payload) ?? this.sendViaXhr(url, body);
     }
 
     private collectUrl(endpoint: string): string {
@@ -658,9 +717,18 @@ export class NgGa4Service implements OnDestroy {
         });
     }
 
-    private sendViaXhr(url: string, body: object): void {
-        this.http.post(url, body, { responseType: 'text' }).subscribe({
-            error: (err) => this.logHttpError(err)
+    private sendViaXhr(url: string, body: object): Promise<NgGa4Delivery> {
+        return new Promise(resolve => {
+            this.http.post(url, body, { responseType: 'text' }).subscribe({
+                next: () => resolve('sent'),
+                error: (err) => {
+                    this.logHttpError(err);
+                    resolve('failed');
+                },
+                // An interceptor that completes without emitting sent nothing we
+                // can see; resolve() after next() is a no-op.
+                complete: () => resolve('sent')
+            });
         });
     }
 
@@ -682,25 +750,40 @@ export class NgGa4Service implements OnDestroy {
         }
     }
 
-    private tryFetchKeepalive(url: string, payload: string): boolean {
+    // null when fetch is unavailable or throws synchronously, so the caller
+    // falls back to XHR; otherwise the request's eventual outcome.
+    private tryFetchKeepalive(url: string, payload: string): Promise<NgGa4Delivery> | null {
         const fetchFn = this.getFetch();
         if (!fetchFn) {
-            return false;
+            return null;
         }
         try {
             // application/json to match what GA4's /mp/collect expects (see trySendBeacon).
             // Default CORS mode (not 'no-cors') so the application/json header is permitted and
             // genuine HTTP/network failures still surface to logHttpError; GA4 returns the CORS
             // headers the XHR path already depends on.
-            fetchFn(url, {
+            return fetchFn(url, {
                 method: 'POST',
                 body: payload,
                 keepalive: true,
                 headers: { 'Content-Type': 'application/json' }
-            }).catch((err: unknown) => this.logHttpError(err));
-            return true;
+            }).then(
+                (response: Response | undefined): NgGa4Delivery => {
+                    // GA4 answers 2xx to anything it receives, even a payload it then
+                    // discards, so a non-2xx is a proxy or blocker in the way.
+                    if (response && response.ok === false) {
+                        this.logHttpError(response);
+                        return 'failed';
+                    }
+                    return 'sent';
+                },
+                (err: unknown): NgGa4Delivery => {
+                    this.logHttpError(err);
+                    return 'failed';
+                }
+            );
         } catch {
-            return false;
+            return null;
         }
     }
 
