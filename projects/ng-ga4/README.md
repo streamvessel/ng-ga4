@@ -125,7 +125,7 @@ export class MyComponent {
 
 | `NgGa4Service` method | Description |
 |---|---|
-| `trackEvent(name, params?)` | Send a custom event. |
+| `trackEvent(name, params?)` | Send a custom event. Checked against GA4's naming rules first; see [Event validation](#event-validation). |
 | `trackPageView(path, title?)` | Send a page view. Called for you on navigation. |
 | `setConsent(consent)` | Update consent. Keys you leave out stay as they are. |
 | `setEnabled(enabled)` | Turn collection on or off. The first `true` runs the initialisation that `enabled: false` skipped. |
@@ -135,6 +135,16 @@ export class MyComponent {
 Calls made while collection is off are dropped. Calls made after `init()` has started but before it finishes are queued and sent once it does; calls made before it starts (for example from an earlier `APP_INITIALIZER`) are dropped.
 
 Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](#chrome-extensions)), `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState` and `NG_GA4_CONFIG`.
+
+### Event validation
+
+GA4's `/mp/collect` answers `204` even for an event it is about to discard, so a typo in an event name would otherwise lose that data without a trace. `trackEvent()` checks each event against the [Measurement Protocol's rules](https://developers.google.com/analytics/devguides/collection/protocol/ga4/reference#reserved_names) before sending it:
+
+- **Event name:** at most 40 characters; starts with a letter; only letters, digits and underscores; not reserved (`session_start`, `first_visit`, `user_engagement`, `error` and the rest of Google's list, or a `_`, `firebase_`, `ga_`, `google_`, `gtag.` or `notification_` prefix); not App-stream-only (`ad_impression`, `in_app_purchase`, `screen_view`). An event that breaks one of these is **not sent**.
+- **Parameter name:** at most 40 characters, same characters, not `firebase_conversion` and none of the prefixes above. A parameter that breaks one of these is **removed**; the rest of the event is sent.
+- **Parameter value and count:** string values over 100 characters (1000 for `page_location`, 420 for `page_referrer`, 300 for `page_title`) and events with more than 25 parameters, the ones the library adds included, are **sent unchanged**, since GA4 360 properties allow more.
+
+In development (`isDevMode()`) or with `debug: true`, each problem is logged with `console.warn`, naming the event and the rule. In a production build without `debug`, invalid events and parameters are still dropped, silently.
 
 ## Engagement time
 

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `trackEvent()` checks event and parameter names against the Measurement
+  Protocol's rules ([#29](https://github.com/streamvessel/ng-ga4/issues/29)).
+  `/mp/collect` returns 204 for a payload it discards, so a bad name used to be
+  lost without a trace. An event with an invalid, reserved or App-stream-only
+  name is no longer sent; a parameter with an invalid or reserved name is
+  removed from the event. In development (or with `debug: true`) each one logs
+  a `console.warn` naming the rule; production stays silent. Over-long string
+  values and more than 25 parameters are warned about but sent unchanged.
+
+### Changed
+
+- `engagementEventName` is validated against the same, fuller reserved-name
+  list, and its warning now says which rule the name broke.
+
 ## [0.2.2] - 2026-10-27
 
 ### Fixed
