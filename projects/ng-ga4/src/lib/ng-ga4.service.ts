@@ -8,6 +8,7 @@ import { ConsentState, Ga4ConsentPayload, NgGa4Consent } from './consent';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
+import { EnhancedMeasurement } from './enhanced-measurement';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 
 interface Ga4Device {
@@ -45,6 +46,7 @@ export class NgGa4Service implements OnDestroy {
     private userLocation: Ga4UserLocation | null = null;
     private pendingCalls: Array<() => void> = [];
     private engagement: EngagementTimer | null = null;
+    private enhancedMeasurement: EnhancedMeasurement | null = null;
     // Resolved once, in init(), by resolveEngagementEventName() — validating on
     // every flush would warn on every window switch for a misconfigured name.
     private engagementEventName = 'page_engagement';
@@ -126,6 +128,18 @@ export class NgGa4Service implements OnDestroy {
         // for listeners to be live before clientId is ready.
         this.registerEngagementListeners();
         this.engagementEventName = this.resolveEngagementEventName();
+        // Before the awaits for the same reason, and so the landing page view —
+        // queued until clientId is ready — still reaches pageViewed() for site
+        // search. Events fired meanwhile queue like any other trackEvent() call.
+        // Outside Angular: the handlers only send hits (see registerEngagementListeners).
+        if (EnhancedMeasurement.anyEnabled(this.config.enhancedMeasurement)) {
+            this.enhancedMeasurement ??= new EnhancedMeasurement(this.config.enhancedMeasurement!, {
+                track: (name, params) => this.trackEvent(name, params),
+                pageLocation: () => this.engagementPageLocation(),
+                internalHostnames: this.config.siteUrl ? [this.hostnameOf(this.config.siteUrl)].filter(Boolean) : []
+            });
+            this.zone.runOutsideAngular(() => this.enhancedMeasurement!.start());
+        }
 
         const clientId = await this.loadOrCreateClientId();
         this.sessionNumber = await this.loadSessionNumber();
@@ -365,6 +379,7 @@ export class NgGa4Service implements OnDestroy {
 
     ngOnDestroy(): void {
         this.routerSubscription?.unsubscribe();
+        this.enhancedMeasurement?.stop();
         if (this.visibilityListener && typeof document !== 'undefined') {
             document.removeEventListener('visibilitychange', this.visibilityListener);
         }
@@ -413,6 +428,7 @@ export class NgGa4Service implements OnDestroy {
         };
 
         this.sendToGA4([{ name: 'page_view', params }]);
+        this.enhancedMeasurement?.pageViewed(pagePath);
     }
 
     trackEvent(name: string, params?: Record<string, any>): void {
@@ -698,6 +714,14 @@ export class NgGa4Service implements OnDestroy {
             message: redact(err?.message),
             url: redact(err?.url)
         });
+    }
+
+    private hostnameOf(url: string): string {
+        try {
+            return new URL(url).hostname;
+        } catch {
+            return '';
+        }
     }
 
     private joinSiteUrl(siteUrl: string, pagePath: string): string {

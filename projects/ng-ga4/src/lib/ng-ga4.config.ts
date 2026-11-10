@@ -1,5 +1,6 @@
 import { InjectionToken } from '@angular/core';
 import { NgGa4Consent } from './consent';
+import { NgGa4EnhancedMeasurement } from './enhanced-measurement';
 
 /**
  * Options for the `_ga` cookie this library writes when `writeGaCookie` is
@@ -133,8 +134,18 @@ export interface NgGa4Config {
      * boot from your own store.
      */
     consent?: NgGa4Consent;
+
+    /**
+     * Automatically collected events matching gtag.js's Enhanced Measurement:
+     * `scroll`, outbound `click`, `file_download`, `view_search_results`,
+     * `form_start` and `form_submit`. Every flag is off by default, so leaving
+     * this out sends exactly what earlier versions sent. See "Enhanced
+     * measurement" in the README.
+     */
+    enhancedMeasurement?: NgGa4EnhancedMeasurement;
 }
 
 export const NG_GA4_CONFIG = new InjectionToken<NgGa4Config>('NG_GA4_CONFIG');
 
 export { NgGa4Consent, NgGa4ConsentState } from './consent';
+export { NgGa4EnhancedMeasurement } from './enhanced-measurement';

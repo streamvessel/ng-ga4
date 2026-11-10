@@ -12,6 +12,7 @@ Used in production in the [Stream Vessel](https://streamvessel.com) Chrome exten
 
 - No `gtag.js` and no external scripts
 - Automatic page views from the Angular Router
+- Opt-in Enhanced Measurement events: scrolls, outbound clicks, file downloads, site search and forms
 - Persistent client ID and 30-minute sessions, kept in step across tabs
 - Real engagement time: visible and focused time since the last hit
 - Chrome extension support (`chrome.storage`), including MV3 service-worker teardown
@@ -100,6 +101,7 @@ bootstrapApplication(AppComponent, {
 - `sendEngagementOnHide` (`boolean`, default `true`): send the engagement time left over when the page is hidden or closed. See [Engagement time](#engagement-time).
 - `engagementEventName` (`string`, default `'page_engagement'`): name of that event. An invalid or reserved name (such as `user_engagement`) logs a warning and falls back to the default.
 - `consent` (`NgGa4Consent`, default: storage granted): initial consent state. See [Consent](#consent).
+- `enhancedMeasurement` (`NgGa4EnhancedMeasurement`, default: all off): automatic `scroll`, outbound `click`, `file_download`, `view_search_results`, `form_start` and `form_submit` events. See [Enhanced measurement](#enhanced-measurement).
 
 ## Usage
 
@@ -147,6 +149,31 @@ Every hit carries `engagement_time_msec`: the time since the previous hit during
 - When the page is hidden or closed, the time left over goes out as one `page_engagement` event (see `sendEngagementOnHide`), always over the unload-safe transport. That event waits until at least 1 second has built up; anything shorter rides on the next hit. Its `page_location` is the last path you reported in a page view; with `siteUrl` set and no page view yet, it has none, so the raw page address (and anything in its query) never goes out. Without this event, a visit with a single page view would report almost no engagement.
 
 This feeds GA4's **average engagement time**. It does **not** make sessions count as engaged, so engaged sessions, engagement rate and bounce rate stay unusable ([#43](https://github.com/streamvessel/ng-ga4/issues/43)). Expect the numbers to come out close to `gtag.js`'s, possibly a little lower, since this library also stops the clock when the window loses focus.
+
+## Enhanced measurement
+
+`gtag.js` collects a handful of events on its own ("Enhanced Measurement"). This library can send the same events, with the same names and parameters, so GA4's built-in reports pick them up. Each one is off unless you turn it on, so upgrading changes nothing you send:
+
+```typescript
+provideNgGa4({
+    ...config,
+    enhancedMeasurement: {
+        scroll: true,
+        outboundClicks: true,
+        fileDownloads: true,
+        siteSearch: true,
+        forms: true
+    }
+})
+```
+
+- `scroll`: `scroll` with `percent_scrolled: 90` the first time the user scrolls the window to 90% of the page height, once per page view. A page too short to scroll, or one that scrolls inside its own container instead of the window, sends none.
+- `outboundClicks`: `click` with `link_url`, `link_domain`, `link_id`, `link_classes` and `outbound: true` for a click (or middle-click) on an `http(s)` link to another host. The page's own host and the host of `siteUrl` count as yours.
+- `fileDownloads`: `file_download` with `file_extension`, `file_name` (the link's path), `link_url`, `link_text`, `link_id` and `link_classes` for a link whose path ends in one of the extensions Google lists: `pdf`, `xls(x)`, `doc(x)`, `txt`, `rtf`, `csv`, `exe`, `key`, `pps`, `ppt(x)`, `7z`, `pkg`, `rar`, `gz`, `zip`, `avi`, `mov`, `mp4`, `mp(e)g`, `wmv`, `mid(i)`, `mp3`, `wav`, `wma`. A download to another host sends `file_download` only, not a `click` as well.
+- `siteSearch`: `view_search_results` with `search_term` after a page view whose path has a `q`, `s`, `search`, `query` or `keyword` query parameter (the first one present, in that order). The term comes from the path you reported, so a query you strip before calling `trackPageView` is never read.
+- `forms`: `form_start` the first time the user types into or changes a field of a form, once per form per page view, and `form_submit` when it is submitted, with `form_id`, `form_name`, `form_destination` and, on submit, `form_submit_text` (the button's text). Focusing a field isn't enough to count as a start. `form_destination` is only sent when the form has an `action` attribute; without one it would be the current address, unfiltered.
+
+All of these carry the same `page_location` as the hide-time engagement event (see [Engagement time](#engagement-time)), go through `trackEvent`, and stop with `setEnabled(false)`. The listeners run outside Angular's zone, so they don't trigger change detection, and are removed when the service is destroyed. Nothing is registered on the server, or in an extension's service worker, which has no page. Forms inside a shadow root aren't seen, because their `submit` and `input` events don't leave it. Video events (`video_start`, `video_progress`, `video_complete`) are not supported.
 
 ## Client ID and gtag.js
 
