@@ -21,6 +21,7 @@ NgGa4Module.forRoot({
 | Session number | `localStorage` | `chrome.storage.local` |
 | Session ID and last activity | `localStorage` | `chrome.storage.session` |
 | User properties | `localStorage` | `chrome.storage.local` |
+| Unsent requests ([outbox](delivery.md#offline-outbox)) | `localStorage` | `chrome.storage.local` |
 
 ## Service-worker teardown
 
