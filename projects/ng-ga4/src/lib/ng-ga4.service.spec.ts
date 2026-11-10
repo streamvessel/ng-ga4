@@ -1973,6 +1973,208 @@ describe('NgGa4Service', () => {
         });
     });
 
+    // --- user properties ---
+
+    describe('setUserProperties()', () => {
+        function nextBody(): any {
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            const body = req.request.body;
+            req.flush({});
+            return body;
+        }
+
+        it('omits user_properties entirely when none are set', async () => {
+            await service.init();
+            service.trackEvent('test_event');
+
+            expect(nextBody()['user_properties']).toBeUndefined();
+        });
+
+        it('sends user properties as a request-level { name: { value } } map', async () => {
+            await service.init();
+            service.setUserProperties({ plan: 'pro', seats: 5 });
+            service.trackEvent('test_event');
+
+            const body = nextBody();
+            expect(body['user_properties']).toEqual({ plan: { value: 'pro' }, seats: { value: 5 } });
+            expect(body['events'][0]['params']['plan']).toBeUndefined();
+        });
+
+        it('rides on page views too', async () => {
+            await service.init();
+            service.setUserProperties({ plan: 'pro' });
+            service.trackPageView('/home');
+
+            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
+        });
+
+        it('merges successive calls, removes a property set to null, and clears on null', async () => {
+            await service.init();
+            service.setUserProperties({ plan: 'pro', seats: 5 });
+            service.setUserProperties({ seats: null, region: 'eu' });
+            service.trackEvent('first');
+            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' }, region: { value: 'eu' } });
+
+            service.setUserProperties(null);
+            service.trackEvent('second');
+            expect(nextBody()['user_properties']).toBeUndefined();
+            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+        });
+
+        it('drops invalid properties with a dev-mode warning and keeps the valid ones', async () => {
+            spyOn(console, 'warn');
+            await service.init();
+            service.setUserProperties({ plan: 'pro', user_id: 'u1', ga_thing: 'x', too_long: 'x'.repeat(37) });
+            service.trackEvent('test_event');
+
+            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
+            const warning = (console.warn as jasmine.Spy).calls.allArgs()
+                .find(args => String(args[0]).includes('setUserProperties'));
+            expect(warning).toBeDefined();
+            expect((warning![1] as string[]).length).toBe(3);
+        });
+
+        it('persists to localStorage and restores on the next load', async () => {
+            await service.init();
+            service.setUserProperties({ plan: 'pro' });
+            expect(JSON.parse(mockLocalStorage['ga_user_properties'])).toEqual({ plan: 'pro' });
+
+            // A fresh service over the same storage — a page reload.
+            reconfigureTestBed();
+            await service.init();
+            service.trackEvent('after_reload');
+
+            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
+        });
+
+        it('ignores malformed stored properties', async () => {
+            mockLocalStorage['ga_user_properties'] = '{not json';
+            await service.init();
+            service.trackEvent('test_event');
+
+            expect(nextBody()['user_properties']).toBeUndefined();
+        });
+
+        it('applies a call made before init() on top of what was stored', async () => {
+            mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'free', region: 'eu' });
+            service.setUserProperties({ plan: 'pro' });
+            await service.init();
+            service.trackEvent('test_event');
+
+            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' }, region: { value: 'eu' } });
+            expect(JSON.parse(mockLocalStorage['ga_user_properties'])).toEqual({ plan: 'pro', region: 'eu' });
+        });
+
+        it('keeps a call made while disabled and applies it once enabled', async () => {
+            reconfigureTestBed({ enabled: false });
+            await service.init();
+            service.setUserProperties({ plan: 'pro' });
+            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+
+            service.setEnabled(true);
+            await service.init();
+            service.trackEvent('after_enable');
+
+            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
+        });
+
+        it('is inert on the server', async () => {
+            reconfigureTestBed({}, 'server');
+            expect(() => service.setUserProperties({ plan: 'pro' })).not.toThrow();
+            await service.init();
+            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+        });
+
+        it('does not throw into the caller when localStorage refuses the write', async () => {
+            await service.init();
+            spyOn(console, 'warn');
+            // Only this key: session writes on the hit path are out of scope here.
+            (localStorage.setItem as jasmine.Spy).and.callFake((key: string, value: string) => {
+                if (key === 'ga_user_properties') {
+                    throw new Error('QuotaExceededError');
+                }
+                mockLocalStorage[key] = value;
+            });
+
+            expect(() => service.setUserProperties({ plan: 'pro' })).not.toThrow();
+            service.trackEvent('test_event');
+            // Still sent from memory for the rest of the page.
+            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
+        });
+
+        it('persists to chrome.storage.local on an extension and restores from it', async () => {
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal, {});
+            reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
+            await service.init();
+
+            service.setUserProperties({ plan: 'pro' });
+            await service.flushStorage();
+            expect(chromeLocal['ga_user_properties']).toEqual({ plan: 'pro' });
+            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+
+            reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
+            await service.init();
+            service.trackEvent('after_restart');
+            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
+
+            service.setUserProperties(null);
+            await service.flushStorage();
+            expect(chromeLocal['ga_user_properties']).toBeUndefined();
+            clearChromeMock();
+        });
+
+        describe('with analyticsStorage consent', () => {
+            it('deletes stored properties on withdrawal but keeps sending them from memory', async () => {
+                await service.init();
+                service.setUserProperties({ plan: 'pro' });
+                expect(mockLocalStorage['ga_user_properties']).toBeDefined();
+
+                service.setConsent({ analyticsStorage: 'denied' });
+                expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+
+                service.setUserProperties({ region: 'eu' });
+                expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+
+                service.trackEvent('test_event');
+                expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' }, region: { value: 'eu' } });
+            });
+
+            it('deletes properties stored by a previous visit when booting denied', async () => {
+                mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'pro' });
+                reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+                await service.init();
+
+                expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+            });
+
+            it('writes them back when consent is granted again', async () => {
+                await service.init();
+                service.setUserProperties({ plan: 'pro' });
+                service.setConsent({ analyticsStorage: 'denied' });
+                service.setConsent({ analyticsStorage: 'granted' });
+
+                expect(JSON.parse(mockLocalStorage['ga_user_properties'])).toEqual({ plan: 'pro' });
+            });
+
+            it('clears them from chrome.storage.local on an extension', async () => {
+                const chromeLocal: Record<string, any> = {};
+                setupChromeMock(chromeLocal, {});
+                reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
+                await service.init();
+                service.setUserProperties({ plan: 'pro' });
+                await service.flushStorage();
+                expect(chromeLocal['ga_user_properties']).toBeDefined();
+
+                service.setConsent({ analyticsStorage: 'denied' });
+                await service.flushStorage();
+
+                expect(chromeLocal['ga_user_properties']).toBeUndefined();
+                clearChromeMock();
+            });
+        });
+    });
+
     // --- session management ---
 
     describe('session management', () => {
@@ -3380,7 +3582,7 @@ describe('NgGa4Service', () => {
 
             expect(mock.calls).toEqual([
                 'local.set:ga_session_number',
-                'local.remove:ga_client_id,ga_session_number',
+                'local.remove:ga_client_id,ga_session_number,ga_user_properties',
                 'session.remove:ga_session_id,ga_last_activity'
             ]);
             expect(mock.localStore['ga_session_number']).toBeUndefined();

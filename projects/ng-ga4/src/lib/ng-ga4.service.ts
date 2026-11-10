@@ -1,4 +1,4 @@
-import { Inject, Injectable, NgZone, OnDestroy, PLATFORM_ID } from '@angular/core';
+import { Inject, Injectable, isDevMode, NgZone, OnDestroy, PLATFORM_ID } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { isPlatformBrowser } from '@angular/common';
 import { NavigationEnd, Router } from '@angular/router';
@@ -8,6 +8,13 @@ import { ConsentState, Ga4ConsentPayload, NgGa4Consent } from './consent';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
+import {
+    Ga4UserPropertiesPayload,
+    mergeUserProperties,
+    NgGa4UserPropertyValue,
+    parseStoredUserProperties,
+    toUserPropertiesPayload
+} from './user-properties';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 
 interface Ga4Device {
@@ -44,6 +51,14 @@ export class NgGa4Service implements OnDestroy {
     private device: Ga4Device | null = null;
     private userLocation: Ga4UserLocation | null = null;
     private pendingCalls: Array<() => void> = [];
+    // Validated, merged user properties. Loaded from storage once in init();
+    // setUserProperties() calls made before that are queued in
+    // pendingUserPropertyUpdates and applied on top of what was stored, so an
+    // early call is neither lost nor overwritten by the load.
+    private userProperties: Record<string, string | number> = {};
+    private userPropertiesLoaded = false;
+    private pendingUserPropertyUpdates: Array<Record<string, NgGa4UserPropertyValue> | null> = [];
+    private readonly USER_PROPERTIES_KEY = 'ga_user_properties';
     private engagement: EngagementTimer | null = null;
     // Resolved once, in init(), by resolveEngagementEventName() — validating on
     // every flush would warn on every window switch for a misconfigured name.
@@ -129,6 +144,7 @@ export class NgGa4Service implements OnDestroy {
 
         const clientId = await this.loadOrCreateClientId();
         this.sessionNumber = await this.loadSessionNumber();
+        await this.restoreUserProperties();
         await this.restoreOrStartSession();
         await this.collectContext();
         // Assign clientId last so the `!this.clientId` guard in track* gates sends
@@ -218,6 +234,36 @@ export class NgGa4Service implements OnDestroy {
     }
 
     /**
+     * Set user-scoped properties — the equivalent of
+     * `gtag('set', 'user_properties', { ... })`. Merges into what is already
+     * set; a `null` value removes that one property, and `setUserProperties(null)`
+     * removes them all. Sent as `user_properties` on every later hit, and
+     * persisted next to the client ID so they survive a reload.
+     *
+     * Anything the Measurement Protocol would reject is dropped, with a console
+     * warning in dev mode: more than 25 properties, a name over 24 characters
+     * or not made of letters, digits and underscores, a value over 36
+     * characters, a reserved name (`user_id`, `first_open_time`, ...) or a
+     * reserved prefix (`_`, `ga_`, `google_`, `firebase_`). Each property has to
+     * be registered as a user-scoped custom dimension in GA4 to show up in
+     * reports.
+     *
+     * Calls made before `init()` has finished are applied once it does. Inert
+     * on the server.
+     */
+    setUserProperties(properties: Record<string, NgGa4UserPropertyValue> | null): void {
+        if (!this.isBrowser) {
+            return;
+        }
+        if (!this.userPropertiesLoaded) {
+            // Copied: the caller may mutate its object before init() applies it.
+            this.pendingUserPropertyUpdates.push(properties === null ? null : { ...properties });
+            return;
+        }
+        this.applyUserProperties(properties);
+    }
+
+    /**
      * Resolve once every pending `chrome.storage` write has landed.
      *
      * Await this before an MV3 event handler returns. The service worker can be
@@ -284,7 +330,7 @@ export class NgGa4Service implements OnDestroy {
         if (this.config.isExtension && chrome?.storage) {
             this.enqueueStorageWrite(
                 'chrome.storage.local.remove',
-                () => chrome.storage.local.remove(['ga_client_id', 'ga_session_number'])
+                () => chrome.storage.local.remove(['ga_client_id', 'ga_session_number', this.USER_PROPERTIES_KEY])
             );
             this.enqueueStorageWrite(
                 'chrome.storage.session.remove',
@@ -303,6 +349,7 @@ export class NgGa4Service implements OnDestroy {
         localStorage.removeItem('ga_session_id');
         localStorage.removeItem('ga_last_activity');
         localStorage.removeItem('ga_session_number');
+        localStorage.removeItem(this.USER_PROPERTIES_KEY);
         this.deleteGaCookie();
     }
 
@@ -361,6 +408,11 @@ export class NgGa4Service implements OnDestroy {
         }
         this.saveSessionNumber(this.sessionNumber);
         this.saveSessionState();
+        // Skipped when empty: withdrawal already removed the key, and an
+        // extension would otherwise queue a pointless chrome.storage remove.
+        if (Object.keys(this.userProperties).length) {
+            this.saveUserProperties();
+        }
     }
 
     ngOnDestroy(): void {
@@ -466,6 +518,7 @@ export class NgGa4Service implements OnDestroy {
             device?: Ga4Device;
             user_location?: Ga4UserLocation;
             consent?: Ga4ConsentPayload;
+            user_properties?: Ga4UserPropertiesPayload;
         } = {
             client_id: this.clientId,
             // debug_mode has to ride on every event in the batch — DebugView only
@@ -489,6 +542,11 @@ export class NgGa4Service implements OnDestroy {
         const consentPayload = this.consent.toPayload();
         if (consentPayload) {
             body.consent = consentPayload;
+        }
+        // Omitted when empty, for the same byte-identical reason as `consent`.
+        const userPropertiesPayload = toUserPropertiesPayload(this.userProperties);
+        if (userPropertiesPayload) {
+            body.user_properties = userPropertiesPayload;
         }
 
         // The validation endpoint records nothing — "events sent to the validation
@@ -1186,6 +1244,85 @@ export class NgGa4Service implements OnDestroy {
         } else {
             localStorage.setItem('ga_session_id', this.sessionId);
             localStorage.setItem('ga_last_activity', this.lastActivityTimestamp.toString());
+        }
+    }
+
+    // --- Storage: user properties (persistent — chrome.storage.local / localStorage) ---
+
+    // Guarded rather than run on every runInit(): a retried init must not reload
+    // over properties set since the first attempt got this far.
+    private async restoreUserProperties(): Promise<void> {
+        if (this.userPropertiesLoaded) {
+            return;
+        }
+        this.userProperties = await this.loadUserProperties();
+        this.userPropertiesLoaded = true;
+        const updates = this.pendingUserPropertyUpdates;
+        this.pendingUserPropertyUpdates = [];
+        for (const update of updates) {
+            this.applyUserProperties(update);
+        }
+    }
+
+    private applyUserProperties(update: Record<string, NgGa4UserPropertyValue> | null): void {
+        if (update === null) {
+            this.userProperties = {};
+        } else {
+            const { properties, problems } = mergeUserProperties(this.userProperties, update);
+            this.userProperties = properties;
+            // "Warn in dev, drop in prod": the drop happens either way, since GA4
+            // would reject the whole property; only the noise is dev-only.
+            if (problems.length && isDevMode()) {
+                console.warn('[ng-ga4] setUserProperties() dropped:', problems);
+            }
+        }
+        this.saveUserProperties();
+    }
+
+    private async loadUserProperties(): Promise<Record<string, string | number>> {
+        if (this.config.isExtension && chrome?.storage) {
+            try {
+                const result = await chrome.storage.local.get([this.USER_PROPERTIES_KEY]);
+                return parseStoredUserProperties(result[this.USER_PROPERTIES_KEY]);
+            } catch (err) {
+                console.warn('[ng-ga4] chrome.storage.local.get failed, falling back to localStorage', err);
+            }
+        }
+        try {
+            return parseStoredUserProperties(localStorage.getItem(this.USER_PROPERTIES_KEY));
+        } catch {
+            return {};
+        }
+    }
+
+    private saveUserProperties(): void {
+        if (!this.consent.storageAllowed) {
+            return;
+        }
+        // A snapshot, for the same reason saveSessionState captures its fields:
+        // the queued write must persist the state it was issued for.
+        const properties = { ...this.userProperties };
+        const empty = Object.keys(properties).length === 0;
+        if (this.config.isExtension && chrome?.storage) {
+            this.enqueueStorageWrite(
+                'chrome.storage.local (user properties)',
+                () => empty
+                    ? chrome.storage.local.remove([this.USER_PROPERTIES_KEY])
+                    : chrome.storage.local.set({ [this.USER_PROPERTIES_KEY]: properties })
+            );
+            return;
+        }
+        // Caught: this runs synchronously inside the app's own setUserProperties()
+        // call, and a quota error or Safari private mode must not throw into it.
+        // The properties are still sent from memory for the rest of this page.
+        try {
+            if (empty) {
+                localStorage.removeItem(this.USER_PROPERTIES_KEY);
+            } else {
+                localStorage.setItem(this.USER_PROPERTIES_KEY, JSON.stringify(properties));
+            }
+        } catch (err) {
+            console.warn('[ng-ga4] could not persist user properties', err);
         }
     }
 

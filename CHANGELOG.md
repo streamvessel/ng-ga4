@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `setUserProperties()`, the equivalent of `gtag('set', 'user_properties', { ... })`
+  ([#19](https://github.com/streamvessel/ng-ga4/issues/19)). Properties merge across
+  calls, go out as `user_properties` on every hit, and are stored next to the client
+  ID so they survive a reload; denying `analyticsStorage` deletes them along with it.
+  Names and values GA4 would reject are dropped, with a warning in dev mode.
+
 ## [0.2.2] - 2026-10-27
 
 ### Fixed
