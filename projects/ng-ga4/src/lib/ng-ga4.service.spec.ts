@@ -2772,6 +2772,249 @@ describe('NgGa4Service', () => {
         });
     });
 
+    describe('user_id', () => {
+        function nextHit(): TestRequest {
+            return httpMock.expectOne(r => r.url.includes('/mp/collect'));
+        }
+
+        it('omits user_id entirely by default', async () => {
+            await service.init();
+            service.trackEvent('test_event');
+
+            const req = nextHit();
+            expect('user_id' in req.request.body).toBeFalse();
+            req.flush({});
+        });
+
+        it('sends setUserId() as a top-level field, never as a param or user property', async () => {
+            await service.init();
+            service.setUserId('user-42');
+            service.trackEvent('test_event');
+
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('user-42');
+            expect(req.request.body['events'][0]['params']['user_id']).toBeUndefined();
+            expect(req.request.body['user_properties']).toBeUndefined();
+            req.flush({});
+        });
+
+        it('rides on page views too', async () => {
+            await service.init();
+            service.setUserId('user-42');
+            service.trackPageView('/page');
+
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('user-42');
+            req.flush({});
+        });
+
+        it('persists alongside the client id and restores it on the next load', async () => {
+            await service.init();
+            service.setUserId('user-42');
+            expect(mockLocalStorage['ga_user_id']).toBe('user-42');
+
+            reconfigureTestBed();
+            await service.init();
+            service.trackEvent('after_reload');
+
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('user-42');
+            req.flush({});
+        });
+
+        it('stops sending and forgets the stored id after setUserId(null)', async () => {
+            mockLocalStorage['ga_user_id'] = 'user-42';
+            await service.init();
+
+            service.setUserId(null);
+            service.trackEvent('signed_out');
+
+            const req = nextHit();
+            expect('user_id' in req.request.body).toBeFalse();
+            req.flush({});
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+        });
+
+        it('treats an empty string as signed out', async () => {
+            mockLocalStorage['ga_user_id'] = 'user-42';
+            await service.init();
+
+            service.setUserId('');
+            service.trackEvent('signed_out');
+
+            const req = nextHit();
+            expect('user_id' in req.request.body).toBeFalse();
+            req.flush({});
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+        });
+
+        it('warns and clears on a non-string value', async () => {
+            const warn = spyOn(console, 'warn');
+            await service.init();
+            service.setUserId('user-42');
+
+            service.setUserId(42 as unknown as string);
+            service.trackEvent('bad_id');
+
+            const req = nextHit();
+            expect('user_id' in req.request.body).toBeFalse();
+            req.flush({});
+            expect(warn).toHaveBeenCalledWith(jasmine.stringContaining('setUserId() expects a string'));
+        });
+
+        it('ignores a junk stored value', async () => {
+            spyOn(console, 'warn');
+            setupChromeMock({ ga_client_id: 'chrome-client-id', ga_user_id: { not: 'a string' } });
+            reconfigureTestBed({ isExtension: true });
+            await service.init();
+            service.trackEvent('test_event');
+
+            const req = nextHit();
+            expect('user_id' in req.request.body).toBeFalse();
+            req.flush({});
+        });
+
+        it('writes nothing before init() and persists the id once init() runs', async () => {
+            reconfigureTestBed({ enabled: false });
+            service.setUserId('early-user');
+            await service.init();
+            // enabled: false promises no storage writes until collection is on.
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+
+            service.setEnabled(true);
+            await service.init();
+            expect(mockLocalStorage['ga_user_id']).toBe('early-user');
+
+            service.trackEvent('after_enable');
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('early-user');
+            req.flush({});
+        });
+
+        it('lets a setUserId() call made before init() win over the stored id', async () => {
+            mockLocalStorage['ga_user_id'] = 'previous-user';
+            service.setUserId(null);
+            await service.init();
+            service.trackEvent('test_event');
+
+            const req = nextHit();
+            expect('user_id' in req.request.body).toBeFalse();
+            req.flush({});
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+        });
+
+        it('lets a setUserId() call made during init() win over the stored id', async () => {
+            const chromeLocal: Record<string, any> = { ga_client_id: 'chrome-client-id', ga_user_id: 'previous-user' };
+            setupChromeMock(chromeLocal);
+            reconfigureTestBed({ isExtension: true });
+
+            const initDone = service.init();
+            // init() is suspended on chrome.storage reads here.
+            service.setUserId('new-user');
+            await initDone;
+            service.trackEvent('test_event');
+
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('new-user');
+            req.flush({});
+            expect(chromeLocal['ga_user_id']).toBe('new-user');
+        });
+
+        it('persists to and restores from chrome.storage.local on an extension', async () => {
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal);
+            reconfigureTestBed({ isExtension: true });
+            await service.init();
+
+            service.setUserId('ext-user');
+            await service.flushStorage();
+            expect(chromeLocal['ga_user_id']).toBe('ext-user');
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+
+            reconfigureTestBed({ isExtension: true });
+            await service.init();
+            service.trackEvent('after_restart');
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('ext-user');
+            req.flush({});
+
+            service.setUserId(null);
+            await service.flushStorage();
+            expect(chromeLocal['ga_user_id']).toBeUndefined();
+        });
+
+        it('does not throw from setUserId() when storage fails', async () => {
+            const warn = spyOn(console, 'warn');
+            await service.init();
+            (localStorage.setItem as jasmine.Spy).and.throwError('QuotaExceededError');
+
+            expect(() => service.setUserId('user-42')).not.toThrow();
+            expect(warn).toHaveBeenCalled();
+
+            // Restored so the session write on the hit path (out of scope here)
+            // does not throw too.
+            (localStorage.setItem as jasmine.Spy).and.callFake((key: string, value: string) => { mockLocalStorage[key] = value; });
+            service.trackEvent('still_sent');
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('user-42');
+            req.flush({});
+        });
+
+        it('sends but does not persist the id while storage is denied', async () => {
+            reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+            await service.init();
+            service.setUserId('user-42');
+            service.trackEvent('denied');
+
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('user-42');
+            req.flush({});
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+        });
+
+        it('deletes a stored id when storage starts denied', async () => {
+            mockLocalStorage['ga_user_id'] = 'user-42';
+            reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+            await service.init();
+
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+        });
+
+        it('deletes the stored id on withdrawal and writes it back on re-grant', async () => {
+            await service.init();
+            service.setUserId('user-42');
+
+            service.setConsent({ analyticsStorage: 'denied' });
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+
+            service.setConsent({ analyticsStorage: 'granted' });
+            expect(mockLocalStorage['ga_user_id']).toBe('user-42');
+        });
+
+        it('deletes the stored id from chrome.storage.local on withdrawal', async () => {
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal);
+            reconfigureTestBed({ isExtension: true });
+            await service.init();
+            service.setUserId('ext-user');
+            await service.flushStorage();
+
+            service.setConsent({ analyticsStorage: 'denied' });
+            await service.flushStorage();
+            expect(chromeLocal['ga_user_id']).toBeUndefined();
+        });
+
+        it('does not touch storage on the server', async () => {
+            reconfigureTestBed({}, 'server');
+            service.setUserId('ssr-user');
+            await service.init();
+
+            expect(localStorage.getItem).not.toHaveBeenCalled();
+            expect(localStorage.setItem).not.toHaveBeenCalled();
+            httpMock.expectNone(() => true);
+        });
+    });
+
     describe('consent', () => {
         it('omits the consent key entirely by default', async () => {
             await service.init();
@@ -3380,7 +3623,7 @@ describe('NgGa4Service', () => {
 
             expect(mock.calls).toEqual([
                 'local.set:ga_session_number',
-                'local.remove:ga_client_id,ga_session_number',
+                'local.remove:ga_client_id,ga_session_number,ga_user_id',
                 'session.remove:ga_session_id,ga_last_activity'
             ]);
             expect(mock.localStore['ga_session_number']).toBeUndefined();
