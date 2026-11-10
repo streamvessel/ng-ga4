@@ -155,7 +155,6 @@ Measurement Protocol, and they are open work rather than permanent limits:
 | Gap | Issue |
 |---|---|
 | Enhanced measurement: scroll, outbound clicks, downloads, site search, forms | [#28](https://github.com/streamvessel/ng-ga4/issues/28) |
-| Offline outbox: retry events that failed to send | [#25](https://github.com/streamvessel/ng-ga4/issues/25) |
 
 The full list is tracked in
 [#34](https://github.com/streamvessel/ng-ga4/issues/34).
