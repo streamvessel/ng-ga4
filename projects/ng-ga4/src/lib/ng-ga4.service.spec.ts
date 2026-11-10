@@ -19,6 +19,8 @@ const MOCK_SESSION_ID = Math.floor(MOCK_TIMESTAMP / 1000).toString();
 // coincidence.
 const MOCK_CLIENT_ID_SEED = 555555555;
 const MOCK_MINTED_CLIENT_ID = `${MOCK_CLIENT_ID_SEED}.${Math.floor(MOCK_TIMESTAMP / 1000)}`;
+// The default batchDelayMs; see NgGa4Config.batchDelayMs.
+const BATCH_DELAY_MS = 300;
 
 const defaultConfig: NgGa4Config = {
     measurementId: 'G-TEST123',
@@ -2785,6 +2787,8 @@ describe('NgGa4Service', () => {
 
             await service.init();
             service.trackEvent('extension_installed', { version: '1.4.0' });
+            // Batched: nothing leaves until the flush delay elapses.
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
             // No XHR was made — afterEach httpMock.verify() also enforces this.
             httpMock.expectNone(() => true);
@@ -2806,6 +2810,8 @@ describe('NgGa4Service', () => {
 
             await service.init();
             service.trackPageView('/home');
+            // Batched: nothing leaves until the flush delay elapses.
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
             httpMock.expectNone(() => true);
             expect(beaconCalls.length).toBe(1);
@@ -2819,6 +2825,8 @@ describe('NgGa4Service', () => {
 
             await service.init();
             service.trackEvent('file_download');
+            // Batched: nothing leaves until the flush delay elapses.
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
             httpMock.expectNone(() => true);
             expect(beaconSpy).toHaveBeenCalled();
@@ -2839,6 +2847,8 @@ describe('NgGa4Service', () => {
 
             await service.init();
             service.trackEvent('file_copy_move');
+            // Batched: nothing leaves until the flush delay elapses.
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
             httpMock.expectNone(() => true);
             expect(throwingBeacon).toHaveBeenCalled();
@@ -2852,6 +2862,8 @@ describe('NgGa4Service', () => {
 
             await service.init();
             service.trackEvent('file_upload');
+            // Batched: nothing leaves until the flush delay elapses.
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
             httpMock.expectNone(() => true);
             expect(fetchSpy).toHaveBeenCalled();
@@ -2864,6 +2876,8 @@ describe('NgGa4Service', () => {
 
             await service.init();
             service.trackEvent('file_delete');
+            // Batched: nothing leaves until the flush delay elapses.
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.body.events[0].name).toBe('file_delete');
@@ -2876,6 +2890,8 @@ describe('NgGa4Service', () => {
 
             await service.init();
             service.trackEvent('x');
+            // Batched: nothing leaves until the flush delay elapses.
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
             // The recorded hit goes out on the configured transport, so debug mode
             // exercises the same delivery path production will.
@@ -2887,6 +2903,229 @@ describe('NgGa4Service', () => {
             // Validation is a separate XHR side channel, not a replacement.
             const req = httpMock.expectOne((r) => r.url.includes('debug/mp/collect'));
             req.flush({ validationMessages: [] });
+        });
+    });
+
+    // --- batching (#24) ---
+
+    describe('batching', () => {
+        let beacons: any[];
+
+        function installBeacon(): void {
+            beacons = [];
+            spyOn<any>(service, 'trySendBeacon').and.callFake((url: string, payload: string) => {
+                beacons.push(JSON.parse(payload));
+                return true;
+            });
+        }
+
+        async function setup(config: Partial<NgGa4Config> = {}): Promise<void> {
+            reconfigureTestBed({ transport: 'beacon', ...config });
+            installBeacon();
+            await service.init();
+        }
+
+        const names = (b: any) => b.events.map((e: any) => e.name);
+
+        it('sends events tracked within the delay as one request, in order, each with its own time', async () => {
+            await setup();
+
+            service.trackPageView('/a');
+            jasmine.clock().tick(100);
+            service.trackEvent('one');
+            jasmine.clock().tick(100);
+            service.trackEvent('two');
+            expect(beacons.length).toBe(0);
+
+            jasmine.clock().tick(BATCH_DELAY_MS);
+
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['page_view', 'one', 'two']);
+            expect(beacons[0].events.map((e: any) => e.timestamp_micros))
+                .toEqual([0, 100, 200].map(d => (MOCK_TIMESTAMP + d) * 1000));
+            expect(beacons[0].timestamp_micros).toBe(MOCK_TIMESTAMP * 1000);
+        });
+
+        it('waits the delay from the first queued event, not the last', async () => {
+            await setup();
+
+            service.trackEvent('one');
+            jasmine.clock().tick(BATCH_DELAY_MS - 1);
+            service.trackEvent('two');
+            expect(beacons.length).toBe(0);
+            jasmine.clock().tick(1);
+
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['one', 'two']);
+        });
+
+        it('sends at once when a batch reaches 25 events, starting a new one for the 26th', async () => {
+            await setup();
+
+            for (let i = 0; i < 25; i++) {
+                service.trackEvent(`e${i}`);
+            }
+            expect(beacons.length).toBe(1);
+            expect(beacons[0].events.length).toBe(25);
+
+            service.trackEvent('e25');
+            expect(beacons.length).toBe(1);
+            jasmine.clock().tick(BATCH_DELAY_MS);
+            expect(beacons.length).toBe(2);
+            expect(names(beacons[1])).toEqual(['e25']);
+        });
+
+        it('flushes when the page is hidden', async () => {
+            await setup();
+            service.trackEvent('before_hide');
+
+            pageEngaged = false;
+            document.dispatchEvent(new Event('visibilitychange'));
+
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['before_hide']);
+        });
+
+        it('flushes on pagehide', async () => {
+            await setup();
+            service.trackEvent('before_pagehide');
+
+            window.dispatchEvent(new Event('pagehide'));
+
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['before_pagehide']);
+        });
+
+        it('does not flush when the page is shown again', async () => {
+            await setup();
+            pageEngaged = false;
+            document.dispatchEvent(new Event('visibilitychange'));
+            pageEngaged = true;
+            service.trackEvent('queued');
+
+            document.dispatchEvent(new Event('visibilitychange'));
+
+            expect(beacons.length).toBe(0);
+            jasmine.clock().tick(BATCH_DELAY_MS);
+            expect(beacons.length).toBe(1);
+        });
+
+        it('sends the hide-time engagement event in the same request as what was queued', async () => {
+            await setup({ batchDelayMs: 60_000 });
+            service.trackEvent('queued');
+            jasmine.clock().tick(5000);
+
+            pageEngaged = false;
+            document.dispatchEvent(new Event('visibilitychange'));
+
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['queued', 'page_engagement']);
+            expect(beacons[0].events[1].params.engagement_time_msec).toBe(5000);
+        });
+
+        it('flushes when the service is destroyed', async () => {
+            await setup();
+            service.trackEvent('before_destroy');
+
+            service.ngOnDestroy();
+
+            expect(beacons.length).toBe(1);
+            jasmine.clock().tick(BATCH_DELAY_MS);
+            expect(beacons.length).toBe(1);
+        });
+
+        it('keeps each event under the consent it was tracked with', async () => {
+            await setup();
+            service.trackEvent('granted_one');
+            service.setConsent({ adUserData: 'denied' });
+            service.trackEvent('denied_one');
+            jasmine.clock().tick(BATCH_DELAY_MS);
+
+            expect(beacons.length).toBe(2);
+            expect(names(beacons[0])).toEqual(['granted_one']);
+            expect(beacons[0].consent).toBeUndefined();
+            expect(names(beacons[1])).toEqual(['denied_one']);
+            expect(beacons[1].consent.ad_user_data).toBe('DENIED');
+        });
+
+        it('honours batchDelayMs', async () => {
+            await setup({ batchDelayMs: 2000 });
+            service.trackEvent('x');
+
+            jasmine.clock().tick(1999);
+            expect(beacons.length).toBe(0);
+            jasmine.clock().tick(1);
+            expect(beacons.length).toBe(1);
+        });
+
+        it('still batches calls made in the same task with batchDelayMs: 0', async () => {
+            await setup({ batchDelayMs: 0 });
+            service.trackEvent('a');
+            service.trackEvent('b');
+            expect(beacons.length).toBe(0);
+
+            jasmine.clock().tick(0);
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['a', 'b']);
+        });
+
+        it('falls back to the default delay for an invalid batchDelayMs', async () => {
+            await setup({ batchDelayMs: -5 });
+            service.trackEvent('x');
+
+            jasmine.clock().tick(BATCH_DELAY_MS - 1);
+            expect(beacons.length).toBe(0);
+            jasmine.clock().tick(1);
+            expect(beacons.length).toBe(1);
+        });
+
+        it('schedules the flush outside the Angular zone', async () => {
+            await setup();
+            const zone = TestBed.inject(NgZone);
+            const outside = spyOn(zone, 'runOutsideAngular').and.callThrough();
+
+            zone.run(() => service.trackEvent('x'));
+
+            expect(outside).toHaveBeenCalled();
+            jasmine.clock().tick(BATCH_DELAY_MS);
+            expect(beacons.length).toBe(1);
+        });
+
+        it('validates each batch once in debug mode, as the batch GA4 receives', async () => {
+            await setup({ debug: true });
+            service.trackEvent('a');
+            service.trackEvent('b');
+            httpMock.expectNone((r) => r.url.includes('debug/mp/collect'));
+
+            jasmine.clock().tick(BATCH_DELAY_MS);
+
+            const validation = httpMock.expectOne((r) => r.url.includes('debug/mp/collect'));
+            expect(names(validation.request.body)).toEqual(['a', 'b']);
+            expect(validation.request.body.events.every((e: any) => e.params.debug_mode === 1)).toBeTrue();
+            validation.flush({ validationMessages: [] });
+        });
+
+        // The escape hatch: one call, one request, through HttpClient, now.
+        it('does not batch under transport: xhr', async () => {
+            reconfigureTestBed({ transport: 'xhr' });
+            await service.init();
+
+            service.trackEvent('a');
+            service.trackEvent('b');
+
+            const reqs = httpMock.match((r) => r.url.includes('mp/collect'));
+            expect(reqs.map(r => names(r.request.body))).toEqual([['a'], ['b']]);
+            reqs.forEach(r => r.flush('', { status: 204, statusText: 'No Content' }));
+        });
+
+        it('schedules nothing on the server', async () => {
+            reconfigureTestBed({ transport: 'beacon' }, 'server');
+            await service.init();
+
+            service.trackEvent('x');
+
+            expect((service as any).batchTimer).toBeNull();
+            expect((service as any).batcher.size).toBe(0);
         });
     });
 

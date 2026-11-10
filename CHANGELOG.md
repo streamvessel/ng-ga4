@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window is dropped rather than sent, since GA4 would re-stamp it to exactly 72
   hours ago; a timestamp in the future is clamped to the send time.
   ([#21](https://github.com/streamvessel/ng-ga4/issues/21))
+- Events are batched. Under the default `'beacon'` transport, calls made within
+  `batchDelayMs` (new option, default 300 ms) of each other go out as one
+  request of up to 25 events, the Measurement Protocol's limit, instead of one
+  request (and CORS preflight) each. A batch is sent at once when it is full, when
+  the page is hidden or torn down (`visibilitychange` → hidden, `pagehide`), and
+  when the service is destroyed. Events whose request-level fields differ — a
+  consent change between two calls, say — are never merged, and a batch stays
+  under the 64 KiB `sendBeacon` quota. In debug mode each batch is validated as
+  sent. `transport: 'xhr'` is unchanged: one request per call, sent immediately.
+  ([#24](https://github.com/streamvessel/ng-ga4/issues/24))
 
 ## [0.2.2] - 2026-10-27
 

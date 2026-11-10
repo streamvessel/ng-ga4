@@ -10,6 +10,7 @@ import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 import { clampToNow, isWithinBackdateWindow, toTimestampMicros } from './timestamp';
+import { EventBatcher } from './event-batcher';
 
 interface Ga4Device {
     language?: string;
@@ -32,6 +33,18 @@ interface Ga4Event {
     // which every track path reaches synchronously, so the two only differ for a
     // call replayed from pendingCalls — see replayTimestampMicros.
     timestamp_micros?: number;
+}
+
+// One Measurement Protocol request. Everything except `events` and
+// `timestamp_micros` is the envelope EventBatcher groups by, so a new
+// request-level field added here is batched correctly with no other change.
+interface Ga4RequestBody {
+    client_id: string;
+    timestamp_micros: number;
+    events: Ga4Event[];
+    device?: Ga4Device;
+    user_location?: Ga4UserLocation;
+    consent?: Ga4ConsentPayload;
 }
 
 @Injectable()
@@ -88,6 +101,11 @@ export class NgGa4Service implements OnDestroy {
     private enabled: boolean;
     private initPromise: Promise<void> | null = null;
     private storageWrites: Promise<void> = Promise.resolve();
+    // Events waiting to go out together (#24). Only the 'beacon' transport
+    // batches; 'xhr' sends each call as its own request, as it always has.
+    private readonly batcher = new EventBatcher<Ga4RequestBody>();
+    private batchTimer: ReturnType<typeof setTimeout> | null = null;
+    private readonly DEFAULT_BATCH_DELAY_MS = 300;
 
     constructor(
         private http: HttpClient,
@@ -379,6 +397,9 @@ export class NgGa4Service implements OnDestroy {
     }
 
     ngOnDestroy(): void {
+        // Whatever is still waiting was collected while enabled; an injector torn
+        // down (an MV3 popup closing, an app destroyed) should not take it along.
+        this.flushQueue();
         this.routerSubscription?.unsubscribe();
         if (this.visibilityListener && typeof document !== 'undefined') {
             document.removeEventListener('visibilitychange', this.visibilityListener);
@@ -486,8 +507,6 @@ export class NgGa4Service implements OnDestroy {
         events: Ga4Event[],
         forceBeacon = false
     ): void {
-        const url = this.collectUrl(this.GA4_ENDPOINT);
-
         // Without a timestamp GA4 stamps each event with its arrival time, which
         // is wrong for anything delayed between the call and the request.
         const now = Date.now();
@@ -501,14 +520,7 @@ export class NgGa4Service implements OnDestroy {
             return;
         }
 
-        const body: {
-            client_id: string;
-            timestamp_micros: number;
-            events: Ga4Event[];
-            device?: Ga4Device;
-            user_location?: Ga4UserLocation;
-            consent?: Ga4ConsentPayload;
-        } = {
+        const body: Ga4RequestBody = {
             client_id: this.clientId,
             // Request-level, for the whole batch. Each event also carries its own,
             // which takes precedence, so a batch spanning time keeps each event's
@@ -537,17 +549,79 @@ export class NgGa4Service implements OnDestroy {
             body.consent = consentPayload;
         }
 
+        // forceBeacon is for sends as the page goes away, where XHR would be aborted
+        // and the hit lost — losing the event outright is worse than skipping interceptors.
+        // 'xhr' is also the escape hatch from batching: one call, one request,
+        // through the app's interceptors, exactly as before #24.
+        if (this.config.transport === 'xhr' && !forceBeacon) {
+            this.dispatch(body, 'xhr');
+            return;
+        }
+
+        // Batched: a route change plus a few custom events becomes one request
+        // instead of one (plus a CORS preflight) each. A full batch, or a send as
+        // the page goes away, goes immediately; anything else waits briefly for
+        // company.
+        const full = this.batcher.add(body);
+        if (full || forceBeacon) {
+            this.flushQueue();
+        } else {
+            this.scheduleFlush();
+        }
+    }
+
+    // Sends everything queued, now, over the unload-safe chain. Safe to call
+    // with nothing queued, and from an unload handler.
+    private flushQueue(): void {
+        this.cancelScheduledFlush();
+        for (const body of this.batcher.take()) {
+            this.dispatch(body, 'beacon');
+        }
+    }
+
+    private scheduleFlush(): void {
+        if (this.batchTimer !== null) {
+            return;
+        }
+        // Outside Angular: a pending zone macrotask keeps the app "unstable",
+        // which stalls whenStable() and an app's own idle detection for the
+        // length of the delay, and the callback touches no view state anyway.
+        this.zone.runOutsideAngular(() => {
+            this.batchTimer = setTimeout(() => {
+                this.batchTimer = null;
+                this.flushQueue();
+            }, this.resolveBatchDelay());
+        });
+    }
+
+    private cancelScheduledFlush(): void {
+        if (this.batchTimer !== null) {
+            clearTimeout(this.batchTimer);
+            this.batchTimer = null;
+        }
+    }
+
+    private resolveBatchDelay(): number {
+        const configured = this.config.batchDelayMs;
+        return typeof configured === 'number' && Number.isFinite(configured) && configured >= 0
+            ? configured
+            : this.DEFAULT_BATCH_DELAY_MS;
+    }
+
+    // One request on the wire: a single event under 'xhr', a batch otherwise.
+    private dispatch(body: Ga4RequestBody, transport: 'beacon' | 'xhr'): void {
+        const url = this.collectUrl(this.GA4_ENDPOINT);
+
         // The validation endpoint records nothing — "events sent to the validation
         // server don't show up in reports" — so it can only ever be a side channel.
         // The real hit below still goes to production, over the configured transport,
-        // so debug traffic exercises the same path production will.
+        // so debug traffic exercises the same path production will. Validated per
+        // request, so a batch is validated as the batch GA4 actually receives.
         if (this.config.debug) {
             this.sendForValidation(body);
         }
 
-        // forceBeacon is for sends as the page goes away, where XHR would be aborted
-        // and the hit lost — losing the event outright is worse than skipping interceptors.
-        if (this.config.transport === 'xhr' && !forceBeacon) {
+        if (transport === 'xhr') {
             this.sendViaXhr(url, body);
             return;
         }
@@ -902,6 +976,10 @@ export class NgGa4Service implements OnDestroy {
                 // on the way back in.
                 if (this.isPageHidden()) {
                     this.flushEngagement();
+                    // A hidden page may never run JavaScript again (bfcache,
+                    // discard, a mobile tab killed in the background), so the
+                    // batch timer cannot be relied on to fire.
+                    this.flushQueue();
                 }
             };
             // blur stops the clock but deliberately does not flush: sending on every
@@ -929,6 +1007,7 @@ export class NgGa4Service implements OnDestroy {
             this.pagehideListener = () => {
                 this.setEngagementActive(false);
                 this.flushEngagement();
+                this.flushQueue();
             };
             document.addEventListener('visibilitychange', this.visibilityListener);
             window.addEventListener('focus', this.focusListener);
