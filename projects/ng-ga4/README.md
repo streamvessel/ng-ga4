@@ -138,6 +138,7 @@ Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](https://github.com
 - [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md)
 - [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md): setup, service-worker teardown, sessions across tabs
 - [Engagement time and debug mode](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md)
+- [Delivery](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/delivery.md): batching
 - [Event validation](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/event-validation.md): the event and parameter name rules `trackEvent()` checks
 - [Limitations](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/limitations.md): what the Measurement Protocol can't do, with measurements
 

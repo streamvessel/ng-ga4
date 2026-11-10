@@ -38,8 +38,24 @@ export interface NgGa4Config {
      *   but in-flight requests are aborted when the document unloads.
      * The hide-time engagement event always takes the 'beacon' chain. In debug mode the
      * validation request is a separate HttpClient call.
+     *
+     * Only 'beacon' batches (see `batchDelayMs`); 'xhr' sends every call as its own
+     * request, immediately, as earlier versions did.
      */
     transport?: 'beacon' | 'xhr';
+
+    /**
+     * How long, in milliseconds, an event waits for others to share its request.
+     * Default `300`. The Measurement Protocol takes up to 25 events per request, so a
+     * route change plus a few custom events goes out as one request rather than one
+     * each (and, with an `application/json` body, a CORS preflight each).
+     *
+     * A batch is sent sooner when it reaches 25 events, when the page is hidden or
+     * torn down (`visibilitychange` → hidden, `pagehide`), and when the service is
+     * destroyed. `0` still batches calls made in the same task. A negative or
+     * non-numeric value falls back to the default. Ignored under `transport: 'xhr'`.
+     */
+    batchDelayMs?: number;
     /**
      * Where the client ID comes from on web. Ignored when `isExtension` is true —
      * there is no `_ga` cookie on a `chrome-extension://` origin.
