@@ -155,7 +155,7 @@ Measurement Protocol, and they are open work rather than permanent limits:
 | `user_properties` | [#19](https://github.com/streamvessel/ng-ga4/issues/19) |
 | Event and parameter name validation in dev | [#29](https://github.com/streamvessel/ng-ga4/issues/29) |
 | Enhanced measurement: scroll, outbound clicks, downloads, site search, forms | [#28](https://github.com/streamvessel/ng-ga4/issues/28) |
-| Event batching, offline outbox, `flush()` | [#24](https://github.com/streamvessel/ng-ga4/issues/24), [#25](https://github.com/streamvessel/ng-ga4/issues/25), [#26](https://github.com/streamvessel/ng-ga4/issues/26) |
+| Offline outbox, `flush()` | [#25](https://github.com/streamvessel/ng-ga4/issues/25), [#26](https://github.com/streamvessel/ng-ga4/issues/26) |
 
 The full list is tracked in
 [#34](https://github.com/streamvessel/ng-ga4/issues/34).

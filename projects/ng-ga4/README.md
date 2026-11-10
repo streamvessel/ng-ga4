@@ -93,7 +93,8 @@ bootstrapApplication(AppComponent, {
 
 - `siteUrl` (`string`): base of `page_location`, e.g. `https://example.com`. Needed in extensions, where the page address is `chrome-extension://…`. Without it, `page_location` is the page's full address.
 - `appVersion` (`string`): sent as `app_version` on every event.
-- `transport` (`'beacon' | 'xhr'`, default `'beacon'`): `'beacon'` tries `sendBeacon`, then `fetch` with `keepalive`, then XHR, so hits survive the page closing. `'xhr'` sends through `HttpClient` and your interceptors, but a request still in flight when the page closes is lost.
+- `transport` (`'beacon' | 'xhr'`, default `'beacon'`): `'beacon'` tries `sendBeacon`, then `fetch` with `keepalive`, then XHR, so hits survive the page closing, and batches events (see [Batching](#batching)). `'xhr'` sends each call as its own request, at once, through `HttpClient` and your interceptors, but a request still in flight when the page closes is lost.
+- `batchDelayMs` (`number`, default `300`): how long an event waits for others to share its request. See [Batching](#batching).
 - `debug` (`boolean`, default `false`): see [Debug mode](#debug-mode).
 - `clientIdSource` (`'auto' | 'cookie' | 'storage'`, default `'auto'`): where the web client ID comes from. See [Client ID and gtag.js](#client-id-and-gtagjs). An unknown value logs a warning and falls back to `'auto'`, which reads `_ga`. Ignored in extensions.
 - `writeGaCookie` (`boolean` or `NgGa4CookieOptions`, default `false`): write a `_ga` cookie when there is no valid one (web only). See [Client ID and gtag.js](#client-id-and-gtagjs).
@@ -147,6 +148,16 @@ Every hit carries `engagement_time_msec`: the time since the previous hit during
 - When the page is hidden or closed, the time left over goes out as one `page_engagement` event (see `sendEngagementOnHide`), always over the unload-safe transport. That event waits until at least 1 second has built up; anything shorter rides on the next hit. Its `page_location` is the last path you reported in a page view; with `siteUrl` set and no page view yet, it has none, so the raw page address (and anything in its query) never goes out. Without this event, a visit with a single page view would report almost no engagement.
 
 This feeds GA4's **average engagement time**. It does **not** make sessions count as engaged, so engaged sessions, engagement rate and bounce rate stay unusable ([#43](https://github.com/streamvessel/ng-ga4/issues/43)). Expect the numbers to come out close to `gtag.js`'s, possibly a little lower, since this library also stops the clock when the window loses focus.
+
+## Batching
+
+With the default `'beacon'` transport, events are held for `batchDelayMs` (300 ms by default) and sent together, up to 25 per request — the Measurement Protocol's limit. A route change that also fires three custom events is one request, not four. Each event keeps the time it was tracked (`timestamp_micros`), so the wait doesn't change what GA4 records.
+
+A batch goes out early when it reaches 25 events, when the page is hidden or closed, and when the service is destroyed. Events are only combined when everything outside the events themselves (client ID, consent, device) matches, so a `setConsent()` between two calls starts a new request.
+
+In an MV3 service worker there's no page to hide, so a batch relies on its timer; a worker stopped inside that window loses it. Keep `batchDelayMs` short there.
+
+`transport: 'xhr'` doesn't batch: every call is its own request, sent at once.
 
 ## Client ID and gtag.js
 
