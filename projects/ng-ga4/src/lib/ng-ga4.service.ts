@@ -5,6 +5,7 @@ import { NavigationEnd, Router } from '@angular/router';
 import { filter, Subscription } from 'rxjs';
 import { NG_GA4_CONFIG, NgGa4Config, NgGa4CookieOptions } from './ng-ga4.config';
 import { ConsentState, Ga4ConsentPayload, NgGa4Consent } from './consent';
+import { regionFromCountry } from './country-region';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
@@ -22,6 +23,8 @@ interface Ga4Device {
 
 interface Ga4UserLocation {
     country_id?: string;
+    continent_id?: string;
+    subcontinent_id?: string;
 }
 
 @Injectable()
@@ -725,7 +728,7 @@ export class NgGa4Service implements OnDestroy {
 
     private collectUserLocation(): Ga4UserLocation | null {
         const country = countryFromTimeZone(this.getTimeZone());
-        return country ? { country_id: country } : null;
+        return country ? { country_id: country, ...regionFromCountry(country) } : null;
     }
 
     private async collectDevice(): Promise<Ga4Device | null> {

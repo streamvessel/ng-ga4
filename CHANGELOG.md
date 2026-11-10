@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `user_location` now carries `continent_id` and `subcontinent_id` (UN M49) next to
+  `country_id`, looked up from the country the time zone resolves to. GA4's Continent
+  and Subcontinent dimensions used to read `(not set)`
+  ([#22](https://github.com/streamvessel/ng-ga4/issues/22)).
+
 ## [0.2.2] - 2026-10-27
 
 ### Fixed

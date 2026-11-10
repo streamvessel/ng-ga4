@@ -29,7 +29,8 @@ This library sends data to GA4 straight from your code, without Google's trackin
 - **New users:** always 0.
 - **Engaged sessions, engagement rate and bounce rate:** always 0, so you can't use them.
 - **Age, gender, interests, and Google Ads remarketing:** no data.
-- **City and region:** no data. The country still shows, guessed from the browser's time zone.
+- **City and region:** no data. The country still shows, guessed from the browser's time zone,
+  and so do the continent and subcontinent that follow from it.
 
 These work as usual: events, page views, active users and average engagement time.
 
