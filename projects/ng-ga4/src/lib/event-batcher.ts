@@ -32,8 +32,8 @@ export interface BatchableBody {
  * when to `take()`; the outbox (#25) persists and replays what it takes, so
  * a batch is always a complete, sendable request body.
  */
-export class EventBatcher<B extends BatchableBody> {
-    private batches: Array<{ body: B; key: string; bytes: number }> = [];
+export class EventBatcher<B extends BatchableBody, T = never> {
+    private batches: Array<{ body: B; key: string; bytes: number; tickets: T[] }> = [];
 
     constructor(
         private readonly maxEvents = MP_MAX_EVENTS_PER_REQUEST,
@@ -48,8 +48,13 @@ export class EventBatcher<B extends BatchableBody> {
     /**
      * Queue a body. Returns `true` when a batch is now full, which is the
      * caller's signal to flush without waiting for its timer.
+     *
+     * `ticket` is opaque caller data that travels with the body into whichever
+     * batch it lands in — the service uses it to settle each call's
+     * `delivered` promise once its batch's request does.
      */
-    add(body: B): boolean {
+    add(body: B, ticket?: T): boolean {
+        const tickets = ticket === undefined ? [] : [ticket];
         const key = envelopeKey(body);
         const bytes = jsonBytes(body);
         // Only the newest batch is a merge candidate: merging into an older one
@@ -64,8 +69,9 @@ export class EventBatcher<B extends BatchableBody> {
         ) {
             last.body = merge(last.body, body);
             last.bytes = jsonBytes(last.body);
+            last.tickets.push(...tickets);
         } else {
-            this.batches.push({ body: { ...body, events: [...body.events] }, key, bytes });
+            this.batches.push({ body: { ...body, events: [...body.events] }, key, bytes, tickets });
         }
         const newest = this.batches[this.batches.length - 1];
         return newest.body.events.length >= this.maxEvents;
@@ -73,9 +79,14 @@ export class EventBatcher<B extends BatchableBody> {
 
     /** Remove and return every queued batch, oldest first. */
     take(): B[] {
-        const taken = this.batches.map(batch => batch.body);
+        return this.drain().map(batch => batch.body);
+    }
+
+    /** As `take()`, with the tickets of the calls merged into each batch. */
+    drain(): Array<{ body: B; tickets: T[] }> {
+        const drained = this.batches.map(({ body, tickets }) => ({ body, tickets }));
         this.batches = [];
-        return taken;
+        return drained;
     }
 }
 

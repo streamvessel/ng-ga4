@@ -27,6 +27,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under the 64 KiB `sendBeacon` quota. In debug mode each batch is validated as
   sent. `transport: 'xhr'` is unchanged: one request per call, sent immediately.
   ([#24](https://github.com/streamvessel/ng-ga4/issues/24))
+- `flush()` on `NgGa4Service`: sends every queued event at once and resolves when
+  their requests have settled and pending `chrome.storage` writes have landed.
+  Calls made while `init()` is still running are included. It never rejects.
+  Await it before an MV3 event handler returns or an extension popup closes. The
+  batch goes out before the first `await`, so calling it without waiting works
+  in an unload handler too.
+  ([#26](https://github.com/streamvessel/ng-ga4/issues/26))
+- `trackEvent()` and `trackPageView()` return an `NgGa4TrackResult`.
+  Its `status` says synchronously what happened to the call: `'accepted'`,
+  `'deferred'` (held until `init()` finishes), `'disabled'`, `'uninitialized'`
+  or `'server'`. Its `delivered` promise resolves to `'sent'`, `'failed'`
+  (a network error, or a non-2xx from something between you and GA4) or
+  `'dropped'`, and never rejects. Existing call sites that ignore the return
+  value are unaffected. New exported types: `NgGa4TrackResult`,
+  `NgGa4TrackStatus`, `NgGa4Delivery`.
+  ([#26](https://github.com/streamvessel/ng-ga4/issues/26))
 
 ## [0.2.2] - 2026-10-27
 

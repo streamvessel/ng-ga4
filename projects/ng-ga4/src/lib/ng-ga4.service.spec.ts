@@ -3129,6 +3129,276 @@ describe('NgGa4Service', () => {
         });
     });
 
+    // --- flush() and track results (#26) ---
+
+    describe('track results', () => {
+        const ok = { status: 204, statusText: 'No Content' };
+
+        it('reports accepted, then sent once the request succeeds (xhr)', async () => {
+            await service.init();
+
+            const result = service.trackEvent('x');
+            expect(result.status).toBe('accepted');
+
+            httpMock.expectOne((r) => r.url.includes('mp/collect')).flush('', ok);
+            expect(await result.delivered).toBe('sent');
+        });
+
+        it('reports failed on a network error, without rejecting', async () => {
+            await service.init();
+            spyOn(console, 'error');
+
+            const result = service.trackPageView('/a');
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .error(new ProgressEvent('error'), { status: 0, statusText: 'Unknown Error' });
+
+            expect(await result.delivered).toBe('failed');
+        });
+
+        it('reports disabled, with delivery dropped', async () => {
+            reconfigureTestBed({ enabled: false });
+            await service.init();
+
+            const result = service.trackEvent('x');
+
+            expect(result.status).toBe('disabled');
+            expect(await result.delivered).toBe('dropped');
+        });
+
+        it('reports uninitialized for a call made before init() starts', async () => {
+            const result = service.trackEvent('x');
+
+            expect(result.status).toBe('uninitialized');
+            expect(await result.delivered).toBe('dropped');
+        });
+
+        it('reports server on the server platform', async () => {
+            reconfigureTestBed({}, 'server');
+
+            const result = service.trackPageView('/a');
+
+            expect(result.status).toBe('server');
+            expect(await result.delivered).toBe('dropped');
+        });
+
+        it('reports deferred during init(), then settles with the replayed call', async () => {
+            let resolveContext!: () => void;
+            spyOn<any>(service, 'collectContext').and.returnValue(new Promise<void>(r => { resolveContext = r; }));
+            const initPromise = service.init();
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+
+            const result = service.trackEvent('during_init');
+            expect(result.status).toBe('deferred');
+
+            resolveContext();
+            await initPromise;
+            httpMock.expectOne((r) => r.url.includes('mp/collect')).flush('', ok);
+
+            expect(await result.delivered).toBe('sent');
+        });
+
+        it('settles a deferred call as dropped when collection is disabled before init() finishes', async () => {
+            let resolveContext!: () => void;
+            spyOn<any>(service, 'collectContext').and.returnValue(new Promise<void>(r => { resolveContext = r; }));
+            const initPromise = service.init();
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+
+            const result = service.trackEvent('during_init');
+            service.setEnabled(false);
+            resolveContext();
+            await initPromise;
+
+            expect(await result.delivered).toBe('dropped');
+        });
+
+        describe('over the beacon chain', () => {
+            beforeEach(() => {
+                reconfigureTestBed({ transport: 'beacon' });
+            });
+
+            it('reports sent once sendBeacon accepts the batch', async () => {
+                spyOn<any>(service, 'trySendBeacon').and.returnValue(true);
+                await service.init();
+
+                const a = service.trackEvent('a');
+                const b = service.trackEvent('b');
+                jasmine.clock().tick(BATCH_DELAY_MS);
+
+                expect(await a.delivered).toBe('sent');
+                expect(await b.delivered).toBe('sent');
+            });
+
+            it('stays pending until the batch is actually sent', async () => {
+                spyOn<any>(service, 'trySendBeacon').and.returnValue(true);
+                await service.init();
+                let settled = false;
+
+                service.trackEvent('a').delivered.then(() => { settled = true; });
+                for (let i = 0; i < 10; i++) { await Promise.resolve(); }
+                expect(settled).toBeFalse();
+
+                jasmine.clock().tick(BATCH_DELAY_MS);
+                for (let i = 0; i < 10; i++) { await Promise.resolve(); }
+                expect(settled).toBeTrue();
+            });
+
+            it('reports failed when the fetch(keepalive) fallback rejects', async () => {
+                spyOn<any>(service, 'getNavigator').and.returnValue({});
+                spyOn<any>(service, 'getFetch').and.returnValue(() => Promise.reject(new TypeError('Failed to fetch')));
+                spyOn(console, 'error');
+                await service.init();
+
+                const result = service.trackEvent('a');
+                jasmine.clock().tick(BATCH_DELAY_MS);
+
+                expect(await result.delivered).toBe('failed');
+            });
+
+            // Not GA4 itself, which answers 2xx to anything: a proxy or blocker.
+            it('reports failed when fetch(keepalive) gets a non-2xx response', async () => {
+                spyOn<any>(service, 'getNavigator').and.returnValue({});
+                spyOn<any>(service, 'getFetch').and.returnValue(() => Promise.resolve({ ok: false, status: 403, statusText: 'Forbidden' }));
+                const errorSpy = spyOn(console, 'error');
+                await service.init();
+
+                const result = service.trackEvent('a');
+                jasmine.clock().tick(BATCH_DELAY_MS);
+
+                expect(await result.delivered).toBe('failed');
+                expect(errorSpy.calls.mostRecent().args[1].status).toBe(403);
+            });
+
+            it('reports sent when fetch(keepalive) succeeds', async () => {
+                spyOn<any>(service, 'getNavigator').and.returnValue({});
+                spyOn<any>(service, 'getFetch').and.returnValue(() => Promise.resolve({ ok: true, status: 204 }));
+                await service.init();
+
+                const result = service.trackEvent('a');
+                jasmine.clock().tick(BATCH_DELAY_MS);
+
+                expect(await result.delivered).toBe('sent');
+            });
+        });
+    });
+
+    describe('flush()', () => {
+        const ok = { status: 204, statusText: 'No Content' };
+
+        // Falls through sendBeacon and fetch to XHR, so the test controls when
+        // the request settles.
+        function routeBeaconChainToXhr(): void {
+            spyOn<any>(service, 'getNavigator').and.returnValue({});
+            spyOn<any>(service, 'getFetch').and.returnValue(undefined);
+        }
+
+        async function settledWithin(promise: Promise<unknown>): Promise<boolean> {
+            let settled = false;
+            promise.then(() => { settled = true; });
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+            return settled;
+        }
+
+        it('sends the queued batch at once, without waiting for the timer', async () => {
+            reconfigureTestBed({ transport: 'beacon', batchDelayMs: 60_000 });
+            const beacon = spyOn<any>(service, 'trySendBeacon').and.returnValue(true);
+            await service.init();
+            service.trackEvent('a');
+            service.trackEvent('b');
+
+            const flushed = service.flush();
+            // Before any await: an unload handler that cannot wait still gets it out.
+            expect(beacon).toHaveBeenCalledTimes(1);
+            await flushed;
+
+            expect(beacon).toHaveBeenCalledTimes(1);
+            expect(JSON.parse(beacon.calls.mostRecent().args[1] as string).events.length).toBe(2);
+        });
+
+        it('resolves only once the request has settled', async () => {
+            reconfigureTestBed({ transport: 'beacon' });
+            routeBeaconChainToXhr();
+            await service.init();
+            service.trackEvent('a');
+
+            const flushed = service.flush();
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(await settledWithin(flushed)).toBeFalse();
+
+            req.flush('', ok);
+            expect(await settledWithin(flushed)).toBeTrue();
+        });
+
+        it('waits for unbatched xhr requests too', async () => {
+            await service.init();
+            service.trackEvent('a');
+
+            const flushed = service.flush();
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(await settledWithin(flushed)).toBeFalse();
+
+            req.flush('', ok);
+            expect(await settledWithin(flushed)).toBeTrue();
+        });
+
+        it('resolves, not rejects, when the request fails', async () => {
+            await service.init();
+            spyOn(console, 'error');
+            service.trackEvent('a');
+
+            const flushed = service.flush();
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .error(new ProgressEvent('error'), { status: 0, statusText: 'Unknown Error' });
+
+            await expectAsync(flushed).toBeResolved();
+        });
+
+        it('includes calls made while init() is still running', async () => {
+            reconfigureTestBed({ transport: 'beacon', batchDelayMs: 60_000 });
+            const beacon = spyOn<any>(service, 'trySendBeacon').and.returnValue(true);
+            let resolveContext!: () => void;
+            spyOn<any>(service, 'collectContext').and.returnValue(new Promise<void>(r => { resolveContext = r; }));
+            service.init();
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+            service.trackEvent('during_init');
+
+            const flushed = service.flush();
+            expect(beacon).not.toHaveBeenCalled();
+            resolveContext();
+            await flushed;
+
+            expect(beacon).toHaveBeenCalledTimes(1);
+        });
+
+        it('also waits for pending chrome.storage writes', async () => {
+            reconfigureTestBed({ isExtension: true });
+            setupChromeMock({ ga_client_id: 'cid' });
+            await service.init();
+            // From here on, writes stay pending until released.
+            const mock = setupDeferredChromeMock({ ga_client_id: 'cid' });
+
+            // Writes the session's last activity to chrome.storage.session.
+            service.trackEvent('a');
+            httpMock.expectOne((r) => r.url.includes('mp/collect')).flush('', ok);
+            const flushed = service.flush();
+            expect(await settledWithin(flushed)).toBeFalse();
+
+            await mock.releaseAll();
+            expect(await settledWithin(flushed)).toBeTrue();
+        });
+
+        it('resolves at once with nothing to send', async () => {
+            await service.init();
+
+            await expectAsync(service.flush()).toBeResolved();
+        });
+
+        it('resolves at once on the server', async () => {
+            reconfigureTestBed({}, 'server');
+
+            await expectAsync(service.flush()).toBeResolved();
+        });
+    });
+
     describe('consent', () => {
         it('omits the consent key entirely by default', async () => {
             await service.init();
