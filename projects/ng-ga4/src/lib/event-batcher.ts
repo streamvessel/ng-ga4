@@ -91,9 +91,7 @@ function merge<B extends BatchableBody>(into: B, from: B): B {
 }
 
 function envelopeKey(body: BatchableBody): string {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { events, timestamp_micros, ...envelope } = body;
-    return stableStringify(envelope);
+    return stableStringify({ ...body, events: undefined, timestamp_micros: undefined });
 }
 
 // Key order is not part of a body's meaning, so two envelopes built along
