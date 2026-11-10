@@ -36,16 +36,16 @@ chrome.runtime.onInstalled.addListener(() => seedNgGa4ClientId());
 
 Run it on every `onInstalled`, not only `reason === 'install'`: users of an already published extension only ever get `'update'`. The call is idempotent and never throws. It doesn't help a user who clears extension storage, since `onInstalled` doesn't fire again.
 
-**Wait for pending writes before an event handler returns**, after tracking calls and after `setConsent()`:
+**Flush before an event handler returns**, after tracking calls and after `setConsent()`:
 
 ```typescript
 chrome.action.onClicked.addListener(async () => {
     ga.trackEvent('action_clicked');
-    await ga.flushStorage();
+    await ga.flush();
 });
 ```
 
-`flushStorage()` covers storage, not event delivery ([#26](https://github.com/streamvessel/ng-ga4/issues/26)). Neither step survives a browser crash or an extension reload.
+`flush()` sends the queued batch and waits for it and for pending storage writes. `flushStorage()` waits for storage writes only. Neither survives a browser crash or an extension reload.
 
 ## Sessions across tabs
 
