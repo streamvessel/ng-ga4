@@ -18,6 +18,7 @@ Used in production in the [Stream Vessel](https://streamvessel.com) Chrome exten
 - Chrome extension support (`chrome.storage`), including MV3 service-worker teardown
 - Shares the `_ga` client ID with `gtag.js` when both run on a site
 - Consent Mode (`ad_user_data`, `ad_personalization`) and a storage-consent switch
+- User properties, kept across reloads
 - Device and browser detection on every browser, not only Chromium
 - Debug mode that shows events in DebugView and still records them
 - Safe under SSR; works with NgModule and standalone apps
@@ -129,6 +130,7 @@ export class MyComponent {
 | `trackEvent(name, params?)` | Send a custom event. |
 | `trackPageView(path, title?)` | Send a page view. Called for you on navigation. |
 | `setUserId(userId)` | Send `user_id` on every hit from now on; `null` on sign-out. See [User ID](#user-id). |
+| `setUserProperties(properties)` | Set user properties, sent with every later hit. See [User properties](#user-properties). |
 | `setConsent(consent)` | Update consent. Keys you leave out stay as they are. |
 | `setEnabled(enabled)` | Turn collection on or off. The first `true` runs the initialisation that `enabled: false` skipped. |
 | `flushStorage()` | Resolves once pending `chrome.storage` writes have landed. Resolves at once on the web. |
@@ -136,7 +138,7 @@ export class MyComponent {
 
 Calls made while collection is off are dropped. Calls made after `init()` has started but before it finishes are queued and sent once it does; calls made before it starts (for example from an earlier `APP_INITIALIZER`) are dropped.
 
-Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](#chrome-extensions)), `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState` and `NG_GA4_CONFIG`.
+Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](#chrome-extensions)), `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState`, `NgGa4UserPropertyValue` and `NG_GA4_CONFIG`.
 
 ## User ID
 
@@ -157,6 +159,22 @@ onSignOut() {
 - It is always the top-level field, never a user property: `user_id` is a reserved user property name.
 - Calling it before collection starts is fine; it is stored once `init()` runs. With `analyticsStorage` denied, an ID you set is sent but not stored; a stored one is deleted, and not sent, also on a start-up that begins denied.
 - Each tab or extension context keeps its own copy until its next load, so sign out in every context that is open.
+
+## User properties
+
+The equivalent of `gtag('set', 'user_properties', { ... })`:
+
+```typescript
+this.analytics.setUserProperties({ plan: 'pro', seats: 5 });
+this.analytics.setUserProperties({ seats: null });  // remove one
+this.analytics.setUserProperties(null);             // remove all
+```
+
+- Each call merges into what is already set. `null` removes a property; `undefined` leaves it as it is, so `{ plan: user?.plan }` before the user has loaded doesn't delete a stored plan. They go out as `user_properties` on every later hit, including page views and the hide-time engagement event.
+- They are stored next to the client ID, so they survive a reload, and are deleted with it when `analyticsStorage` is denied (see [Consent](#consent)). Each call merges onto what other tabs or extension contexts have stored, so one never wipes another's properties; a tab still sends its own copy on hits until its next call or reload.
+- Calls made before `init()` has finished, including while collection is off before it first runs, are applied once it does. After that, calls are stored at once even while collection is off, as `setUserId()` does. On the server the call does nothing.
+- Anything GA4 would reject is dropped, with a console warning in dev mode: more than 25 properties (those already set win), a name longer than 24 characters or not made of letters, digits and underscores, a value longer than 36 characters (counted as characters, so an emoji is one), the reserved names `first_open_time`, `first_visit_time`, `last_deep_link_referrer`, `user_id` and `first_open_after_install`, and names starting with `_`, `ga_`, `google_` or `firebase_` in any letter case.
+- To see a property in reports, register it in GA4 as a user-scoped custom dimension.
 
 ## Engagement time
 
@@ -246,6 +264,7 @@ NgGa4Module.forRoot({
 | Client ID | `_ga` if present (default), else `localStorage` | `chrome.storage.local` |
 | Session number | `localStorage` | `chrome.storage.local` |
 | Session ID and last activity | `localStorage` | `chrome.storage.session` |
+| User properties | `localStorage` | `chrome.storage.local` |
 
 ### Service-worker teardown
 
