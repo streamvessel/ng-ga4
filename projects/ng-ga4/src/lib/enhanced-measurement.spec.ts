@@ -39,8 +39,7 @@ describe('EnhancedMeasurement', () => {
         sent = [];
         host = {
             track: (name, params) => sent.push({ name, params }),
-            pageLocation: () => ({ page_location: 'https://example.com/here' }),
-            internalHostnames: []
+            pageLocation: () => ({ page_location: 'https://example.com/here' })
         };
         em = null;
         fixture = document.createElement('div');
@@ -50,18 +49,6 @@ describe('EnhancedMeasurement', () => {
     afterEach(() => {
         em?.stop();
         fixture.remove();
-    });
-
-    describe('anyEnabled', () => {
-        it('is false when the config is absent or every flag is off', () => {
-            expect(EnhancedMeasurement.anyEnabled(undefined)).toBe(false);
-            expect(EnhancedMeasurement.anyEnabled({})).toBe(false);
-            expect(EnhancedMeasurement.anyEnabled({ scroll: false, forms: false })).toBe(false);
-        });
-
-        it('is true when any flag is on', () => {
-            expect(EnhancedMeasurement.anyEnabled({ forms: true })).toBe(true);
-        });
     });
 
     describe('lifecycle', () => {
@@ -170,9 +157,9 @@ describe('EnhancedMeasurement', () => {
             expect(sent).toEqual([]);
         });
 
-        it('treats configured internal hostnames (siteUrl) as the same site', () => {
+        it('treats the siteUrl host as the same site', () => {
             em!.stop();
-            host.internalHostnames = ['www.mysite.test'];
+            host.siteUrl = 'https://www.mysite.test/app';
             create({ outboundClicks: true });
             click(addLink('https://www.mysite.test/a'));
             expect(sent).toEqual([]);

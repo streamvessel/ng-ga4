@@ -19,28 +19,26 @@ export interface NgGa4EnhancedMeasurement {
     forms?: boolean;
 }
 
-export type EnhancedMeasurementTrack = (name: string, params: Record<string, unknown>) => void;
-
 export interface EnhancedMeasurementHost {
     /** Sends one event. Expected to apply the service's own enabled/consent/session handling. */
-    track: EnhancedMeasurementTrack;
+    track: (name: string, params: Record<string, unknown>) => void;
     /** page_location for an event, or `{}` when none should be sent. */
     pageLocation: () => { page_location?: string };
-    /** Hostnames treated as "this site" in addition to the document's own. */
-    internalHostnames: string[];
+    /** The configured siteUrl; its host counts as "this site" alongside the document's own. */
+    siteUrl?: string;
 }
 
 // Google's documented file_download extension list (answer 9216061), as a
 // case-insensitive match on the end of the link's path.
-export const FILE_DOWNLOAD_EXTENSION =
+const FILE_DOWNLOAD_EXTENSION =
     /\.(pdf|xlsx?|docx?|txt|rtf|csv|exe|key|pp[st]x?|7z|pkg|rar|gz|zip|avi|mov|mp4|mpe?g|wmv|midi?|mp3|wav|wma)$/i;
 
 // The query parameters gtag.js reads a search term from, in its order.
-export const SITE_SEARCH_PARAMS = ['q', 's', 'search', 'query', 'keyword'];
+const SITE_SEARCH_PARAMS = ['q', 's', 'search', 'query', 'keyword'];
 
 const SCROLL_THRESHOLD = 0.9;
-// Measurement Protocol parameter values are capped at 100 characters; gtag.js
-// truncates link and button text to the same length.
+// gtag.js truncates link text, button text and the search term to 100
+// characters, the Measurement Protocol's limit for a parameter value.
 const MAX_TEXT_LENGTH = 100;
 
 /**
@@ -50,10 +48,11 @@ const MAX_TEXT_LENGTH = 100;
  * zone it runs in.
  *
  * Does nothing when `document`/`window` are absent (SSR, or an MV3 service
- * worker), so the caller need not guard.
+ * worker), or when every flag is off, so the caller need not guard.
  */
 export class EnhancedMeasurement {
     private readonly listeners: Array<{ target: EventTarget; type: string; fn: EventListener; capture: boolean }> = [];
+    private readonly siteHostname: string | null;
     private scrolled = false;
     private startedForms = new WeakSet<HTMLFormElement>();
 
@@ -63,11 +62,8 @@ export class EnhancedMeasurement {
         // null, not undefined, means "absent": undefined would select the default.
         private readonly doc: Document | null = typeof document !== 'undefined' ? document : null,
         private readonly win: Window | null = typeof window !== 'undefined' ? window : null
-    ) {}
-
-    /** True when at least one event is switched on. */
-    static anyEnabled(options: NgGa4EnhancedMeasurement | undefined): boolean {
-        return !!options && Object.values(options).some(Boolean);
+    ) {
+        this.siteHostname = host.siteUrl ? parseUrl(host.siteUrl)?.hostname ?? null : null;
     }
 
     get started(): boolean {
@@ -80,13 +76,13 @@ export class EnhancedMeasurement {
             return;
         }
         if (options.scroll) {
-            this.listen(win, 'scroll', () => this.onScroll(), false, true);
+            this.listen(win, 'scroll', () => this.onScroll(doc, win), false, true);
         }
         if (options.outboundClicks || options.fileDownloads) {
             // Capture phase, so an app handler calling stopPropagation() can't hide
             // the click. auxclick covers middle-click "open in new tab".
-            this.listen(doc, 'click', e => this.onClick(e as MouseEvent), true);
-            this.listen(doc, 'auxclick', e => this.onClick(e as MouseEvent), true);
+            this.listen(doc, 'click', e => this.onClick(e as MouseEvent, win), true);
+            this.listen(doc, 'auxclick', e => this.onClick(e as MouseEvent, win), true);
         }
         if (options.forms) {
             // `input` covers typing, `change` covers selects, checkboxes and
@@ -121,8 +117,13 @@ export class EnhancedMeasurement {
         }
         const term = searchTermFromPath(pagePath);
         if (term !== null) {
-            this.host.track('view_search_results', { search_term: term, ...this.host.pageLocation() });
+            this.send('view_search_results', { search_term: term });
         }
+    }
+
+    // Every event carries page_location, so it is added here, once.
+    private send(name: string, params: Record<string, unknown>): void {
+        this.host.track(name, { ...params, ...this.host.pageLocation() });
     }
 
     private listen(target: EventTarget, type: string, fn: EventListener, capture: boolean, passive = false): void {
@@ -130,38 +131,32 @@ export class EnhancedMeasurement {
         this.listeners.push({ target, type, fn, capture });
     }
 
-    private onScroll(): void {
-        if (this.scrolled || !this.doc || !this.win) {
+    private onScroll(doc: Document, win: Window): void {
+        if (this.scrolled) {
             return;
         }
-        const root = this.doc.documentElement;
-        const scrollHeight = Math.max(root.scrollHeight, this.doc.body?.scrollHeight ?? 0);
+        // In standards mode the root's scrollHeight already covers <body>; only
+        // quirks mode puts the document's height on body instead.
+        const scrollHeight = doc.compatMode === 'BackCompat' && doc.body
+            ? doc.body.scrollHeight
+            : doc.documentElement.scrollHeight;
         if (!scrollHeight) {
             return;
         }
-        const viewportBottom = (this.win.scrollY ?? root.scrollTop) + this.win.innerHeight;
-        if (viewportBottom / scrollHeight >= SCROLL_THRESHOLD) {
+        if ((win.scrollY + win.innerHeight) / scrollHeight >= SCROLL_THRESHOLD) {
             this.scrolled = true;
-            this.host.track('scroll', { percent_scrolled: 90, ...this.host.pageLocation() });
+            this.send('scroll', { percent_scrolled: 90 });
         }
     }
 
-    private onClick(event: MouseEvent): void {
+    private onClick(event: MouseEvent, win: Window): void {
         // auxclick also fires for right-click, which opens a context menu, not the link.
         if (event.type === 'auxclick' && event.button !== 1) {
             return;
         }
         const link = findLink(event);
-        if (!link) {
-            return;
-        }
-        let url: URL;
-        try {
-            url = new URL(link.href);
-        } catch {
-            return;
-        }
-        if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        const url = link ? parseUrl(link.href) : null;
+        if (!link || !url || (url.protocol !== 'http:' && url.protocol !== 'https:')) {
             return;
         }
         const common = {
@@ -173,29 +168,18 @@ export class EnhancedMeasurement {
         // click, one event.
         const extension = this.options.fileDownloads ? FILE_DOWNLOAD_EXTENSION.exec(url.pathname)?.[1] : undefined;
         if (extension) {
-            this.host.track('file_download', {
+            this.send('file_download', {
                 ...common,
                 file_extension: extension.toLowerCase(),
                 file_name: url.pathname,
-                link_text: truncate(normaliseText(link.textContent)),
-                ...this.host.pageLocation()
+                link_text: truncate(normaliseText(link.textContent))
             });
             return;
         }
-        if (this.options.outboundClicks && this.isOutbound(url)) {
-            this.host.track('click', {
-                ...common,
-                link_domain: url.hostname,
-                outbound: true,
-                ...this.host.pageLocation()
-            });
+        // URL and Location both lowercase hostnames, so plain equality is enough.
+        if (this.options.outboundClicks && url.hostname !== win.location.hostname && url.hostname !== this.siteHostname) {
+            this.send('click', { ...common, link_domain: url.hostname, outbound: true });
         }
-    }
-
-    private isOutbound(url: URL): boolean {
-        const host = url.hostname.toLowerCase();
-        const own = this.win?.location?.hostname?.toLowerCase();
-        return host !== own && !this.host.internalHostnames.some(h => h.toLowerCase() === host);
     }
 
     private onFormInteraction(event: Event): void {
@@ -204,37 +188,31 @@ export class EnhancedMeasurement {
             return;
         }
         this.startedForms.add(form);
-        this.host.track('form_start', { ...formParams(form), ...this.host.pageLocation() });
+        this.send('form_start', formParams(form));
     }
 
     private onSubmit(event: SubmitEvent): void {
         const form = event.target;
-        if (!isForm(form)) {
+        if (!(form instanceof HTMLFormElement)) {
             return;
         }
-        const submitter = event.submitter as HTMLElement | null | undefined;
+        const submitter = event.submitter;
         const submitText = submitter
             ? normaliseText(submitter instanceof HTMLInputElement ? submitter.value : submitter.textContent)
             : '';
-        this.host.track('form_submit', {
+        this.send('form_submit', {
             ...formParams(form),
-            ...(submitText ? { form_submit_text: truncate(submitText) } : {}),
-            ...this.host.pageLocation()
+            ...(submitText ? { form_submit_text: truncate(submitText) } : {})
         });
     }
 }
 
 /** The search term in a reported page path, or null when it has none. */
 export function searchTermFromPath(pagePath: string): string | null {
-    let params: URLSearchParams;
-    try {
-        // Base only resolves relative paths; an absolute URL keeps its own.
-        params = new URL(pagePath, 'http://localhost').searchParams;
-    } catch {
-        return null;
-    }
+    // Base only resolves relative paths; an absolute URL keeps its own.
+    const params = parseUrl(pagePath, 'http://localhost')?.searchParams;
     for (const name of SITE_SEARCH_PARAMS) {
-        const value = params.get(name)?.trim();
+        const value = params?.get(name)?.trim();
         if (value) {
             return truncate(value);
         }
@@ -242,11 +220,18 @@ export function searchTermFromPath(pagePath: string): string | null {
     return null;
 }
 
+function parseUrl(url: string, base?: string): URL | null {
+    try {
+        return new URL(url, base);
+    } catch {
+        return null;
+    }
+}
+
 // composedPath() rather than event.target: a link inside an open shadow root
 // retargets to its host by the time the event reaches document.
 function findLink(event: Event): HTMLAnchorElement | HTMLAreaElement | null {
-    const path = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
-    for (const node of path) {
+    for (const node of event.composedPath()) {
         if ((node instanceof HTMLAnchorElement || node instanceof HTMLAreaElement) && node.hasAttribute('href')) {
             return node;
         }
@@ -254,18 +239,16 @@ function findLink(event: Event): HTMLAnchorElement | HTMLAreaElement | null {
     return null;
 }
 
-function isForm(node: unknown): node is HTMLFormElement {
-    return typeof HTMLFormElement !== 'undefined' && node instanceof HTMLFormElement;
-}
-
 function formOf(target: EventTarget | null): HTMLFormElement | null {
-    if (!target || typeof Element === 'undefined' || !(target instanceof Element)) {
+    if (!(target instanceof Element)) {
         return null;
     }
-    // `.form` honours the `form="..."` attribute on fields outside the <form>.
-    const owner = (target as Element & { form?: unknown }).form;
-    if (isForm(owner)) {
-        return owner;
+    // A form control's `.form` is its owner, honouring the `form="..."`
+    // attribute; when it is null, no ancestor <form> owns the control either,
+    // so the DOM walk below is only for non-controls such as contenteditable.
+    if ('form' in target) {
+        const owner = (target as { form: unknown }).form;
+        return owner instanceof HTMLFormElement ? owner : null;
     }
     return target.closest('form');
 }
@@ -276,18 +259,10 @@ function formOf(target: EventTarget | null): HTMLFormElement | null {
 // is the current URL, unfiltered — the address siteUrl users rely on us not to send.
 function formParams(form: HTMLFormElement): Record<string, string> {
     const action = form.getAttribute('action');
-    let destination = '';
-    if (action) {
-        try {
-            destination = new URL(action, form.ownerDocument.baseURI).href;
-        } catch {
-            destination = action;
-        }
-    }
     return {
         form_id: form.getAttribute('id') ?? '',
         form_name: form.getAttribute('name') ?? '',
-        form_destination: destination
+        form_destination: action ? parseUrl(action, form.ownerDocument.baseURI)?.href ?? action : ''
     };
 }
 
@@ -296,5 +271,5 @@ function normaliseText(text: string | null | undefined): string {
 }
 
 function truncate(text: string): string {
-    return text.length > MAX_TEXT_LENGTH ? text.slice(0, MAX_TEXT_LENGTH) : text;
+    return text.slice(0, MAX_TEXT_LENGTH);
 }

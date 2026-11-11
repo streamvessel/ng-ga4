@@ -132,14 +132,13 @@ export class NgGa4Service implements OnDestroy {
         // queued until clientId is ready — still reaches pageViewed() for site
         // search. Events fired meanwhile queue like any other trackEvent() call.
         // Outside Angular: the handlers only send hits (see registerEngagementListeners).
-        if (EnhancedMeasurement.anyEnabled(this.config.enhancedMeasurement)) {
-            this.enhancedMeasurement ??= new EnhancedMeasurement(this.config.enhancedMeasurement!, {
-                track: (name, params) => this.trackEvent(name, params),
-                pageLocation: () => this.engagementPageLocation(),
-                internalHostnames: this.config.siteUrl ? [this.hostnameOf(this.config.siteUrl)].filter(Boolean) : []
-            });
-            this.zone.runOutsideAngular(() => this.enhancedMeasurement!.start());
-        }
+        // With every flag off (the default) it registers nothing.
+        const enhanced = this.enhancedMeasurement ??= new EnhancedMeasurement(this.config.enhancedMeasurement ?? {}, {
+            track: (name, params) => this.trackEvent(name, params),
+            pageLocation: () => this.engagementPageLocation(),
+            siteUrl: this.config.siteUrl
+        });
+        this.zone.runOutsideAngular(() => enhanced.start());
 
         const clientId = await this.loadOrCreateClientId();
         this.sessionNumber = await this.loadSessionNumber();
@@ -714,14 +713,6 @@ export class NgGa4Service implements OnDestroy {
             message: redact(err?.message),
             url: redact(err?.url)
         });
-    }
-
-    private hostnameOf(url: string): string {
-        try {
-            return new URL(url).hostname;
-        } catch {
-            return '';
-        }
     }
 
     private joinSiteUrl(siteUrl: string, pagePath: string): string {
