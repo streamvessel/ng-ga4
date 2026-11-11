@@ -1,4 +1,4 @@
-import { Inject, Injectable, NgZone, OnDestroy, PLATFORM_ID } from '@angular/core';
+import { Inject, Injectable, isDevMode, NgZone, OnDestroy, PLATFORM_ID } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { isPlatformBrowser } from '@angular/common';
 import { NavigationEnd, Router } from '@angular/router';
@@ -126,6 +126,7 @@ export class NgGa4Service implements OnDestroy {
         // for listeners to be live before clientId is ready.
         this.registerEngagementListeners();
         this.engagementEventName = this.resolveEngagementEventName();
+        this.warnOnMalformedConfig();
 
         const clientId = await this.loadOrCreateClientId();
         this.sessionNumber = await this.loadSessionNumber();
@@ -440,8 +441,10 @@ export class NgGa4Service implements OnDestroy {
                 engagement_time_msec: this.consumeEngagementTime(),
                 session_id: this.sessionId,
                 session_number: this.sessionNumber,
-                ...params,
-                ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
+                // Library defaults first, caller wins: like engagement_time_msec,
+                // a caller-supplied app_version replaces the configured one.
+                ...(this.config.appVersion ? { app_version: this.config.appVersion } : {}),
+                ...params
             }
         }]);
     }
@@ -520,7 +523,8 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private collectUrl(endpoint: string): string {
-        return `${endpoint}?measurement_id=${this.config.measurementId}&api_secret=${this.config.apiSecret}`;
+        return `${endpoint}?measurement_id=${encodeURIComponent(this.config.measurementId)}`
+            + `&api_secret=${encodeURIComponent(this.config.apiSecret)}`;
     }
 
     private sendForValidation(body: object): void {
@@ -930,6 +934,31 @@ export class NgGa4Service implements OnDestroy {
                 ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
             }
         }], true);
+    }
+
+    // GA4 answers a hit for an unknown property or a wrong secret with the same
+    // 2xx as a good one and records nothing, so a typo'd ID is otherwise
+    // invisible. Checked once per instance, from init(); dev builds and debug
+    // mode only, since a production console is not where setup mistakes get
+    // noticed. Warns, never throws or blocks sending: the shape check is a
+    // heuristic, and a false positive must not cost real data.
+    private warnOnMalformedConfig(): void {
+        if (!isDevMode() && !this.config.debug) {
+            return;
+        }
+        const { measurementId, apiSecret } = this.config;
+        if (typeof measurementId !== 'string' || !/^G-[A-Z0-9]+$/.test(measurementId)) {
+            console.warn(
+                `[ng-ga4] measurementId "${measurementId}" does not look like a GA4 Measurement ID `
+                + `(expected "G-" followed by letters and digits, e.g. "G-XXXXXXXXXX"). `
+                + `GA4 accepts hits for an unknown ID and records nothing.`
+            );
+        }
+        if (typeof apiSecret !== 'string' || apiSecret.trim() === '') {
+            console.warn(
+                '[ng-ga4] apiSecret is empty. GA4 accepts hits without a valid secret and records nothing.'
+            );
+        }
     }
 
     // Validated once here, in init(), not in flushEngagement(): a misconfigured

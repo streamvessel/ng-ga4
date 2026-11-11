@@ -84,15 +84,15 @@ bootstrapApplication(AppComponent, {
 
 **Required**
 
-- `measurementId` (`string`): GA4 Measurement ID, e.g. `G-XXXXXXXXX`.
-- `apiSecret` (`string`): Measurement Protocol API secret.
+- `measurementId` (`string`): GA4 Measurement ID, e.g. `G-XXXXXXXXX`. In dev mode or with `debug` on, an ID that isn't `G-` followed by uppercase letters and digits logs a warning, since GA4 accepts hits for it and records nothing.
+- `apiSecret` (`string`): Measurement Protocol API secret. An empty one logs the same warning.
 - `enabled` (`boolean`): whether collection starts on. `false` creates no client ID and writes nothing until `setEnabled(true)`. See [Consent](#consent).
 - `isExtension` (`boolean`): `true` in a Chrome extension, so state goes to `chrome.storage` instead of `localStorage`.
 
 **Optional**
 
 - `siteUrl` (`string`): base of `page_location`, e.g. `https://example.com`. Needed in extensions, where the page address is `chrome-extension://…`. Without it, `page_location` is the page's full address.
-- `appVersion` (`string`): sent as `app_version` on every event.
+- `appVersion` (`string`): sent as `app_version` on every event. An `app_version` passed in `trackEvent()` params takes precedence, as do any other params that collide with ones the library sets.
 - `transport` (`'beacon' | 'xhr'`, default `'beacon'`): `'beacon'` tries `sendBeacon`, then `fetch` with `keepalive`, then XHR, so hits survive the page closing. `'xhr'` sends through `HttpClient` and your interceptors, but a request still in flight when the page closes is lost.
 - `debug` (`boolean`, default `false`): see [Debug mode](#debug-mode).
 - `clientIdSource` (`'auto' | 'cookie' | 'storage'`, default `'auto'`): where the web client ID comes from. See [Client ID and gtag.js](#client-id-and-gtagjs). An unknown value logs a warning and falls back to `'auto'`, which reads `_ga`. Ignored in extensions.

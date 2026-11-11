@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A caller-supplied `app_version` in `trackEvent()` params now replaces the
+  configured `appVersion` instead of being silently overwritten. Every library
+  default (`engagement_time_msec`, `session_id`, `session_number`, `app_version`)
+  now follows the same rule: defaults first, caller wins
+  ([#31](https://github.com/streamvessel/ng-ga4/issues/31)).
+
+### Fixed
+
+- `measurement_id` and `api_secret` are URL-encoded in the collect URL, so a
+  secret containing `&`, `#`, `+` or similar no longer corrupts the request.
+- In dev mode (and whenever `debug` is on), `init()` logs a one-time warning when
+  `measurementId` does not look like `G-` followed by letters and digits, or when
+  `apiSecret` is empty. GA4 answers both with a normal 2xx and records nothing.
+  Hits are still sent.
+
 ## [0.2.2] - 2026-10-27
 
 ### Fixed
