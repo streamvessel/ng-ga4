@@ -42,7 +42,9 @@ describe('deviceFromUserAgent', () => {
                 operating_system: 'iOS',
                 operating_system_version: '17.4.1',
                 browser: 'Safari',
-                browser_version: '17.4.1'
+                browser_version: '17.4.1',
+                model: 'iPhone',
+                brand: 'Apple'
             });
         });
 
@@ -197,6 +199,108 @@ describe('deviceFromUserAgent', () => {
             const device = deviceFromUserAgent(ntUnknown);
             expect(device.operating_system).toBe('Windows');
             expect('operating_system_version' in device).toBe(false);
+        });
+    });
+
+    describe('model and brand', () => {
+        it('reports iPhone as an Apple model', () => {
+            const ua = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1';
+
+            const device = deviceFromUserAgent(ua);
+            expect(device.model).toBe('iPhone');
+            expect(device.brand).toBe('Apple');
+        });
+
+        it('reports iPad and iPod as Apple models', () => {
+            const ipad = 'Mozilla/5.0 (iPad; CPU OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1';
+            const ipod = 'Mozilla/5.0 (iPod touch; CPU iPhone OS 15_8 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6.6 Mobile/15E148 Safari/604.1';
+
+            expect(deviceFromUserAgent(ipad)).toEqual(jasmine.objectContaining({ model: 'iPad', brand: 'Apple' }));
+            expect(deviceFromUserAgent(ipod)).toEqual(jasmine.objectContaining({ model: 'iPod', brand: 'Apple' }));
+        });
+
+        it('reports Chrome on iOS as the device, not the browser maker', () => {
+            const ua = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/123.0.6312.52 Mobile/15E148 Safari/604.1';
+
+            expect(deviceFromUserAgent(ua)).toEqual(jasmine.objectContaining({ model: 'iPhone', brand: 'Apple' }));
+        });
+
+        it('reports a desktop-mode iPad as an iPad once touch points identify it', () => {
+            const ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15';
+
+            expect(deviceFromUserAgent(ua, 5)).toEqual(jasmine.objectContaining({ model: 'iPad', brand: 'Apple' }));
+        });
+
+        // Only the iOS tokens are in scope for #36. A Mac is left without model/brand
+        // rather than guessed at — a touchless Macintosh UA is also what an iPad sends
+        // when maxTouchPoints is unavailable.
+        it('claims nothing for a genuine Mac', () => {
+            const ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15';
+
+            const device = deviceFromUserAgent(ua, 0);
+            expect('model' in device).toBe(false);
+            expect('brand' in device).toBe(false);
+        });
+
+        // The raw token is sent on purpose: no marketing-name table until GA4's
+        // expectations are confirmed against a real property.
+        it('sends the raw Android model token, with no brand', () => {
+            const ua = 'Mozilla/5.0 (Linux; Android 13; SM-X710) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+            const device = deviceFromUserAgent(ua);
+            expect(device.model).toBe('SM-X710');
+            expect('brand' in device).toBe(false);
+        });
+
+        it('keeps a multi-word Android model intact', () => {
+            const ua = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
+
+            expect(deviceFromUserAgent(ua).model).toBe('Pixel 8');
+        });
+
+        it('strips the Samsung Internet maker prefix so the token matches Client Hints', () => {
+            const ua = 'Mozilla/5.0 (Linux; Android 13; SAMSUNG SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/23.0 Chrome/115.0.0.0 Mobile Safari/537.36';
+
+            const device = deviceFromUserAgent(ua);
+            expect(device.model).toBe('SM-S918B');
+            expect('brand' in device).toBe(false);
+        });
+
+        it('strips the firmware build and skips the WebView marker', () => {
+            const ua = 'Mozilla/5.0 (Linux; Android 10; SM-G975F Build/QP1A.190711.020; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.6099.230 Mobile Safari/537.36';
+
+            expect(deviceFromUserAgent(ua).model).toBe('SM-G975F');
+        });
+
+        it('skips the locale token in pre-KitKat UAs', () => {
+            const ua = 'Mozilla/5.0 (Linux; U; Android 4.0.4; en-us; GT-I9300 Build/IMM76D) AppleWebKit/534.30 (KHTML, like Gecko) Version/4.0 Mobile Safari/534.30';
+
+            expect(deviceFromUserAgent(ua).model).toBe('GT-I9300');
+        });
+
+        // Chrome 110+ freezes every Android UA to "Android 10; K". "K" identifies no
+        // device; Client Hints `model` is where Chromium still exposes the real one.
+        it('does not report the reduced-UA placeholder "K"', () => {
+            const ua = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
+
+            expect('model' in deviceFromUserAgent(ua)).toBe(false);
+        });
+
+        it('reports no model for Firefox on Android, which omits it', () => {
+            const ua = 'Mozilla/5.0 (Android 14; Mobile; rv:125.0) Gecko/125.0 Firefox/125.0';
+
+            expect('model' in deviceFromUserAgent(ua)).toBe(false);
+        });
+
+        it('claims no model or brand on desktop platforms', () => {
+            const windows = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+            const linux = 'Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0';
+
+            for (const ua of [windows, linux]) {
+                const device = deviceFromUserAgent(ua);
+                expect('model' in device).toBe(false);
+                expect('brand' in device).toBe(false);
+            }
         });
     });
 

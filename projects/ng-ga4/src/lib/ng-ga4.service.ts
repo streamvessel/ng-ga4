@@ -18,6 +18,8 @@ interface Ga4Device {
     operating_system_version?: string;
     browser?: string;
     browser_version?: string;
+    model?: string;
+    brand?: string;
 }
 
 interface Ga4UserLocation {
@@ -745,7 +747,7 @@ export class NgGa4Service implements OnDestroy {
         if (uaData) {
             device.category = uaData.mobile ? 'mobile' : 'desktop';
             try {
-                const high = await uaData.getHighEntropyValues(['platform', 'platformVersion', 'fullVersionList']);
+                const high = await uaData.getHighEntropyValues(['platform', 'platformVersion', 'fullVersionList', 'model']);
                 if (high.platform) {
                     device.operating_system = high.platform;
                 }
@@ -756,6 +758,12 @@ export class NgGa4Service implements OnDestroy {
                 if (browser) {
                     device.browser = browser.brand;
                     device.browser_version = browser.version;
+                }
+                // Chromium reports "" for model on desktops; only a real value is kept.
+                // No brand: Client Hints do not expose the maker, and inferring it from
+                // the model token would be a guess (see ua-device.ts).
+                if (typeof high.model === 'string' && high.model.trim()) {
+                    device.model = high.model.trim();
                 }
             } catch {
                 // High-entropy hints unavailable (blocked, or a permissions policy denies
