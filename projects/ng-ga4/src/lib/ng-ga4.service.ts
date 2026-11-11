@@ -172,7 +172,14 @@ export class NgGa4Service implements OnDestroy {
         this.routerSubscription = this.router.events
             .pipe(filter(event => event instanceof NavigationEnd))
             .subscribe((event: NavigationEnd) => {
-                this.trackPageView(event.urlAfterRedirects);
+                // Deferred one microtask: the router emits NavigationEnd *before*
+                // TitleStrategy.updateTitle() sets the new route's title, so reading
+                // document.title synchronously here would report the previous page's.
+                queueMicrotask(() => {
+                    if (!this.routerSubscription?.closed) {
+                        this.trackPageView(event.urlAfterRedirects);
+                    }
+                });
             });
 
         this.registerSessionSyncListener();
@@ -485,7 +492,9 @@ export class NgGa4Service implements OnDestroy {
             page_location: this.config.siteUrl
                 ? this.joinSiteUrl(this.config.siteUrl, pagePath)
                 : window.location.href,
-            page_title: pageTitle,
+            // gtag.js defaults to document.title; without this, GA4 reports
+            // "(not set)" for every page view the router integration sends.
+            page_title: pageTitle ?? (this.getDocument()?.title || undefined),
             engagement_time_msec: this.consumeEngagementTime(),
             session_id: this.sessionId,
             session_number: this.sessionNumber,

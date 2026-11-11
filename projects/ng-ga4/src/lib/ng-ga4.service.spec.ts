@@ -1872,6 +1872,58 @@ describe('NgGa4Service', () => {
             await service.init();
         });
 
+        describe('page_title', () => {
+            let originalTitle: string;
+
+            beforeEach(() => {
+                originalTitle = document.title;
+            });
+
+            afterEach(() => {
+                document.title = originalTitle;
+            });
+
+            function sentTitle(): unknown {
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                const params = req.request.body.events[0].params;
+                req.flush('', { status: 204, statusText: 'No Content' });
+                return params.page_title;
+            }
+
+            it('defaults to document.title when the caller omits it', () => {
+                document.title = 'Dashboard | Acme';
+
+                service.trackPageView('/dashboard');
+
+                expect(sentTitle()).toBe('Dashboard | Acme');
+            });
+
+            it('prefers an explicit title over document.title', () => {
+                document.title = 'Dashboard | Acme';
+
+                service.trackPageView('/dashboard', 'Custom');
+
+                expect(sentTitle()).toBe('Custom');
+            });
+
+            it('omits page_title when there is no title to report', () => {
+                document.title = '';
+
+                service.trackPageView('/untitled');
+
+                // Left out (JSON drops undefined) rather than sent as "".
+                expect(sentTitle()).toBeUndefined();
+            });
+
+            it('falls back to no title when there is no document', () => {
+                spyOn(service as any, 'getDocument').and.returnValue(undefined);
+
+                service.trackPageView('/worker');
+
+                expect(sentTitle()).toBeUndefined();
+            });
+        });
+
         it('should POST page_view event with window.location.href', () => {
             service.trackPageView('/home');
 
@@ -2925,10 +2977,45 @@ describe('NgGa4Service', () => {
         it('should track page view on NavigationEnd', async () => {
             await service.init();
             routerEvents$.next(new NavigationEnd(1, '/test', '/test'));
+            await Promise.resolve();
 
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.body.events[0].name).toBe('page_view');
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        // The real router emits NavigationEnd and only then, synchronously, calls
+        // TitleStrategy.updateTitle(). Emitting and retitling back-to-back here
+        // reproduces that order; reading the title synchronously in the handler
+        // would ship the previous page's title.
+        it('reports the title set right after NavigationEnd, not the previous one', async () => {
+            const originalTitle = document.title;
+            try {
+                document.title = 'Previous Page';
+                await service.init();
+
+                routerEvents$.next(new NavigationEnd(1, '/next', '/next'));
+                document.title = 'Next Page';
+                httpMock.expectNone(() => true);
+                await Promise.resolve();
+
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                expect(req.request.body.events[0].params.page_title).toBe('Next Page');
+                req.flush('', { status: 204, statusText: 'No Content' });
+            } finally {
+                document.title = originalTitle;
+            }
+        });
+
+        it('drops a deferred page view when the service is destroyed first', async () => {
+            await service.init();
+
+            routerEvents$.next(new NavigationEnd(1, '/gone', '/gone'));
+            service.ngOnDestroy();
+            await Promise.resolve();
+
+            httpMock.expectNone((r) => r.url.includes('mp/collect')
+                && r.body?.events?.some((e: any) => e.name === 'page_view'));
         });
 
         it('should ignore NavigationStart', async () => {

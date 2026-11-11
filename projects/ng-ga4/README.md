@@ -118,7 +118,7 @@ export class MyComponent {
 | `NgGa4Service` method | Description |
 |---|---|
 | `trackEvent(name, params?)` | Send a custom event. Checked against GA4's naming rules first; see [Event validation](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/event-validation.md). |
-| `trackPageView(path, title?)` | Send a page view. Called for you on navigation. |
+| `trackPageView(path, title?)` | Send a page view. Called for you on navigation. `title` defaults to `document.title`. |
 | `setUserId(userId)` | Send `user_id` on every hit from now on; `null` on sign-out. See [User ID](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-id). |
 | `setUserProperties(properties)` | Set user properties, sent with every later hit. See [User properties](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-properties). |
 | `setConsent(consent)` | Update consent. Keys you leave out stay as they are. See [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md). |

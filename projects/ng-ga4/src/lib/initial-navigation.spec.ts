@@ -150,6 +150,50 @@ describe('initial navigation', () => {
         });
     });
 
+    // NavigationEnd is emitted before the router's TitleStrategy applies the new
+    // route's title. Uses the real router and the default TitleStrategy, so a
+    // change in either ordering shows up here rather than in production reports.
+    describe('page_title from route titles', () => {
+        let originalTitle: string;
+
+        beforeEach(() => {
+            originalTitle = document.title;
+        });
+
+        afterEach(() => {
+            document.title = originalTitle;
+        });
+
+        it('reports each route\'s own title on the automatic page_view', async () => {
+            const titled: Routes = [
+                { path: 'about', component: HomeComponent, title: 'About Title' },
+                // Wildcard, like `routes` above: Karma's page URL is not '/'.
+                { path: '**', component: HomeComponent, title: 'Home Title' }
+            ];
+            appRef = await bootstrapApplication(RootComponent, {
+                providers: [
+                    provideRouter(titled),
+                    provideHttpClient(withInterceptors([recorder])),
+                    provideNgGa4({
+                        measurementId: 'G-RACE',
+                        apiSecret: 'secret',
+                        enabled: true,
+                        isExtension: false,
+                        transport: 'xhr'
+                    })
+                ]
+            });
+            await appRef.whenStable();
+
+            await appRef.injector.get(Router).navigateByUrl('/about');
+            await appRef.whenStable();
+
+            const titles = pageViews().map(r =>
+                r.body.events.find((e: any) => e.name === 'page_view').params.page_title);
+            expect(titles).toEqual(['Home Title', 'About Title']);
+        });
+    });
+
     // The decisive measurement. The outcome tests above infer the ordering from whether
     // a hit was sent; this reads the sequence directly, so a future change that reorders
     // bootstrap fails here with a legible diff rather than a mysterious missing event.

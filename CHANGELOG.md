@@ -41,6 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LIMITATIONS.md` is now `docs/limitations.md`, and like the other topic docs it
   is no longer included in the npm package.
 
+### Fixed
+
+- Page views now default `page_title` to `document.title` when no title is passed,
+  as `gtag.js` does, instead of leaving it unset — every automatic router page view
+  used to show up as `(not set)` in GA4's Pages and screens report. The router
+  page view is sent one microtask after `NavigationEnd`, so it picks up the title
+  the router's `TitleStrategy` sets for the new route rather than the previous one.
+
 ## [0.2.2] - 2026-10-27
 
 ### Fixed
