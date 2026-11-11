@@ -63,7 +63,10 @@ export interface NgGa4Config {
 
     /**
      * Write `_ga` when it is absent or unreadable, on the registrable domain,
-     * with gtag's two-year expiry by default. Only that envelope — name, domain, expiry —
+     * with gtag's two-year expiry by default. A `_ga` this library wrote itself
+     * is rewritten once per page load with the same client ID, so — like
+     * gtag.js, which rewrites it on every hit — the expiry counts from the
+     * user's last visit, not from when the cookie was first set. Only that envelope — name, domain, expiry —
      * is gtag's format: the value written is whatever client ID this library
      * already has. A genuinely new install mints one in gtag's own numeric
      * `<random>.<seconds>` shape — there is no identity to preserve there, so

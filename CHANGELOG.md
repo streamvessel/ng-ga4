@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A `_ga` cookie this library wrote (`writeGaCookie`, or `clientIdSource: 'cookie'`) is
+  now rewritten with the same client ID on each page load, so its two-year expiry
+  counts from the user's last visit, as gtag.js's does. Before, it lapsed two years
+  after it was first written, however active the user was. A `_ga` adopted from
+  gtag.js is still never written back.
+
 ## [0.2.2] - 2026-10-27
 
 ### Fixed
