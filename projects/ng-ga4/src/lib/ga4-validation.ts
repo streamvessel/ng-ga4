@@ -13,11 +13,12 @@ const MAX_PARAMS_PER_EVENT = 25;
 const MAX_PARAM_VALUE_LENGTH = 100;
 
 // GA4 documents larger limits for these page parameters than for the rest.
-const PARAM_VALUE_LENGTH_OVERRIDES: Readonly<Record<string, number>> = {
-    page_location: 1000,
-    page_referrer: 420,
-    page_title: 300
-};
+// A Map, not an object literal: a param named `constructor` must not find Object.prototype.
+const PARAM_VALUE_LENGTH_OVERRIDES: ReadonlyMap<string, number> = new Map([
+    ['page_location', 1000],
+    ['page_referrer', 420],
+    ['page_title', 300]
+]);
 
 /**
  * Prefixes GA4 reserves for its own names. `_` and `gtag.` could not pass the
@@ -43,10 +44,13 @@ const EVENT_NAME_RULES: Ga4NameRules = {
         'app_clear_data', 'app_exception', 'app_install', 'app_remove', 'app_store_refund',
         'app_update', 'app_upgrade', 'dynamic_link_app_open', 'dynamic_link_app_update',
         'dynamic_link_first_open', 'error', 'firebase_campaign', 'first_open', 'first_visit',
+        'notification_dismiss', 'notification_foreground', 'notification_open', 'notification_receive',
         'os_update', 'session_start', 'user_engagement'
     ]),
     // firebase_in_app_message_* is reserved too, and covered by firebase_.
-    reservedPrefixes: [...RESERVED_NAME_PREFIXES, 'notification_']
+    // notification_* is listed by exact name above, not as a prefix: banning the
+    // prefix would silently drop custom events like notification_permission_granted.
+    reservedPrefixes: RESERVED_NAME_PREFIXES
 };
 
 const PARAM_NAME_RULES: Ga4NameRules = {
@@ -56,7 +60,8 @@ const PARAM_NAME_RULES: Ga4NameRules = {
     reservedPrefixes: RESERVED_NAME_PREFIXES
 };
 
-// Valid only on an App stream; a web stream — which is all this library sends to — drops them.
+// Documented as App-stream events. Warned about rather than dropped: ad_impression
+// in particular is also used on the web for ad revenue, so dropping would lose data.
 const APP_ONLY_EVENT_NAMES = new Set(['ad_impression', 'in_app_purchase', 'screen_view']);
 
 /**
@@ -90,11 +95,17 @@ export function nameProblem(name: unknown, rules: Ga4NameRules): string | null {
  * Why GA4 would discard an event with this name, or `null` if it would not.
  */
 export function eventNameProblem(name: unknown): string | null {
-    const problem = nameProblem(name, EVENT_NAME_RULES);
-    if (problem === null && APP_ONLY_EVENT_NAMES.has(name as string)) {
-        return `event name "${name}" is only accepted on an App stream and is dropped on a web stream`;
-    }
-    return problem;
+    return nameProblem(name, EVENT_NAME_RULES);
+}
+
+/**
+ * A warning for an event name GA4 documents as App-stream-only, or `null`.
+ * Advisory: such an event may still be recorded on a web stream.
+ */
+export function appOnlyEventNameProblem(name: string): string | null {
+    return APP_ONLY_EVENT_NAMES.has(name)
+        ? `event name "${name}" is documented for App streams and may not be recorded on a web stream`
+        : null;
 }
 
 /**
@@ -113,7 +124,7 @@ export function paramValueProblem(name: string, value: unknown): string | null {
     if (typeof value !== 'string') {
         return null;
     }
-    const limit = PARAM_VALUE_LENGTH_OVERRIDES[name] ?? MAX_PARAM_VALUE_LENGTH;
+    const limit = PARAM_VALUE_LENGTH_OVERRIDES.get(name) ?? MAX_PARAM_VALUE_LENGTH;
     if (value.length <= limit) {
         return null;
     }

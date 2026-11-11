@@ -8,7 +8,7 @@ import { ConsentState, Ga4ConsentPayload, NgGa4Consent } from './consent';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
-import { eventNameProblem, validateEventParams } from './ga4-validation';
+import { appOnlyEventNameProblem, eventNameProblem, validateEventParams } from './ga4-validation';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 
 interface Ga4Device {
@@ -449,7 +449,10 @@ export class NgGa4Service implements OnDestroy {
             ...params,
             ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
         }, this.warnOnInvalid);
-        this.reportProblems(name, validation.problems);
+        if (this.warnOnInvalid) {
+            const appOnly = appOnlyEventNameProblem(name);
+            this.reportProblems(name, appOnly ? [appOnly, ...validation.problems] : validation.problems);
+        }
 
         this.sendToGA4([{ name, params: validation.params }]);
     }
@@ -961,7 +964,9 @@ export class NgGa4Service implements OnDestroy {
         if (configured === undefined) {
             return 'page_engagement';
         }
-        const problem = eventNameProblem(configured);
+        // App-only names are only a warning for trackEvent(), but this name is
+        // the library's own choice to make, so it falls back rather than risk it.
+        const problem = eventNameProblem(configured) ?? appOnlyEventNameProblem(configured);
         if (!problem) {
             return configured;
         }

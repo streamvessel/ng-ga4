@@ -1,4 +1,4 @@
-import { eventNameProblem, paramNameProblem, paramValueProblem, validateEventParams } from './ga4-validation';
+import { appOnlyEventNameProblem, eventNameProblem, paramNameProblem, paramValueProblem, validateEventParams } from './ga4-validation';
 
 describe('ga4-validation', () => {
     describe('eventNameProblem', () => {
@@ -29,8 +29,9 @@ describe('ga4-validation', () => {
                 'ad_activeview', 'ad_click', 'ad_exposure', 'ad_query', 'ad_reward', 'adunit_exposure',
                 'app_clear_data', 'app_exception', 'app_install', 'app_remove', 'app_store_refund',
                 'app_update', 'app_upgrade', 'dynamic_link_app_open', 'dynamic_link_app_update',
-                'dynamic_link_first_open', 'error', 'firebase_campaign', 'first_open', 'first_visit', 'os_update',
-                'session_start', 'user_engagement'
+                'dynamic_link_first_open', 'error', 'firebase_campaign', 'first_open', 'first_visit',
+                'notification_dismiss', 'notification_foreground', 'notification_open', 'notification_receive',
+                'os_update', 'session_start', 'user_engagement'
             ]) {
                 expect(eventNameProblem(name)).withContext(name).toMatch(/reserved/);
             }
@@ -38,17 +39,22 @@ describe('ga4-validation', () => {
 
         it('rejects the reserved prefixes', () => {
             for (const name of [
-                'firebase_in_app_message_open', 'notification_open',
-                'ga_custom', 'google_custom', '_custom', 'gtag.custom'
+                'firebase_in_app_message_open', 'ga_custom', 'google_custom', '_custom', 'gtag.custom'
             ]) {
                 expect(eventNameProblem(name)).withContext(name).toMatch(/reserved prefix/);
             }
         });
 
-        it('rejects App-stream-only names', () => {
+        it('allows custom names that merely start with notification_', () => {
+            expect(eventNameProblem('notification_permission_granted')).toBeNull();
+        });
+
+        it('does not reject App-stream-only names, but flags them separately', () => {
             for (const name of ['ad_impression', 'in_app_purchase', 'screen_view']) {
-                expect(eventNameProblem(name)).withContext(name).toMatch(/App stream/);
+                expect(eventNameProblem(name)).withContext(name).toBeNull();
+                expect(appOnlyEventNameProblem(name)).withContext(name).toMatch(/App streams/);
             }
+            expect(appOnlyEventNameProblem('login')).toBeNull();
         });
     });
 
@@ -84,6 +90,11 @@ describe('ga4-validation', () => {
             expect(paramValueProblem('x', 'a'.repeat(100))).toBeNull();
             expect(paramValueProblem('x', 10 ** 120)).toBeNull();
             expect(paramValueProblem('items', [])).toBeNull();
+        });
+
+        it('does not look up Object.prototype members as limits', () => {
+            expect(paramValueProblem('constructor', 'abc')).toBeNull();
+            expect(paramValueProblem('toString', 'a'.repeat(101))).toMatch(/limit is 100/);
         });
 
         it('flags a string over 100 characters', () => {

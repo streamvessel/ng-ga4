@@ -2047,6 +2047,23 @@ describe('NgGa4Service', () => {
                 second.flush('', { status: 204, statusText: 'No Content' });
             });
 
+            it('sends an App-stream-only event name, with a warning', () => {
+                service.trackEvent('ad_impression', { value: 0.02, currency: 'USD' });
+
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                expect(req.request.body.events[0].name).toBe('ad_impression');
+                expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/"ad_impression" is documented for App streams/));
+                req.flush('', { status: 204, statusText: 'No Content' });
+            });
+
+            it('sends a custom event that merely starts with notification_', () => {
+                service.trackEvent('notification_permission_granted');
+
+                httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                    .flush('', { status: 204, statusText: 'No Content' });
+                expect(console.warn).not.toHaveBeenCalled();
+            });
+
             it('does not warn for a valid event', () => {
                 service.trackEvent('file_download', { file_name: 'test.pdf', file_size: 1024 });
 
