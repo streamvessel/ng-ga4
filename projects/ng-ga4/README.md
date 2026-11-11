@@ -35,7 +35,7 @@ This library sends data to GA4 straight from your code, without Google's trackin
 
 These work as usual: events, page views, active users and average engagement time.
 
-We checked all of this on a real GA4 property; [LIMITATIONS.md](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/LIMITATIONS.md) has the details.
+We checked all of this on a real GA4 property; [Limitations](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/limitations.md) has the details.
 
 **If your app can load Google's script, use `gtag.js` instead.** This library is for when it can't.
 
@@ -88,20 +88,10 @@ bootstrapApplication(AppComponent, {
 
 - `measurementId` (`string`): GA4 Measurement ID, e.g. `G-XXXXXXXXX`.
 - `apiSecret` (`string`): Measurement Protocol API secret.
-- `enabled` (`boolean`): whether collection starts on. `false` creates no client ID and writes nothing until `setEnabled(true)`. See [Consent](#consent).
+- `enabled` (`boolean`): whether collection starts on. `false` creates no client ID and writes nothing until `setEnabled(true)`. See [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md).
 - `isExtension` (`boolean`): `true` in a Chrome extension, so state goes to `chrome.storage` instead of `localStorage`.
 
-**Optional**
-
-- `siteUrl` (`string`): base of `page_location`, e.g. `https://example.com`. Needed in extensions, where the page address is `chrome-extension://…`. Without it, `page_location` is the page's full address.
-- `appVersion` (`string`): sent as `app_version` on every event.
-- `transport` (`'beacon' | 'xhr'`, default `'beacon'`): `'beacon'` tries `sendBeacon`, then `fetch` with `keepalive`, then XHR, so hits survive the page closing. `'xhr'` sends through `HttpClient` and your interceptors, but a request still in flight when the page closes is lost.
-- `debug` (`boolean`, default `false`): see [Debug mode](#debug-mode).
-- `clientIdSource` (`'auto' | 'cookie' | 'storage'`, default `'auto'`): where the web client ID comes from. See [Client ID and gtag.js](#client-id-and-gtagjs). An unknown value logs a warning and falls back to `'auto'`, which reads `_ga`. Ignored in extensions.
-- `writeGaCookie` (`boolean` or `NgGa4CookieOptions`, default `false`): write a `_ga` cookie when there is no valid one (web only). See [Client ID and gtag.js](#client-id-and-gtagjs).
-- `sendEngagementOnHide` (`boolean`, default `true`): send the engagement time left over when the page is hidden or closed. See [Engagement time](#engagement-time).
-- `engagementEventName` (`string`, default `'page_engagement'`): name of that event. An invalid or reserved name (such as `user_engagement`) logs a warning and falls back to the default.
-- `consent` (`NgGa4Consent`, default: storage granted): initial consent state. See [Consent](#consent).
+**Optional**: `siteUrl`, `appVersion`, `transport`, `debug`, `clientIdSource`, `writeGaCookie`, `sendEngagementOnHide`, `engagementEventName` and `consent`. See [Configuration](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/configuration.md#optional).
 
 ## Usage
 
@@ -129,179 +119,29 @@ export class MyComponent {
 |---|---|
 | `trackEvent(name, params?)` | Send a custom event. |
 | `trackPageView(path, title?)` | Send a page view. Called for you on navigation. |
-| `setUserId(userId)` | Send `user_id` on every hit from now on; `null` on sign-out. See [User ID](#user-id). |
-| `setUserProperties(properties)` | Set user properties, sent with every later hit. See [User properties](#user-properties). |
-| `setConsent(consent)` | Update consent. Keys you leave out stay as they are. |
-| `setEnabled(enabled)` | Turn collection on or off. The first `true` runs the initialisation that `enabled: false` skipped. |
-| `flushStorage()` | Resolves once pending `chrome.storage` writes have landed. Resolves at once on the web. |
+| `setUserId(userId)` | Send `user_id` on every hit from now on; `null` on sign-out. See [User ID](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-id). |
+| `setUserProperties(properties)` | Set user properties, sent with every later hit. See [User properties](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-properties). |
+| `setConsent(consent)` | Update consent. Keys you leave out stay as they are. See [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md). |
+| `setEnabled(enabled)` | Turn collection on or off. The first `true` runs the initialisation that `enabled: false` skipped. See [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md). |
+| `flushStorage()` | Resolves once pending `chrome.storage` writes have landed. Resolves at once on the web. See [Service-worker teardown](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md#service-worker-teardown). |
 | `init()` | Starts the library. Runs for you at app start. |
 
 Calls made while collection is off are dropped. Calls made after `init()` has started but before it finishes are queued and sent once it does; calls made before it starts (for example from an earlier `APP_INITIALIZER`) are dropped.
 
-Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](#chrome-extensions)), `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState`, `NgGa4UserPropertyValue` and `NG_GA4_CONFIG`.
+Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md)), `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState`, `NgGa4UserPropertyValue` and `NG_GA4_CONFIG`.
 
-## User ID
+## Documentation
 
-Call `setUserId()` when a user signs in, and `setUserId(null)` when they sign out. Every hit after that carries a top-level `user_id`, the same as `gtag('config', 'G-XXXXXXXXX', { user_id })`, so GA4 can join one person across devices and platforms.
+| Topic | Covers |
+|---|---|
+| [Configuration](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/configuration.md) | every config option in full |
+| [Identity](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md) | client ID and `gtag.js`, user ID, user properties |
+| [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md) | consent |
+| [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md) | setup, service-worker teardown, sessions across tabs |
+| [Engagement time and debug mode](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md) | engagement time, debug mode |
+| [Limitations](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/limitations.md) | what the Measurement Protocol can't do, with measurements |
 
-```typescript
-onSignIn(user: User) {
-    this.analytics.setUserId(user.id);
-}
-
-onSignOut() {
-    this.analytics.setUserId(null);
-}
-```
-
-- Use your own opaque ID, at most 256 characters. Never send an email address or other personal data. A longer value, or one that isn't a string, logs a warning and clears the user ID.
-- The ID is stored next to the client ID (`localStorage`, or `chrome.storage.local` in an extension) and comes back on the next load, so you don't need to set it again on every start-up. An empty string counts as `null`.
-- It is always the top-level field, never a user property: `user_id` is a reserved user property name.
-- Calling it before collection starts is fine; it is stored once `init()` runs. With `analyticsStorage` denied, an ID you set is sent but not stored; a stored one is deleted, and not sent, also on a start-up that begins denied.
-- Each tab or extension context keeps its own copy until its next load, so sign out in every context that is open.
-
-## User properties
-
-The equivalent of `gtag('set', 'user_properties', { ... })`:
-
-```typescript
-this.analytics.setUserProperties({ plan: 'pro', seats: 5 });
-this.analytics.setUserProperties({ seats: null });  // remove one
-this.analytics.setUserProperties(null);             // remove all
-```
-
-- Each call merges into what is already set. `null` removes a property; `undefined` leaves it as it is, so `{ plan: user?.plan }` before the user has loaded doesn't delete a stored plan. They go out as `user_properties` on every later hit, including page views and the hide-time engagement event.
-- They are stored next to the client ID, so they survive a reload, and are deleted with it when `analyticsStorage` is denied (see [Consent](#consent)). Each call merges onto what other tabs or extension contexts have stored, so one never wipes another's properties; a tab still sends its own copy on hits until its next call or reload.
-- Calls made before `init()` has finished, including while collection is off before it first runs, are applied once it does. After that, calls are stored at once even while collection is off, as `setUserId()` does. On the server the call does nothing.
-- Anything GA4 would reject is dropped, with a console warning in dev mode: more than 25 properties (those already set win), a name longer than 24 characters or not made of letters, digits and underscores, a value longer than 36 characters (counted as characters, so an emoji is one), the reserved names `first_open_time`, `first_visit_time`, `last_deep_link_referrer`, `user_id` and `first_open_after_install`, and names starting with `_`, `ga_`, `google_` or `firebase_` in any letter case.
-- To see a property in reports, register it in GA4 as a user-scoped custom dimension.
-
-## Engagement time
-
-Every hit carries `engagement_time_msec`: the time since the previous hit during which the page was visible **and** focused, the same interval `gtag.js` measures.
-
-- Switching tabs, windows or apps, or minimising the browser, stops the clock. Coming back starts it again.
-- Focus inside a child frame (an `iframe`, an embedded viewer) doesn't count.
-- If your app itself runs inside another page's iframe, it only counts while that iframe has focus, so a reader who never clicks into it reports no engagement.
-- Losing focus sends nothing; the time rides on the next hit.
-- When the page is hidden or closed, the time left over goes out as one `page_engagement` event (see `sendEngagementOnHide`), always over the unload-safe transport. That event waits until at least 1 second has built up; anything shorter rides on the next hit. Its `page_location` is the last path you reported in a page view; with `siteUrl` set and no page view yet, it has none, so the raw page address (and anything in its query) never goes out. Without this event, a visit with a single page view would report almost no engagement.
-
-This feeds GA4's **average engagement time**. It does **not** make sessions count as engaged, so engaged sessions, engagement rate and bounce rate stay unusable ([#43](https://github.com/streamvessel/ng-ga4/issues/43)). Expect the numbers to come out close to `gtag.js`'s, possibly a little lower, since this library also stops the clock when the window loses focus.
-
-## Client ID and gtag.js
-
-On the web the client ID comes from `clientIdSource`:
-
-- **`'auto'`** (default): use the `_ga` cookie when it is present and well formed, else this library's own ID in `localStorage`. A site running both `gtag.js` and this library counts each person once, across subdomains too. The adopted ID is never copied into storage, so deleting `_ga` returns to the library's own ID.
-- **`'cookie'`**: `_ga` is the only source. One is created if missing (this implies `writeGaCookie`), reusing an ID already stored in `gtag.js`'s format. An older UUID-style ID is replaced, so those users are counted as new once.
-- **`'storage'`**: `localStorage` only. `_ga` is never read or written.
-
-Reading an existing cookie is itself a consent-relevant act. Use `'storage'` if this library must never read `_ga`.
-
-A `_ga` value is accepted only in `gtag.js`'s own format, with an ID of at most 64 characters (letters, digits, `.`, `_`, `-`). Anything else is ignored. This keeps out malformed and oversized values; it can't tell a well-formed cookie planted from another subdomain from a real one.
-
-**`writeGaCookie`** writes `_ga` when there is none or it fails the check above, using the library's own ID, on the registrable domain, with `SameSite=Lax`, `Secure` on HTTPS and `gtag.js`'s two-year expiry. An ID adopted from a cookie is never written back. Pass `NgGa4CookieOptions` to change the defaults:
-
-- `domain`: e.g. `'.example.com'`. Without it, the library finds the registrable domain by setting a short-lived probe cookie (`_ng_ga4_probe_<random>`) at each candidate and keeping the first the browser accepts. If the browser refuses every candidate, no `_ga` is written at all; a single-label host such as `localhost` gets a host-only cookie. Set `domain` to skip the probe, for instance if a consent platform needs a fixed list of cookie names.
-- `flags`: replaces the default attributes, e.g. `'SameSite=None; Secure'` for a cross-site iframe.
-- `maxAgeSeconds`: lifetime, two years by default.
-
-**Upgrading** a site that also runs `gtag.js` moves each returning user onto the `gtag.js` identity, once. That is a one-off jump in user counts; plan when you ship it.
-
-## Consent
-
-With no `consent` option and no `setConsent()` call, nothing changes: no `consent` field is sent, and GA4 applies your property's defaults.
-
-For a consent banner, start disabled and enable when the user accepts:
-
-```typescript
-// In your providers: no client ID is created and nothing is stored yet.
-provideNgGa4({ measurementId: 'G-XXXXXXXXX', apiSecret: 'your-api-secret', enabled: false, isExtension: false })
-
-// In your consent banner component:
-constructor(private ga4: NgGa4Service) {}
-
-onBannerAccepted(): void {
-    this.ga4.setConsent({ analyticsStorage: 'granted', adUserData: 'granted', adPersonalization: 'denied' });
-    this.ga4.setEnabled(true);
-}
-```
-
-Events fired while disabled are dropped, not queued, so the first page view before consent is lost. That is on purpose.
-
-| Signal | Sent to GA4 | Effect |
-|---|---|---|
-| `adUserData` | as `consent.ad_user_data` | GA4 acts on it |
-| `adPersonalization` | as `consent.ad_personalization` | GA4 acts on it |
-| `analyticsStorage` | no | Whether this library stores identifiers |
-
-Denying `analyticsStorage` stops every write to `localStorage`, `chrome.storage` and `_ga`, and deletes what is already stored (the user ID too), also on a start-up that begins denied. Collection continues with an ID held in memory, so each page load is a new user and session. Under `'storage'` the cookie is left alone; where `gtag.js` also runs, it writes `_ga` again on its next hit.
-
-Things to know:
-
-- **This library doesn't store consent, and each tab or extension context has its own.** Call `setConsent()` on every start-up from your own record of the user's choice, in every context. A tab that is still granted keeps writing session data to the shared store after another tab denies.
-- **`setEnabled(false)` stops sending but deletes nothing.** To remove stored identifiers, deny `analyticsStorage`.
-- **Granting again restores the client ID, user ID and session at once, but `_ga` only on the next page load.**
-- An invalid consent value counts as `denied`, with a warning.
-
-## Chrome extensions
-
-1. Add the `storage` permission to `manifest.json`: `"permissions": ["storage"]`. The default extension CSP is fine, since no remote script is loaded.
-2. Set `isExtension: true` and a `siteUrl`:
-
-```typescript
-NgGa4Module.forRoot({
-    measurementId: 'G-XXXXXXXXX',
-    apiSecret: 'your-api-secret',
-    enabled: true,
-    isExtension: true,
-    siteUrl: 'https://your-extension-domain.com',
-});
-```
-
-| Data | Web | Extension |
-|---|---|---|
-| Client ID | `_ga` if present (default), else `localStorage` | `chrome.storage.local` |
-| Session number | `localStorage` | `chrome.storage.local` |
-| Session ID and last activity | `localStorage` | `chrome.storage.session` |
-| User properties | `localStorage` | `chrome.storage.local` |
-
-### Service-worker teardown
-
-Chrome stops an MV3 service worker once it goes idle, and a `chrome.storage` write still pending at that moment is lost. If the lost write was a new client ID, the next start creates another one and the user is counted twice.
-
-**Create the client ID at install time.** Register this at the top level of the service worker, outside Angular:
-
-```typescript
-import { seedNgGa4ClientId } from '@stream-vessel/ng-ga4';
-
-chrome.runtime.onInstalled.addListener(() => seedNgGa4ClientId());
-```
-
-Run it on every `onInstalled`, not only `reason === 'install'`: users of an already published extension only ever get `'update'`. The call is idempotent and never throws. It doesn't help a user who clears extension storage, since `onInstalled` doesn't fire again.
-
-**Wait for pending writes before an event handler returns**, after tracking calls and after `setConsent()`:
-
-```typescript
-chrome.action.onClicked.addListener(async () => {
-    ga.trackEvent('action_clicked');
-    await ga.flushStorage();
-});
-```
-
-`flushStorage()` covers storage, not event delivery ([#26](https://github.com/streamvessel/ng-ga4/issues/26)). Neither step survives a browser crash or an extension reload.
-
-### Sessions across tabs
-
-Every hit first reads the stored session and adopts a newer one, so tabs agree on the current session. On the web that read comes from `localStorage`. Extensions can't read `chrome.storage` synchronously, so they follow it through `chrome.storage.onChanged`.
-
-## Debug mode
-
-`debug: true` tags every event with `debug_mode`, so it shows in [DebugView](https://support.google.com/analytics/answer/7201382). **Events are still recorded** and go out over your configured transport. Each payload is also posted to the [validation endpoint](https://developers.google.com/analytics/devguides/collection/protocol/ga4/validating-events), and any problems it reports are logged with `console.warn`.
-
-```typescript
-provideNgGa4({ ...config, debug: !environment.production })
-```
+The topic docs are documented for the latest `master`, which can be ahead of the release on npm. Unreleased changes are listed under [Unreleased](https://github.com/streamvessel/ng-ga4/blob/master/CHANGELOG.md#unreleased) in the changelog.
 
 ## Other notes
 

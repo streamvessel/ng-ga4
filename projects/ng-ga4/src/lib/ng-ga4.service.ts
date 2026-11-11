@@ -277,8 +277,8 @@ export class NgGa4Service implements OnDestroy {
      * `undefined` one is ignored, and `null` instead of an object removes all.
      * Sent as `user_properties` on every later hit and stored next to the client
      * ID. Anything GA4 would reject is dropped, with a warning in dev mode — see
-     * the README for the limits. Calls made before `init()` finishes are applied
-     * once it does.
+     * "User properties" in docs/identity.md for the limits. Calls made before
+     * `init()` finishes are applied once it does.
      */
     setUserProperties(properties: Record<string, NgGa4UserPropertyValue> | null): void {
         if (!this.isBrowser) {

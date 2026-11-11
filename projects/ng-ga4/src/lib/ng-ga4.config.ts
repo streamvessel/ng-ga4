@@ -97,13 +97,13 @@ export interface NgGa4Config {
      *
      * Raises GA4's average engagement time. It does not affect engaged
      * sessions, engagement rate or bounce rate on a Measurement-Protocol-only
-     * property — see the README.
+     * property — see docs/limitations.md.
      *
      * Losing focus alone (e.g. alt-tab) stops the clock the same way but does
      * not send this event; the accrued time rides out on the next hit or the
      * eventual hide. Always sent over the unload-safe transport chain
      * (`sendBeacon` → `fetch(keepalive)` → XHR), regardless of the configured
-     * `transport`. See "Engagement time" in the README for the full
+     * `transport`. See "Engagement time" in docs/engagement.md for the full
      * reasoning.
      */
     sendEngagementOnHide?: boolean;
@@ -114,7 +114,7 @@ export interface NgGa4Config {
      * it appears as an ordinary custom event in Events reports. Validated at
      * startup against the Measurement Protocol's naming rules; an invalid or
      * reserved value logs a console warning and falls back to the default.
-     * See "Engagement time" in the README for the full reasoning.
+     * See "Engagement time" in docs/engagement.md for the full reasoning.
      */
     engagementEventName?: string;
 
