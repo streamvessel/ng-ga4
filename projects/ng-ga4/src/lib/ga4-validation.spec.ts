@@ -8,6 +8,13 @@ describe('ga4-validation', () => {
             }
         });
 
+        it('accepts names in non-English letters', () => {
+            for (const name of ['café', '購入', 'покупка', 'खरीदारी', 'café_2']) {
+                expect(eventNameProblem(name)).withContext(name).toBeNull();
+                expect(paramNameProblem(name)).withContext(name).toBeNull();
+            }
+        });
+
         it('rejects an empty or non-string name', () => {
             expect(eventNameProblem('')).toMatch(/non-empty/);
             expect(eventNameProblem(undefined)).toMatch(/non-empty/);
@@ -19,7 +26,7 @@ describe('ga4-validation', () => {
         });
 
         it('rejects characters other than letters, digits and underscores, and a leading digit', () => {
-            for (const name of ['my event', 'my-event', 'café', '9lives']) {
+            for (const name of ['my event', 'my-event', '9lives', 'café!']) {
                 expect(eventNameProblem(name)).withContext(name).toMatch(/must start with a letter/);
             }
         });

@@ -26,7 +26,10 @@ const PARAM_VALUE_LENGTH_OVERRIDES: ReadonlyMap<string, number> = new Map([
  */
 export const RESERVED_NAME_PREFIXES: readonly string[] = Object.freeze(['_', 'firebase_', 'ga_', 'google_', 'gtag.']);
 
-const NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
+// Unicode-aware: GA4 accepts names in non-English letters (café, 購入), and an
+// ASCII-only check would silently drop those events. Marks (\p{M}) cover
+// scripts such as Devanagari, whose letters carry combining vowel signs.
+const NAME_PATTERN = /^\p{L}[\p{L}\p{M}\p{N}_]*$/u;
 
 export interface Ga4NameRules {
     /** How the name is described in messages, e.g. `'event name'`. */
