@@ -1,4 +1,6 @@
 import { seedNgGa4ClientId } from './seed-client-id';
+import { CLIENT_ID_LOCK_NAME } from './client-id-lock';
+import { FakeLockManager, installLockManager } from './testing/fake-lock-manager';
 
 describe('seedNgGa4ClientId', () => {
     let originalChrome: any;
@@ -119,5 +121,69 @@ describe('seedNgGa4ClientId', () => {
 
         expect(await seedNgGa4ClientId()).toBeNull();
         expect(console.warn).toHaveBeenCalled();
+    });
+
+    // Concurrent cold start (#51): a worker's seed and a popup booting at the
+    // same moment. Storage here is asynchronous on a real task, as
+    // chrome.storage is, so both callers' reads can land before either write.
+    describe('concurrent cold start', () => {
+        let restoreLocks: (() => void) | undefined;
+
+        afterEach(() => {
+            restoreLocks?.();
+            restoreLocks = undefined;
+        });
+
+        function mockSlowChrome(store: Record<string, any>, setSpy: jasmine.Spy): void {
+            const later = <T>(fn: () => T) => new Promise<T>(resolve => setTimeout(() => resolve(fn()), 1));
+            mockChrome(store, {
+                get: (keys: string[]) => later(() =>
+                    keys.reduce((acc: any, k: string) => { if (store[k] !== undefined) acc[k] = store[k]; return acc; }, {})
+                ),
+                set: (items: any) => { setSpy(items); return later(() => { Object.assign(store, items); }); }
+            });
+        }
+
+        it('both callers end up with one ID, written once, under the real navigator.locks', async () => {
+            const store: Record<string, any> = {};
+            const setSpy = jasmine.createSpy('set');
+            mockSlowChrome(store, setSpy);
+
+            const [a, b] = await Promise.all([seedNgGa4ClientId(), seedNgGa4ClientId()]);
+
+            expect(a).toBeTruthy();
+            expect(b).toBe(a);
+            expect(store['ga_client_id']).toBe(a!);
+            expect(setSpy).toHaveBeenCalledTimes(1);
+        });
+
+        it('requests the shared client-ID lock', async () => {
+            const locks = new FakeLockManager();
+            restoreLocks = installLockManager(locks);
+            mockSlowChrome({}, jasmine.createSpy('set'));
+
+            await Promise.all([seedNgGa4ClientId(), seedNgGa4ClientId()]);
+
+            expect(locks.requested).toEqual([CLIENT_ID_LOCK_NAME, CLIENT_ID_LOCK_NAME]);
+            expect(locks.maxHeld).toBe(1);
+        });
+
+        // The control arm: without Web Locks the fallback is the pre-#51
+        // behaviour, and this mock reproduces the race the lock closes. If this
+        // ever starts passing with one ID, the spec above has stopped proving
+        // anything.
+        it('still works, but can mint twice, where navigator.locks is unavailable', async () => {
+            restoreLocks = installLockManager(undefined);
+            const store: Record<string, any> = {};
+            const setSpy = jasmine.createSpy('set');
+            mockSlowChrome(store, setSpy);
+
+            const [a, b] = await Promise.all([seedNgGa4ClientId(), seedNgGa4ClientId()]);
+
+            expect(a).toBeTruthy();
+            expect(b).toBeTruthy();
+            expect(b).not.toBe(a);
+            expect(setSpy).toHaveBeenCalledTimes(2);
+        });
     });
 });

@@ -250,6 +250,10 @@ chrome.action.onClicked.addListener(async () => {
 
 `flushStorage()` covers storage, not event delivery ([#26](https://github.com/streamvessel/ng-ga4/issues/26)). Neither step survives a browser crash or an extension reload.
 
+### Contexts starting together
+
+The service worker and a popup or options page can start at the same moment with no client ID stored yet. The library makes the second one wait for the first with a [Web Lock](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API), then read the ID the first one saved. `seedNgGa4ClientId()` takes the same lock. You don't need to do anything for this. If the lock isn't granted within 3 seconds, or the browser has no Web Locks, the ID is created without it, as before ([#51](https://github.com/streamvessel/ng-ga4/issues/51)).
+
 ### Sessions across tabs
 
 Every hit first reads the stored session and adopts a newer one, so tabs agree on the current session. On the web that read comes from `localStorage`. Extensions can't read `chrome.storage` synchronously, so they follow it through `chrome.storage.onChanged`.
