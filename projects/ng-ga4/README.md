@@ -152,10 +152,10 @@ onSignOut() {
 }
 ```
 
-- Use your own opaque ID. Never send an email address or other personal data.
+- Use your own opaque ID, at most 256 characters. Never send an email address or other personal data. A longer value, or one that isn't a string, logs a warning and clears the user ID.
 - The ID is stored next to the client ID (`localStorage`, or `chrome.storage.local` in an extension) and comes back on the next load, so you don't need to set it again on every start-up. An empty string counts as `null`.
 - It is always the top-level field, never a user property: `user_id` is a reserved user property name.
-- Calling it before collection starts is fine; it is stored once `init()` runs. With `analyticsStorage` denied it is sent but not stored, and denying deletes a stored one.
+- Calling it before collection starts is fine; it is stored once `init()` runs. With `analyticsStorage` denied, an ID you set is sent but not stored; a stored one is deleted, and not sent, also on a start-up that begins denied.
 - Each tab or extension context keeps its own copy until its next load, so sign out in every context that is open.
 
 ## Engagement time
