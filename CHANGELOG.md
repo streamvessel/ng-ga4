@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `setUserData()` sends user-provided data (`user_data`) for Google Ads enhanced
+  conversions. It is opt-in only and never collected automatically. Email and phone
+  are normalised and SHA-256 hashed in the browser; only the digests are sent, and
+  they are kept in memory only. They are left out while `adUserData` consent is
+  denied. See the README for the privacy obligations.
+  ([#23](https://github.com/streamvessel/ng-ga4/issues/23))
+- In debug mode, the payload posted to the validation endpoint sets
+  `validation_behavior: 'ENFORCE_RECOMMENDATIONS'`, so recommendation-level
+  problems are reported too. Real hits are unchanged.
+
 ## [0.2.2] - 2026-10-27
 
 ### Fixed

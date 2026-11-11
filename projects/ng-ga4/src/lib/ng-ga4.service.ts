@@ -8,6 +8,7 @@ import { ConsentState, Ga4ConsentPayload, NgGa4Consent } from './consent';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
+import { Ga4UserDataPayload, hashUserData, NgGa4UserData } from './user-data';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 
 interface Ga4Device {
@@ -45,6 +46,9 @@ export class NgGa4Service implements OnDestroy {
     private userLocation: Ga4UserLocation | null = null;
     private pendingCalls: Array<() => void> = [];
     private engagement: EngagementTimer | null = null;
+    // Hashed only, memory only — never persisted. See setUserData().
+    private userData: Ga4UserDataPayload | null = null;
+    private userDataGeneration = 0;
     // Resolved once, in init(), by resolveEngagementEventName() — validating on
     // every flush would warn on every window switch for a misconfigured name.
     private engagementEventName = 'page_engagement';
@@ -183,6 +187,38 @@ export class NgGa4Service implements OnDestroy {
         }
         if (!wasAllowed && isAllowed && this.clientId) {
             this.repersistIdentity(this.clientId);
+        }
+    }
+
+    /**
+     * Attach user-provided data (email / phone) for Google Ads enhanced
+     * conversions to every following hit, or clear it with `null`. Strictly
+     * opt-in: the library never collects these itself. Values are normalised and
+     * SHA-256 hashed in memory; the raw values are not kept and nothing is
+     * persisted, so call this again on every start-up (e.g. after login).
+     *
+     * Resolves once the hashes are ready; hits sent before that go without
+     * `user_data`. A later call (including `null`) always wins over an earlier
+     * one that is still hashing.
+     */
+    async setUserData(userData: NgGa4UserData | null): Promise<void> {
+        const generation = ++this.userDataGeneration;
+        this.userData = null;
+        if (!userData) {
+            return;
+        }
+        const subtle = typeof crypto !== 'undefined' ? crypto.subtle : undefined;
+        if (!this.isBrowser || !subtle) {
+            // crypto.subtle only exists in secure contexts. Sending the raw values
+            // instead is not an option, so the data is dropped.
+            if (this.isBrowser) {
+                console.warn('[ng-ga4] setUserData() needs crypto.subtle (a secure context); user_data will not be sent.');
+            }
+            return;
+        }
+        const hashed = await hashUserData(userData, subtle);
+        if (generation === this.userDataGeneration) {
+            this.userData = hashed;
         }
     }
 
@@ -466,6 +502,7 @@ export class NgGa4Service implements OnDestroy {
             device?: Ga4Device;
             user_location?: Ga4UserLocation;
             consent?: Ga4ConsentPayload;
+            user_data?: Ga4UserDataPayload;
         } = {
             client_id: this.clientId,
             // debug_mode has to ride on every event in the batch — DebugView only
@@ -489,6 +526,11 @@ export class NgGa4Service implements OnDestroy {
         const consentPayload = this.consent.toPayload();
         if (consentPayload) {
             body.consent = consentPayload;
+        }
+        // Withheld, not just flagged, when the user has denied ad_user_data: the
+        // hashes are personal data, and GA4 would not use them for ads anyway.
+        if (this.userData && consentPayload?.ad_user_data !== 'DENIED') {
+            body.user_data = this.userData;
         }
 
         // The validation endpoint records nothing — "events sent to the validation
@@ -524,7 +566,11 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private sendForValidation(body: object): void {
-        this.http.post<{ validationMessages?: unknown[] }>(this.collectUrl(this.GA4_DEBUG_ENDPOINT), body).subscribe({
+        // ENFORCE_RECOMMENDATIONS surfaces wrong types and exceeded limits, not only
+        // malformed requests. Validation request only: Google advises against it on
+        // real sends, where it would make GA4 drop data RELAXED would keep.
+        const validationBody = { ...body, validation_behavior: 'ENFORCE_RECOMMENDATIONS' };
+        this.http.post<{ validationMessages?: unknown[] }>(this.collectUrl(this.GA4_DEBUG_ENDPOINT), validationBody).subscribe({
             next: (response) => {
                 // Only speak up when something is actually wrong. Logging the whole
                 // envelope either way made a clean payload and a rejected one look
