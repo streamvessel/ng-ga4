@@ -2486,6 +2486,78 @@ describe('NgGa4Service', () => {
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
+        describe('category from formFactors (Chromium 128+)', () => {
+            const ANDROID_TABLET_HIGH = {
+                platform: 'Android',
+                platformVersion: '14.0.0',
+                model: 'SM-X710',
+                fullVersionList: [{ brand: 'Google Chrome', version: '128.0.6613.88' }]
+            };
+
+            const categoryFor = async (mobile: boolean, high: any): Promise<string> => {
+                spyOn<any>(service, 'getUserAgentData').and.returnValue(fakeUaData({ mobile, high }));
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(CHROME_WINDOWS);
+
+                await service.init();
+                service.trackEvent('x');
+
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                const category = req.request.body.device.category;
+                req.flush('', { status: 204, statusText: 'No Content' });
+                return category;
+            };
+
+            it('requests formFactors in the same high-entropy call as model', async () => {
+                const uaData = fakeUaData();
+                const highSpy = spyOn(uaData, 'getHighEntropyValues').and.callThrough();
+                spyOn<any>(service, 'getUserAgentData').and.returnValue(uaData);
+
+                await service.init();
+
+                expect(highSpy).toHaveBeenCalledTimes(1);
+                expect((highSpy.calls.mostRecent().args as unknown[])[0]).toEqual(jasmine.arrayContaining(['model', 'formFactors']));
+                httpMock.expectNone(() => true);
+            });
+
+            // The inconsistency #37 is about: the same Android tablet reported `tablet`
+            // via the UA path but `desktop` via Client Hints, because `mobile` is false.
+            it('reports a tablet the browser declares, where `mobile` alone said desktop', async () => {
+                expect(await categoryFor(false, { ...ANDROID_TABLET_HIGH, formFactors: ['Tablet'] })).toBe('tablet');
+            });
+
+            it('prefers Tablet when several form factors are reported', async () => {
+                expect(await categoryFor(true, { ...ANDROID_TABLET_HIGH, formFactors: ['Mobile', 'Tablet'] })).toBe('tablet');
+            });
+
+            it('maps Mobile and Desktop form factors directly', async () => {
+                expect(await categoryFor(true, { ...ANDROID_TABLET_HIGH, formFactors: ['Mobile'] })).toBe('mobile');
+            });
+
+            it('maps a Desktop form factor to desktop', async () => {
+                expect(await categoryFor(false, { platform: 'Windows', formFactors: ['Desktop'] })).toBe('desktop');
+            });
+
+            it('keeps the `mobile`-derived category on Chromium without formFactors', async () => {
+                expect(await categoryFor(true, { ...ANDROID_TABLET_HIGH })).toBe('mobile');
+            });
+
+            it('keeps the `mobile`-derived category for form factors GA4 has no category for', async () => {
+                expect(await categoryFor(false, { platform: 'Android', formFactors: ['XR'] })).toBe('desktop');
+            });
+
+            it('ignores a malformed formFactors value', async () => {
+                expect(await categoryFor(true, { platform: 'Android', formFactors: 'Tablet' })).toBe('mobile');
+            });
+
+            // No touch-point heuristic on the Client Hints path: a touchscreen laptop
+            // whose browser says desktop stays desktop.
+            it('does not consult maxTouchPoints when Client Hints are present', async () => {
+                spyOnProperty(navigator, 'maxTouchPoints', 'get').and.returnValue(10);
+
+                expect(await categoryFor(false, { platform: 'Windows' })).toBe('desktop');
+            });
+        });
+
         it('derives user_location.country_id from the browser time zone', async () => {
             spyOn<any>(service, 'getTimeZone').and.returnValue('Europe/Berlin');
 

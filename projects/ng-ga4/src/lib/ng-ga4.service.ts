@@ -747,7 +747,14 @@ export class NgGa4Service implements OnDestroy {
         if (uaData) {
             device.category = uaData.mobile ? 'mobile' : 'desktop';
             try {
-                const high = await uaData.getHighEntropyValues(['platform', 'platformVersion', 'fullVersionList', 'model']);
+                const high = await uaData.getHighEntropyValues(['platform', 'platformVersion', 'fullVersionList', 'model', 'formFactors']);
+                // `mobile` can only say mobile or desktop; `formFactors` (Chromium 128+)
+                // is the browser's own statement that this is a tablet. Older Chromium
+                // omits it and the `mobile`-derived category above stands.
+                const category = this.categoryFromFormFactors(high.formFactors);
+                if (category) {
+                    device.category = category;
+                }
                 if (high.platform) {
                     device.operating_system = high.platform;
                 }
@@ -790,6 +797,22 @@ export class NgGa4Service implements OnDestroy {
                 device[key] = parsed[key];
             }
         }
+    }
+
+    // Only the three values that map onto GA4's category vocabulary are used. Others
+    // ("XR", "EInk", "Watch", "Automotive") describe something GA4 has no category for,
+    // so they leave the `mobile`-derived value in place rather than override it with a
+    // guess. Tablet is checked first: it is the distinction `mobile` cannot express.
+    private categoryFromFormFactors(formFactors: unknown): string | undefined {
+        if (!Array.isArray(formFactors)) {
+            return undefined;
+        }
+        for (const [factor, category] of [['Tablet', 'tablet'], ['Mobile', 'mobile'], ['Desktop', 'desktop']]) {
+            if (formFactors.includes(factor)) {
+                return category;
+            }
+        }
+        return undefined;
     }
 
     private pickBrowser(list: Array<{ brand: string; version: string }> | undefined): { brand: string; version: string } | null {

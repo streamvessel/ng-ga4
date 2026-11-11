@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   iPhone, iPad and iPod. Chrome's reduced-UA placeholder model `K` is never
   reported ([#36](https://github.com/streamvessel/ng-ga4/issues/36)).
 
+### Fixed
+
+- On Chromium 128+, `device.category` can now be `tablet`. The Client Hints path
+  derived category from `userAgentData.mobile` alone, so an Android tablet
+  reported `tablet` on Firefox but `desktop` on Chrome. It now requests
+  `formFactors` in the same `getHighEntropyValues` call and uses the browser's
+  own `Tablet`/`Mobile`/`Desktop` statement; older Chromium keeps the
+  `mobile`-derived value. No touch-point guessing on this path
+  ([#37](https://github.com/streamvessel/ng-ga4/issues/37)).
+
 ## [0.2.2] - 2026-10-27
 
 ### Fixed
