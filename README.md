@@ -32,7 +32,7 @@ import { NgGa4Module } from '@stream-vessel/ng-ga4';
 export class AppModule {}
 ```
 
-**[Full documentation](projects/ng-ga4/README.md)**: standalone setup and the API. The topic docs in [`projects/ng-ga4/docs/`](projects/ng-ga4/docs) cover [every option](projects/ng-ga4/docs/configuration.md), [engagement time and debug mode](projects/ng-ga4/docs/engagement.md), [`gtag.js` interop](projects/ng-ga4/docs/identity.md), [consent](projects/ng-ga4/docs/consent.md), [Chrome extensions](projects/ng-ga4/docs/chrome-extensions.md) and [limitations](projects/ng-ga4/docs/limitations.md).
+**[Full documentation](projects/ng-ga4/README.md)**: standalone setup and the API, with an index of the [topic docs](projects/ng-ga4/README.md#documentation) for every option, engagement time, `gtag.js` interop, consent, Chrome extensions and debug mode.
 
 ## Repository layout
 
@@ -45,6 +45,7 @@ projects/ng-ga4/          # the library, the only published package
 ├── README.md             #   overview and API, the only doc published to npm
 ├── docs/                 #   topic docs (configuration, identity, consent, …), GitHub only
 │   └── limitations.md    #   what the Measurement Protocol can't do, with measurements
+├── LIMITATIONS.md        #   stub pointing to docs/limitations.md, for links from older npm READMEs
 └── ng-package.json       #   ng-packagr config (builds to dist/ng-ga4)
 .github/workflows/        # ci.yml (lint, test, build), publish.yml (manual release)
 ```

@@ -1,5 +1,7 @@
 # Limitations versus gtag.js
 
+> Documented for the latest `master`, which can be ahead of the release on npm. Unreleased changes are listed under [Unreleased](../../../CHANGELOG.md#unreleased) in the changelog.
+
 This library sends events to GA4 over the **Measurement Protocol** (MP) instead
 of loading `gtag.js` from `googletagmanager.com`. That is what lets it run under
 a strict Content Security Policy and inside a Chrome MV3 extension — and it is

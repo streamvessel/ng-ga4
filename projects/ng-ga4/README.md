@@ -91,7 +91,7 @@ bootstrapApplication(AppComponent, {
 - `enabled` (`boolean`): whether collection starts on. `false` creates no client ID and writes nothing until `setEnabled(true)`. See [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md).
 - `isExtension` (`boolean`): `true` in a Chrome extension, so state goes to `chrome.storage` instead of `localStorage`.
 
-**Optional**: `siteUrl`, `appVersion`, `transport`, `debug`, `clientIdSource`, `writeGaCookie`, `sendEngagementOnHide`, `engagementEventName` and `consent`. See [Configuration](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/configuration.md#optional).
+**Optional** options are described in [Configuration](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/configuration.md#optional).
 
 ## Usage
 
