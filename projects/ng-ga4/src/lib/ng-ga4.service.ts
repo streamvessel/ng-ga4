@@ -1313,10 +1313,15 @@ export class NgGa4Service implements OnDestroy {
                 'chrome.storage.local.set (user id)',
                 // Recovers into localStorage, which loadUserId() falls back to
                 // when chrome.storage is broken — same as repersistIdentity.
+                // The rejection can land after a sign-out or a consent
+                // withdrawal already deleted the local copy, so the fallback
+                // only writes if this ID is still current and still allowed.
                 () => chrome.storage.local.set({ ga_user_id: userId })
                     .catch(err => {
                         console.warn('[ng-ga4] chrome.storage.local.set failed', err);
-                        this.saveUserIdToLocalStorage(userId);
+                        if (this.userId === userId && this.consent.storageAllowed) {
+                            this.saveUserIdToLocalStorage(userId);
+                        }
                     })
             );
             return;

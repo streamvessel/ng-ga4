@@ -2900,6 +2900,57 @@ describe('NgGa4Service', () => {
             expect(mockLocalStorage['ga_user_id']).toBe('ext-user');
         });
 
+        describe('a chrome.storage write that fails after the id was cleared', () => {
+            async function initWithDeferredStorage(): Promise<ReturnType<typeof setupDeferredChromeMock>> {
+                spyOn(console, 'warn');
+                const deferred = setupDeferredChromeMock({ ga_client_id: 'chrome-client-id' });
+                reconfigureTestBed({ isExtension: true });
+                spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
+                const initDone = service.init();
+                for (let i = 0; i < 20; i++) {
+                    await drainMicrotasks();
+                }
+                await deferred.releaseAll();
+                await initDone;
+                deferred.calls.length = 0;
+                return deferred;
+            }
+
+            it('does not resurrect the id in localStorage after setUserId(null)', async () => {
+                const deferred = await initWithDeferredStorage();
+
+                service.setUserId('user-42');
+                service.setUserId(null);
+                await drainMicrotasks();
+                expect(deferred.calls[0]).toBe('local.set:ga_user_id');
+                deferred.rejectNext();
+                // releaseAll() only sees links already issued; the next one
+                // registers once the rejection has propagated.
+                await drainMicrotasks();
+                await deferred.releaseAll();
+                await service.flushStorage();
+
+                expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+            });
+
+            it('does not resurrect the id in localStorage after consent withdrawal', async () => {
+                const deferred = await initWithDeferredStorage();
+
+                service.setUserId('user-42');
+                service.setConsent({ analyticsStorage: 'denied' });
+                await drainMicrotasks();
+                expect(deferred.calls[0]).toBe('local.set:ga_user_id');
+                deferred.rejectNext();
+                // releaseAll() only sees links already issued; the next one
+                // registers once the rejection has propagated.
+                await drainMicrotasks();
+                await deferred.releaseAll();
+                await service.flushStorage();
+
+                expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+            });
+        });
+
         it('writes a setUserId() made during init() once, not again when init() resumes', async () => {
             const chromeLocal: Record<string, any> = { ga_client_id: 'chrome-client-id' };
             const deferred = setupDeferredChromeMock(chromeLocal);
