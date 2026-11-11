@@ -28,7 +28,11 @@ const RESERVED_USER_PROPERTY_PREFIXES = ['_', 'firebase_', 'ga_', 'google_'];
 
 /** Why a user property name is unusable, or `null` if it is fine. */
 export function userPropertyNameProblem(name: string): string | null {
-    const prefix = RESERVED_USER_PROPERTY_PREFIXES.find(p => name.startsWith(p));
+    // Case-insensitive: Google lists the prefixes in lower case without saying
+    // whether case matters, and wrongly accepting a name loses the property
+    // silently, while wrongly rejecting one only costs a rename and a warning.
+    const lower = name.toLowerCase();
+    const prefix = RESERVED_USER_PROPERTY_PREFIXES.find(p => lower.startsWith(p));
     if (prefix) {
         return `name "${name}" uses the reserved prefix "${prefix}"`;
     }

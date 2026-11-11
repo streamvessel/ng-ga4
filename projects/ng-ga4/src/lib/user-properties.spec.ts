@@ -26,7 +26,7 @@ describe('user properties', () => {
         });
 
         it('rejects the reserved prefixes', () => {
-            for (const name of ['_plan', 'firebase_plan', 'ga_plan', 'google_plan']) {
+            for (const name of ['_plan', 'firebase_plan', 'ga_plan', 'google_plan', 'GA_plan', 'Google_plan', 'Firebase_Plan']) {
                 expect(userPropertyNameProblem(name)).withContext(name).toContain('reserved prefix');
             }
         });
