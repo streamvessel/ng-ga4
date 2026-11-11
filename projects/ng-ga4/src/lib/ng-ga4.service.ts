@@ -431,9 +431,7 @@ export class NgGa4Service implements OnDestroy {
         // activity.
         const nameProblem = eventNameProblem(name);
         if (nameProblem) {
-            if (this.warnOnInvalid) {
-                console.warn(`[ng-ga4] trackEvent: ${nameProblem}. The event was not sent.`);
-            }
+            this.reportProblems('trackEvent', [`${nameProblem}. The event was not sent`]);
             return;
         }
 
@@ -450,14 +448,20 @@ export class NgGa4Service implements OnDestroy {
             session_number: this.sessionNumber,
             ...params,
             ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
-        });
-        if (this.warnOnInvalid) {
-            for (const problem of validation.problems) {
-                console.warn(`[ng-ga4] trackEvent("${name}"): ${problem}.`);
-            }
-        }
+        }, this.warnOnInvalid);
+        this.reportProblems(`trackEvent("${name}")`, validation.problems);
 
         this.sendToGA4([{ name, params: validation.params }]);
+    }
+
+    // The one place the dev-only warning policy lives, for every validated call.
+    private reportProblems(context: string, problems: string[]): void {
+        if (!this.warnOnInvalid) {
+            return;
+        }
+        for (const problem of problems) {
+            console.warn(`[ng-ga4] ${context}: ${problem}.`);
+        }
     }
 
     private drainPendingCalls(): void {

@@ -101,22 +101,20 @@ describe('ga4-validation', () => {
 
     describe('validateEventParams', () => {
         it('passes valid params through untouched with no problems', () => {
-            const result = validateEventParams({ method: 'email', value: 3 });
+            const result = validateEventParams({ method: 'email', value: 3 }, true);
             expect(result.params).toEqual({ method: 'email', value: 3 });
-            expect(result.dropped).toEqual([]);
             expect(result.problems).toEqual([]);
         });
 
         it('removes params with invalid names and reports each', () => {
-            const result = validateEventParams({ method: 'email', ga_x: 1, 'bad-name': 2 });
+            const result = validateEventParams({ method: 'email', ga_x: 1, 'bad-name': 2 }, true);
             expect(result.params).toEqual({ method: 'email' });
-            expect(result.dropped).toEqual(['ga_x', 'bad-name']);
             expect(result.problems.length).toBe(2);
         });
 
         it('keeps an over-long value but reports it', () => {
             const long = 'a'.repeat(150);
-            const result = validateEventParams({ term: long });
+            const result = validateEventParams({ term: long }, true);
             expect(result.params).toEqual({ term: long });
             expect(result.problems).toEqual([jasmine.stringMatching(/150 characters/)]);
         });
@@ -126,7 +124,7 @@ describe('ga4-validation', () => {
             for (let i = 0; i < 26; i++) {
                 params[`p${i}`] = i;
             }
-            const result = validateEventParams(params);
+            const result = validateEventParams(params, true);
             expect(Object.keys(result.params).length).toBe(26);
             expect(result.problems).toEqual([jasmine.stringMatching(/26 parameters; the limit is 25/)]);
         });
@@ -136,8 +134,19 @@ describe('ga4-validation', () => {
             for (let i = 0; i < 30; i++) {
                 params[`u${i}`] = undefined;
             }
-            const result = validateEventParams(params);
+            const result = validateEventParams(params, true);
             expect(result.params).toEqual({ kept: 1 });
+            expect(result.problems).toEqual([]);
+        });
+
+        it('removes invalid names but collects nothing when report is false', () => {
+            const params: Record<string, unknown> = { ga_x: 1, term: 'a'.repeat(150) };
+            for (let i = 0; i < 30; i++) {
+                params[`p${i}`] = i;
+            }
+            const result = validateEventParams(params, false);
+            expect('ga_x' in result.params).toBeFalse();
+            expect(Object.keys(result.params).length).toBe(31);
             expect(result.problems).toEqual([]);
         });
 
@@ -146,7 +155,7 @@ describe('ga4-validation', () => {
             for (let i = 0; i < 25; i++) {
                 params[`p${i}`] = i;
             }
-            const result = validateEventParams(params);
+            const result = validateEventParams(params, true);
             expect(result.problems.some(p => /parameters; the limit/.test(p))).toBeFalse();
         });
     });
