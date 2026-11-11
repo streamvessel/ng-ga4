@@ -53,7 +53,9 @@ export function userPropertyValueProblem(name: string, value: unknown): string |
     } else if (typeof value !== 'string') {
         return `value of "${name}" must be a string or a number`;
     }
-    if (String(value).length > MAX_USER_PROPERTY_VALUE_LENGTH) {
+    // Counted in code points, like the user ID check: an emoji is one
+    // character to GA4 but two UTF-16 units to `.length`.
+    if ([...String(value)].length > MAX_USER_PROPERTY_VALUE_LENGTH) {
         return `value of "${name}" is longer than ${MAX_USER_PROPERTY_VALUE_LENGTH} characters`;
     }
     return null;
@@ -64,7 +66,9 @@ export function userPropertyValueProblem(name: string, value: unknown): string |
  * would reject. Returns the new map and one message per dropped entry; never
  * mutates its inputs.
  *
- * A `null` value removes that property. The 25-property cap is applied to the
+ * A `null` value removes that property; an `undefined` one is ignored, so
+ * `{ plan: user?.plan }` before the user has loaded does not delete a stored
+ * plan. The 25-property cap is applied to the
  * merged result: properties already held always win over new ones, so a later
  * call can never silently evict an earlier property.
  */
@@ -76,7 +80,10 @@ export function mergeUserProperties(
     const problems: string[] = [];
     for (const name of Object.keys(updates)) {
         const value = updates[name];
-        if (value === null || value === undefined) {
+        if (value === undefined) {
+            continue;
+        }
+        if (value === null) {
             delete properties[name];
             continue;
         }
@@ -85,7 +92,7 @@ export function mergeUserProperties(
             problems.push(problem);
             continue;
         }
-        if (!(name in properties) && Object.keys(properties).length >= MAX_USER_PROPERTIES) {
+        if (!Object.hasOwn(properties, name) && Object.keys(properties).length >= MAX_USER_PROPERTIES) {
             problems.push(`"${name}" exceeds the limit of ${MAX_USER_PROPERTIES} user properties`);
             continue;
         }

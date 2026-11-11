@@ -57,12 +57,17 @@ export class NgGa4Service implements OnDestroy {
     private device: Ga4Device | null = null;
     private userLocation: Ga4UserLocation | null = null;
     private pendingCalls: Array<() => void> = [];
-    // Validated, merged user properties. Loaded from storage once in init();
-    // setUserProperties() calls made before that are queued here and applied on
-    // top of what was stored, so an early call is neither lost nor overwritten by
-    // the load. `null` once loaded.
+    // Validated, merged user properties, loaded from storage once in init().
     private userProperties: Record<string, string | number> = {};
-    private pendingUserPropertyUpdates: Array<Record<string, NgGa4UserPropertyValue> | null> | null = [];
+    // setUserProperties() calls made before that load, folded into one overlay
+    // (so an app that stays disabled cannot grow it without bound) and applied on
+    // top of what was stored. `clear` records a setUserProperties(null). A Map,
+    // not an object, so a `__proto__` key stays data. `null` once loaded.
+    private pendingUserProperties: { clear: boolean; updates: Map<string, string | number | null> } | null =
+        { clear: false, updates: new Map() };
+    // The raw stored value as this context last read or wrote it — on the web,
+    // a different value in localStorage means another tab wrote since.
+    private lastStoredUserProperties: string | null = null;
     private engagement: EngagementTimer | null = null;
     // Resolved once, in init(), by resolveEngagementEventName() — validating on
     // every flush would warn on every window switch for a misconfigured name.
@@ -282,18 +287,30 @@ export class NgGa4Service implements OnDestroy {
      * be registered as a user-scoped custom dimension in GA4 to show up in
      * reports.
      *
-     * Calls made before `init()` has finished are applied once it does. Inert
-     * on the server.
+     * A `null` value removes one property; an `undefined` value is ignored.
+     *
+     * Calls made before `init()` has finished — including while collection is
+     * off before it first runs — are applied once it does. Inert on the server.
      */
     setUserProperties(properties: Record<string, NgGa4UserPropertyValue> | null): void {
         if (!this.isBrowser) {
             return;
         }
-        if (this.pendingUserPropertyUpdates) {
-            // Copied: the caller may mutate its object before init() applies it.
-            this.pendingUserPropertyUpdates.push(properties === null ? null : { ...properties });
+        const pending = this.pendingUserProperties;
+        if (pending) {
+            if (properties === null) {
+                pending.clear = true;
+                pending.updates.clear();
+            } else {
+                for (const [name, value] of Object.entries(properties)) {
+                    if (value !== undefined) {
+                        pending.updates.set(name, value);
+                    }
+                }
+            }
             return;
         }
+        this.adoptStoredUserProperties();
         if (this.applyUserProperties(properties)) {
             this.saveUserProperties();
         }
@@ -1250,6 +1267,13 @@ export class NgGa4Service implements OnDestroy {
                 // key yields 0 from parseIntSafe(), and adoptSessionNumber()'s monotonic
                 // guard already no-ops on that, since session numbers only count up from 1.
                 this.adoptSessionNumber(this.parseIntSafe(changes['ga_session_number']?.newValue));
+                // Another context (popup, worker) wrote or removed user properties.
+                // Adopted so this context's next set merges onto them instead of
+                // overwriting them; skipped before the initial load, which reads
+                // the same value itself, and while storage is denied.
+                if ('ga_user_properties' in changes && !this.pendingUserProperties && this.consent.storageAllowed) {
+                    this.userProperties = parseStoredUserProperties(changes['ga_user_properties'].newValue);
+                }
             }
         };
         chrome.storage.onChanged.addListener(this.chromeStorageListener);
@@ -1366,24 +1390,49 @@ export class NgGa4Service implements OnDestroy {
     // Guarded rather than run on every runInit(): a retried init must not reload
     // over properties set since the first attempt got this far.
     private async restoreUserProperties(): Promise<void> {
-        if (!this.pendingUserPropertyUpdates) {
+        const pending = this.pendingUserProperties;
+        if (!pending) {
             return;
         }
         // Booting denied: what is stored was written under an earlier consent and
         // is about to be deleted by clearPersistedIdentity(). Not used for this
         // page either, for the same reason restoreUserId() skips a stored user ID.
-        this.userProperties = this.consent.storageAllowed
-            ? parseStoredUserProperties(await this.readPersistent('ga_user_properties'))
-            : {};
-        const updates = this.pendingUserPropertyUpdates;
-        this.pendingUserPropertyUpdates = null;
+        const raw = this.consent.storageAllowed ? await this.readPersistent('ga_user_properties') : null;
+        // Checked again: consent can be withdrawn while the read is in flight,
+        // and what it returns is then exactly what withdrawal deletes.
+        const stored = this.consent.storageAllowed ? raw : null;
+        this.userProperties = pending.clear ? {} : parseStoredUserProperties(stored);
+        this.lastStoredUserProperties = typeof stored === 'string' ? stored : null;
+        this.pendingUserProperties = null;
         // Merged in memory, then written once: only the final state matters.
-        let changed = false;
-        for (const update of updates) {
-            changed = this.applyUserProperties(update) || changed;
-        }
-        if (changed) {
+        // Also written when parsing dropped junk, or when the stored value is in
+        // a shape we would not write, so it is cleaned up rather than re-parsed
+        // on every start-up.
+        const applied = this.applyUserProperties(Object.fromEntries(pending.updates));
+        const storedClean = stored == null
+            ? !Object.keys(this.userProperties).length
+            : stored === JSON.stringify(this.userProperties);
+        if (applied || !storedClean) {
             this.saveUserProperties();
+        }
+    }
+
+    // Another tab may have written since this one last read or wrote; merging
+    // onto that stale map and writing it back would delete what the other tab
+    // set. Extensions get the same through chrome.storage.onChanged instead,
+    // since chrome.storage cannot be read synchronously.
+    private adoptStoredUserProperties(): void {
+        if ((this.config.isExtension && chrome?.storage) || !this.consent.storageAllowed) {
+            return;
+        }
+        try {
+            const raw = localStorage.getItem('ga_user_properties');
+            if (raw !== this.lastStoredUserProperties) {
+                this.userProperties = parseStoredUserProperties(raw);
+                this.lastStoredUserProperties = raw;
+            }
+        } catch {
+            // Unreadable storage: keep what this context holds.
         }
     }
 
@@ -1408,11 +1457,21 @@ export class NgGa4Service implements OnDestroy {
     private saveUserProperties(): void {
         if (!Object.keys(this.userProperties).length) {
             this.removePersistent('ga_user_properties', 'user properties');
-            return;
+        } else {
+            const json = JSON.stringify(this.userProperties);
+            this.writePersistent('ga_user_properties', json, 'user properties',
+                () => JSON.stringify(this.userProperties) === json);
         }
-        const json = JSON.stringify(this.userProperties);
-        this.writePersistent('ga_user_properties', json, 'user properties',
-            () => JSON.stringify(this.userProperties) === json);
+        // Read back rather than assumed: a write refused for quota leaves the old
+        // value, and treating that as another tab's write would discard this
+        // context's own properties on the next call.
+        if (!(this.config.isExtension && chrome?.storage)) {
+            try {
+                this.lastStoredUserProperties = localStorage.getItem('ga_user_properties');
+            } catch {
+                // See adoptStoredUserProperties.
+            }
+        }
     }
 
     // --- Storage: app-set values (persistent — chrome.storage.local / localStorage) ---

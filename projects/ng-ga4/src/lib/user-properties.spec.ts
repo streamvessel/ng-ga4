@@ -51,6 +51,12 @@ describe('user properties', () => {
             expect(userPropertyValueProblem('p', 'x'.repeat(37))).toContain('36');
         });
 
+        it('counts code points, not UTF-16 units', () => {
+            // 36 emoji: 36 characters to GA4, 72 to String#length.
+            expect(userPropertyValueProblem('p', '😀'.repeat(36))).toBeNull();
+            expect(userPropertyValueProblem('p', '😀'.repeat(37))).not.toBeNull();
+        });
+
         it('rejects non-finite numbers and other types', () => {
             expect(userPropertyValueProblem('p', NaN)).not.toBeNull();
             expect(userPropertyValueProblem('p', Infinity)).not.toBeNull();
@@ -102,6 +108,22 @@ describe('user properties', () => {
             // Updating a property already held does not count against the cap.
             expect(properties['p0']).toBe('updated');
             expect(problems.length).toBe(1);
+        });
+
+        it('ignores an undefined value instead of removing the property', () => {
+            expect(mergeUserProperties({ plan: 'pro' }, { plan: undefined }).properties).toEqual({ plan: 'pro' });
+        });
+
+        it('applies the cap to names that exist on Object.prototype', () => {
+            const current: Record<string, string> = {};
+            for (let i = 0; i < MAX_USER_PROPERTIES; i++) {
+                current[`p${i}`] = 'v';
+            }
+
+            const { properties, problems } = mergeUserProperties(current, { constructor: 'x', toString: 'y' });
+
+            expect(Object.keys(properties).length).toBe(MAX_USER_PROPERTIES);
+            expect(problems.length).toBe(2);
         });
 
         it('makes room for a new property once one is removed in the same call', () => {
