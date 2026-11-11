@@ -165,6 +165,16 @@ describe('EnhancedMeasurement', () => {
             expect(sent).toEqual([]);
         });
 
+        it('compares a non-special siteUrl host case-insensitively', () => {
+            em!.stop();
+            host.siteUrl = 'capacitor://MyApp';
+            create({ outboundClicks: true });
+            const a = addLink('https://other.test/');
+            a.href = 'capacitor://myapp/page';
+            click(a);
+            expect(sent).toEqual([]);
+        });
+
         it('counts middle-click but not right-click', () => {
             const a = addLink('https://other.test/');
             click(a, 'auxclick', 2);
@@ -229,6 +239,11 @@ describe('EnhancedMeasurement', () => {
         it('truncates link_text to 100 characters', () => {
             click(addLink('https://example.com/a.pdf', {}, 'x'.repeat(150)));
             expect((sent[0].params['link_text'] as string).length).toBe(100);
+        });
+
+        it('does not split a surrogate pair when truncating', () => {
+            click(addLink('https://example.com/a.pdf', {}, 'x'.repeat(99) + '\u{1F600}tail'));
+            expect(sent[0].params['link_text']).toBe('x'.repeat(99));
         });
     });
 
@@ -309,6 +324,22 @@ describe('EnhancedMeasurement', () => {
             outside.setAttribute('form', 'signup');
             fixture.appendChild(outside);
             outside.dispatchEvent(new Event('input', { bubbles: true }));
+            expect(sent[0].params['form_id']).toBe('signup');
+        });
+
+        it('falls back to the enclosing form when a field\'s form attribute names no form', () => {
+            const dangling = document.createElement('input');
+            dangling.setAttribute('form', 'no-such-form');
+            form.appendChild(dangling);
+            dangling.dispatchEvent(new Event('input', { bubbles: true }));
+            expect(sent[0].params['form_id']).toBe('signup');
+        });
+
+        it('falls back to the enclosing form for an element whose form property is not a form', () => {
+            const custom = document.createElement('div');
+            (custom as unknown as { form: string }).form = '';
+            form.appendChild(custom);
+            custom.dispatchEvent(new Event('input', { bubbles: true }));
             expect(sent[0].params['form_id']).toBe('signup');
         });
 

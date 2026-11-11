@@ -63,7 +63,9 @@ export class EnhancedMeasurement {
         private readonly doc: Document | null = typeof document !== 'undefined' ? document : null,
         private readonly win: Window | null = typeof window !== 'undefined' ? window : null
     ) {
-        this.siteHostname = host.siteUrl ? parseUrl(host.siteUrl)?.hostname ?? null : null;
+        // Lowercased: URL only folds case for http(s) and the other special
+        // schemes, and a siteUrl such as capacitor://MyApp is not one.
+        this.siteHostname = host.siteUrl ? parseUrl(host.siteUrl)?.hostname.toLowerCase() ?? null : null;
     }
 
     get started(): boolean {
@@ -176,7 +178,7 @@ export class EnhancedMeasurement {
             });
             return;
         }
-        // URL and Location both lowercase hostnames, so plain equality is enough.
+        // http(s) hostnames are already lowercase, from URL and Location alike.
         if (this.options.outboundClicks && url.hostname !== win.location.hostname && url.hostname !== this.siteHostname) {
             this.send('click', { ...common, link_domain: url.hostname, outbound: true });
         }
@@ -231,7 +233,8 @@ function parseUrl(url: string, base?: string): URL | null {
 // composedPath() rather than event.target: a link inside an open shadow root
 // retargets to its host by the time the event reaches document.
 function findLink(event: Event): HTMLAnchorElement | HTMLAreaElement | null {
-    for (const node of event.composedPath()) {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
+    for (const node of path) {
         if ((node instanceof HTMLAnchorElement || node instanceof HTMLAreaElement) && node.hasAttribute('href')) {
             return node;
         }
@@ -243,14 +246,12 @@ function formOf(target: EventTarget | null): HTMLFormElement | null {
     if (!(target instanceof Element)) {
         return null;
     }
-    // A form control's `.form` is its owner, honouring the `form="..."`
-    // attribute; when it is null, no ancestor <form> owns the control either,
-    // so the DOM walk below is only for non-controls such as contenteditable.
-    if ('form' in target) {
-        const owner = (target as { form: unknown }).form;
-        return owner instanceof HTMLFormElement ? owner : null;
-    }
-    return target.closest('form');
+    // `.form` honours the `form="..."` attribute on fields outside the <form>.
+    // Anything else falls back to the ancestor form: a web component's `form`
+    // is often just the reflected attribute string, and a control whose `form`
+    // attribute names a missing id still sits inside the form the user sees.
+    const owner = (target as { form?: unknown }).form;
+    return owner instanceof HTMLFormElement ? owner : target.closest('form');
 }
 
 // getAttribute(), not form.id / form.name / form.action: a field named "id",
@@ -270,6 +271,7 @@ function normaliseText(text: string | null | undefined): string {
     return (text ?? '').replace(/\s+/g, ' ').trim();
 }
 
+// Drops a high surrogate left dangling by the cut, rather than send half an emoji.
 function truncate(text: string): string {
-    return text.slice(0, MAX_TEXT_LENGTH);
+    return text.slice(0, MAX_TEXT_LENGTH).replace(/[\uD800-\uDBFF]$/, '');
 }
