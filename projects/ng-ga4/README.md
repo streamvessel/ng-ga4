@@ -160,7 +160,7 @@ Reading an existing cookie is itself a consent-relevant act. Use `'storage'` if 
 
 A `_ga` value is accepted only in `gtag.js`'s own format, with an ID of at most 64 characters (letters, digits, `.`, `_`, `-`). Anything else is ignored. This keeps out malformed and oversized values; it can't tell a well-formed cookie planted from another subdomain from a real one.
 
-**`writeGaCookie`** writes `_ga` when there is none or it fails the check above, using the library's own ID, on the registrable domain, with `SameSite=Lax`, `Secure` on HTTPS and `gtag.js`'s two-year expiry. An ID adopted from a cookie is never written back. Pass `NgGa4CookieOptions` to change the defaults:
+**`writeGaCookie`** writes `_ga` when there is none or it fails the check above, using the library's own ID, on the registrable domain, with `SameSite=Lax`, `Secure` on HTTPS and `gtag.js`'s two-year expiry. A `_ga` the library wrote itself is rewritten with the same ID on each page load, so — as with `gtag.js`, which rewrites it on every hit — the expiry runs from the user's last visit. An ID adopted from a cookie is never written back. Pass `NgGa4CookieOptions` to change the defaults:
 
 - `domain`: e.g. `'.example.com'`. Without it, the library finds the registrable domain by setting a short-lived probe cookie (`_ng_ga4_probe_<random>`) at each candidate and keeping the first the browser accepts. If the browser refuses every candidate, no `_ga` is written at all; a single-label host such as `localhost` gets a host-only cookie. Set `domain` to skip the probe, for instance if a consent platform needs a fixed list of cookie names.
 - `flags`: replaces the default attributes, e.g. `'SameSite=None; Secure'` for a cross-site iframe.

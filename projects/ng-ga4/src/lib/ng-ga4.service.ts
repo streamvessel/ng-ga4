@@ -1210,6 +1210,14 @@ export class NgGa4Service implements OnDestroy {
                 // Not persisted: the cookie is the durable store for an ID we don't
                 // own, so deleting _ga resets identity, the same way gtag.js itself
                 // mints a fresh client ID once _ga disappears.
+                //
+                // gtag.js rewrites _ga on every hit, so its two-year window slides.
+                // Matching that once per page load keeps an active user's cookie alive
+                // without a write per hit. Only for a cookie we wrote ourselves: an
+                // adopted ID never reaches ga_client_id, so it is never written back.
+                if (this.gaCookieWriteEnabled(source) && localStorage.getItem('ga_client_id') === fromCookie) {
+                    this.persistGaCookie(fromCookie);
+                }
                 return fromCookie;
             }
         }
@@ -1235,7 +1243,7 @@ export class NgGa4Service implements OnDestroy {
         const stored = this.loadOrCreateClientIdFromLocalStorage();
         // The source check is load-bearing: 'storage' means "never touch the cookie",
         // so it has to override writeGaCookie rather than combining with it.
-        if (source !== 'storage' && this.config.writeGaCookie) {
+        if (this.gaCookieWriteEnabled(source)) {
             // Write the ID already held, not a fresh mint: re-identifying users is the
             // harm this feature exists to avoid. The _ga payload may end up a UUID
             // instead of gtag's numeric pair, but GA4 accepts any client_id string —
@@ -1243,6 +1251,11 @@ export class NgGa4Service implements OnDestroy {
             this.persistGaCookie(stored);
         }
         return stored;
+    }
+
+    // 'cookie' implies writeGaCookie; 'storage' overrides it.
+    private gaCookieWriteEnabled(source: 'auto' | 'cookie' | 'storage'): boolean {
+        return source === 'cookie' || (source !== 'storage' && !!this.config.writeGaCookie);
     }
 
     // Validated once here, not trusted verbatim: a typo'd value (e.g. 'Cookie') would

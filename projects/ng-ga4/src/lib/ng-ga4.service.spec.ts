@@ -748,6 +748,88 @@ describe('NgGa4Service', () => {
             });
         });
 
+        // #40: gtag.js rewrites _ga on every hit, so its two-year window slides.
+        // A cookie this library wrote must be refreshed too, or it lapses two years
+        // after it was first set however active the user is.
+        describe('refreshing a _ga this library wrote', () => {
+            function gaWrites(): string[] {
+                return writtenCookies.filter(c => c.startsWith('_ga=') && !/max-age=0\b/.test(c));
+            }
+
+            it('rewrites its own _ga with the same ID and a fresh expiry under auto + writeGaCookie', async () => {
+                reconfigureTestBed({ writeGaCookie: true });
+                mockLocalStorage['ga_client_id'] = 'existing-id';
+                mockCookieJar = '_ga=GA1.1.existing-id';
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+
+                expect(gaWrites().length).toBe(1);
+                expect(gaWrites()[0]).toContain('_ga=GA1.1.existing-id');
+                expect(gaWrites()[0]).toContain('max-age=63072000');
+                expect(sentClientId()).toBe('existing-id');
+            });
+
+            it('rewrites its own _ga under clientIdSource: cookie', async () => {
+                reconfigureTestBed({ clientIdSource: 'cookie' });
+                mockLocalStorage['ga_client_id'] = '1234567890.1700000000';
+                mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+
+                expect(gaWrites().length).toBe(1);
+                expect(gaWrites()[0]).toContain('_ga=GA1.1.1234567890.1700000000');
+            });
+
+            it('writes once per page load, not once per hit', async () => {
+                reconfigureTestBed({ writeGaCookie: true });
+                mockLocalStorage['ga_client_id'] = 'existing-id';
+                mockCookieJar = '_ga=GA1.1.existing-id';
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+                sentClientId();
+                sentClientId();
+
+                expect(gaWrites().length).toBe(1);
+            });
+
+            // An adopted ID is never written back (see writeGaCookie's JSDoc): gtag
+            // owns that cookie and refreshes it itself.
+            it('does not rewrite a _ga holding an ID it adopted rather than minted', async () => {
+                reconfigureTestBed({ writeGaCookie: true });
+                mockLocalStorage['ga_client_id'] = 'existing-id';
+                mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+
+                expect(gaWrites()).toEqual([]);
+                expect(sentClientId()).toBe('1234567890.1700000000');
+            });
+
+            it('does not rewrite its own _ga when writeGaCookie is off', async () => {
+                mockLocalStorage['ga_client_id'] = 'existing-id';
+                mockCookieJar = '_ga=GA1.1.existing-id';
+
+                await service.init();
+
+                expect(gaWrites()).toEqual([]);
+            });
+
+            it('does not rewrite its own _ga while analytics storage is denied', async () => {
+                reconfigureTestBed({ consent: { analyticsStorage: 'denied' }, writeGaCookie: true });
+                mockLocalStorage['ga_client_id'] = 'existing-id';
+                mockCookieJar = '_ga=GA1.1.existing-id';
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+
+                expect(gaWrites()).toEqual([]);
+            });
+        });
+
         // Companion to the spec above: with cookies disabled, a write is attempted
         // but the browser has nothing to hand back, so every domain probe in
         // discoverCookieDomain fails the same way a public-suffix refusal would.
