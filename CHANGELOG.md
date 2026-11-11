@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- An extension's service worker and a popup or options page that start together
+  with no client ID stored no longer each create their own. Reading, creating and
+  saving the ID now happen under a [Web Lock](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API)
+  (`ng-ga4:client-id`) shared by the service and `seedNgGa4ClientId()`, so the
+  second context reads the first one's ID. Tested in a real MV3 extension on
+  Chromium 153: 200 forced races without the lock gave two IDs every time, with
+  it never. If the lock isn't granted within 3 seconds, or the browser has no
+  Web Locks, the ID is created without it, as before.
+  ([#51](https://github.com/streamvessel/ng-ga4/issues/51))
+
 ## [0.2.2] - 2026-10-27
 
 ### Fixed

@@ -8,6 +8,7 @@ import { ConsentState, Ga4ConsentPayload, NgGa4Consent } from './consent';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
+import { withClientIdLock } from './client-id-lock';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 
 interface Ga4Device {
@@ -1378,33 +1379,47 @@ export class NgGa4Service implements OnDestroy {
             return this.loadOrCreateClientIdFromLocalStorage();
         }
         try {
-            const result = await chrome.storage.local.get(['ga_client_id']);
-            if (result['ga_client_id']) {
-                return result['ga_client_id'];
-            }
-            const clientId = crypto.randomUUID();
-            if (this.consent.storageAllowed) {
-                // Enqueued like every other write so a write issued later cannot
-                // overtake it, and awaited so a failure reaches the catch below —
-                // falling back to localStorage rather than returning an ID that was
-                // persisted nowhere. enqueueStorageWrite's returned promise keeps
-                // the rejection for exactly this reason.
-                //
-                // Awaiting does not defeat MV3 teardown: it makes our code wait,
-                // not Chrome. seedNgGa4ClientId() is the fix that does — see #32.
-                //
-                // Unlike repersistIdentity, no inner catch: a failure here is worth
-                // both lines it produces, since the chain's message names the write
-                // and the catch below names the recovery.
-                await this.enqueueStorageWrite(
-                    'chrome.storage.local.set (mint client id)',
-                    () => chrome.storage.local.set({ ga_client_id: clientId })
-                );
-            }
-            return clientId;
+            // Held across the read as well as the write: a second context that
+            // queued behind us re-reads here and finds our ID instead of minting
+            // its own (#51). Fails open where Web Locks are unavailable.
+            return await withClientIdLock(() => this.readOrMintChromeClientId());
         } catch (err) {
             console.warn('[ng-ga4] chrome.storage.local failed, falling back to localStorage', err);
             return this.loadOrCreateClientIdFromLocalStorage();
         }
+    }
+
+    // Runs inside the client-ID lock; must stay a single get-miss-mint-set with
+    // nothing awaited outside it. Throws on storage failure so the caller's
+    // localStorage fallback applies.
+    private async readOrMintChromeClientId(): Promise<string> {
+        const result = await chrome.storage.local.get(['ga_client_id']);
+        if (result['ga_client_id']) {
+            return result['ga_client_id'];
+        }
+        const clientId = crypto.randomUUID();
+        if (this.consent.storageAllowed) {
+            // Enqueued like every other write so a write issued later cannot
+            // overtake it, and awaited so a failure reaches the caller's catch —
+            // falling back to localStorage rather than returning an ID that was
+            // persisted nowhere. enqueueStorageWrite's returned promise keeps
+            // the rejection for exactly this reason.
+            //
+            // The await is also what keeps the lock held until the write has
+            // landed; release it any earlier and the context queued behind us
+            // reads before our ID is there, and mints its own (#51).
+            //
+            // Awaiting does not defeat MV3 teardown: it makes our code wait,
+            // not Chrome. seedNgGa4ClientId() is the fix that does — see #32.
+            //
+            // Unlike repersistIdentity, no inner catch: a failure here is worth
+            // both lines it produces, since the chain's message names the write
+            // and the caller's catch names the recovery.
+            await this.enqueueStorageWrite(
+                'chrome.storage.local.set (mint client id)',
+                () => chrome.storage.local.set({ ga_client_id: clientId })
+            );
+        }
+        return clientId;
     }
 }

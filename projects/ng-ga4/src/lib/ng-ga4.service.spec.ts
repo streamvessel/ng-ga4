@@ -7,6 +7,8 @@ import { Subject } from 'rxjs';
 import { NgGa4Service } from './ng-ga4.service';
 import { NG_GA4_CONFIG, NgGa4Config } from './ng-ga4.config';
 import { isGtagClientId } from './ga-cookie';
+import { CLIENT_ID_LOCK_NAME } from './client-id-lock';
+import { FakeLockManager, installLockManager } from './testing/fake-lock-manager';
 
 const MOCK_UUID = '12345678-1234-1234-1234-123456789abc';
 const MOCK_TIMESTAMP = 1700000000000;
@@ -44,6 +46,8 @@ describe('NgGa4Service', () => {
     let pageEngaged: boolean;
     // undefined: hidden exactly when not engaged, which is what most specs mean.
     let pageHidden: boolean | undefined;
+    let fakeLocks: FakeLockManager;
+    let restoreLocks: () => void;
 
     function configureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
         // Reset here, not just in the top-level beforeEach, so a reconfigureTestBed()
@@ -270,6 +274,13 @@ describe('NgGa4Service', () => {
         // Save original chrome.storage (if any) for restoration
         originalChromeStorage = (window as any).chrome?.storage;
 
+        // The extension client-ID path takes a Web Lock (#51). A real grant lands
+        // on a task, which specs that drain only microtasks under jasmine.clock()
+        // never reach; this fake grants on a microtask with the same exclusive,
+        // FIFO semantics.
+        fakeLocks = new FakeLockManager();
+        restoreLocks = installLockManager(fakeLocks);
+
         configureTestBed();
     });
 
@@ -285,6 +296,7 @@ describe('NgGa4Service', () => {
         httpMock.verify();
         jasmine.clock().uninstall();
         clearChromeMock();
+        restoreLocks();
     });
 
     // --- init() ---
@@ -357,6 +369,91 @@ describe('NgGa4Service', () => {
             // The localStorage fallback mints in gtag's shape same as the direct web
             // path, not a UUID — see loadOrCreateClientIdFromLocalStorage.
             expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_MINTED_CLIENT_ID);
+        });
+    });
+
+    // --- client ID lock (#51) ---
+
+    describe('client ID lock across extension contexts', () => {
+        // A second, independently constructed service over the same mocked
+        // chrome.storage: the popup to `service`'s worker, both starting cold.
+        function secondExtensionService(): NgGa4Service {
+            return Injector.create({
+                providers: [
+                    NgGa4Service,
+                    { provide: HttpClient, useValue: TestBed.inject(HttpClient) },
+                    { provide: Router, useValue: { events: new Subject<any>().asObservable() } },
+                    { provide: NG_GA4_CONFIG, useValue: { ...defaultConfig, isExtension: true } },
+                    { provide: PLATFORM_ID, useValue: 'browser' },
+                    { provide: NgZone, useValue: TestBed.inject(NgZone) }
+                ]
+            }).get(NgGa4Service);
+        }
+
+        beforeEach(() => {
+            reconfigureTestBed({ isExtension: true });
+            // Distinct IDs per mint, so a double mint is visible rather than
+            // hidden behind the suite-wide constant MOCK_UUID.
+            (crypto.randomUUID as jasmine.Spy).and.returnValues(
+                'aaaaaaaa-0000-4000-8000-000000000001' as any,
+                'bbbbbbbb-0000-4000-8000-000000000002' as any
+            );
+        });
+
+        it('mints under the shared client-ID lock', async () => {
+            setupChromeMock({});
+
+            await service.init();
+
+            expect(fakeLocks.requested).toEqual([CLIENT_ID_LOCK_NAME]);
+        });
+
+        it('gives two contexts starting cold together one client ID, minted once', async () => {
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal);
+            const second = secondExtensionService();
+
+            await Promise.all([service.init(), second.init()]);
+
+            expect((service as any).clientId).toBe('aaaaaaaa-0000-4000-8000-000000000001');
+            expect((second as any).clientId).toBe((service as any).clientId);
+            expect(chromeLocal['ga_client_id']).toBe((service as any).clientId);
+            expect(crypto.randomUUID).toHaveBeenCalledTimes(1);
+            expect(fakeLocks.maxHeld).toBe(1);
+
+            second.ngOnDestroy();
+        });
+
+        // Control arm: the same two cold starts with Web Locks unavailable fall
+        // back to the pre-#51 behaviour, and this mock reproduces the double
+        // mint. If this stops reproducing it, the spec above proves nothing.
+        it('falls back to unlocked minting where navigator.locks is unavailable', async () => {
+            restoreLocks();
+            restoreLocks = installLockManager(undefined);
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal);
+            const second = secondExtensionService();
+
+            await Promise.all([service.init(), second.init()]);
+
+            expect((service as any).clientId).toBeTruthy();
+            expect((second as any).clientId).toBeTruthy();
+            expect((second as any).clientId).not.toBe((service as any).clientId);
+            expect(crypto.randomUUID).toHaveBeenCalledTimes(2);
+
+            second.ngOnDestroy();
+        });
+
+        it('still falls back to localStorage when chrome.storage fails inside the lock', async () => {
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
+            setupChromeMock({});
+            (window as any).chrome.storage.local.get = () => Promise.reject(new Error('no access'));
+            spyOn(console, 'warn');
+
+            await service.init();
+
+            expect((service as any).clientId).toBe(MOCK_MINTED_CLIENT_ID);
+            expect(fakeLocks.requested).toEqual([CLIENT_ID_LOCK_NAME]);
         });
     });
 
