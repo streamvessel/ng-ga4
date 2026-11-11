@@ -128,13 +128,14 @@ export class MyComponent {
 | `trackEvent(name, params?)` | Send a custom event. |
 | `trackPageView(path, title?)` | Send a page view. Called for you on navigation. |
 | `setConsent(consent)` | Update consent. Keys you leave out stay as they are. |
+| `setUserData(data)` | Opt-in user-provided data for enhanced conversions; `null` clears it. See [User-provided data](#user-provided-data). |
 | `setEnabled(enabled)` | Turn collection on or off. The first `true` runs the initialisation that `enabled: false` skipped. |
 | `flushStorage()` | Resolves once pending `chrome.storage` writes have landed. Resolves at once on the web. |
 | `init()` | Starts the library. Runs for you at app start. |
 
 Calls made while collection is off are dropped. Calls made after `init()` has started but before it finishes are queued and sent once it does; calls made before it starts (for example from an earlier `APP_INITIALIZER`) are dropped.
 
-Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](#chrome-extensions)), `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState` and `NG_GA4_CONFIG`.
+Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](#chrome-extensions)), `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState`, `NgGa4UserData` and `NG_GA4_CONFIG`.
 
 ## Engagement time
 
@@ -204,6 +205,33 @@ Things to know:
 - **Granting again restores the client ID and session at once, but `_ga` only on the next page load.**
 - An invalid consent value counts as `denied`, with a warning.
 
+## User-provided data
+
+Off unless you call `setUserData()`. The library never reads an email address or phone number on its own. Use this only if you import GA4 conversions into Google Ads and want [enhanced conversions](https://developers.google.com/analytics/devguides/collection/ga4/uid-data).
+
+```typescript
+// After the user signs in, with data you already hold:
+await this.ga4.setUserData({ email: user.email, phone: user.phone }); // phone in E.164, e.g. '+15555555555'
+
+// On sign-out:
+await this.ga4.setUserData(null);
+```
+
+- Values are normalised the way Google requires and SHA-256 hashed in the browser. Emails are lowercased, spaces are removed, and dots before the `@` are dropped for `gmail.com` and `googlemail.com`. Phones keep only their digits, with `+` added in front. Only the hex digests go into the request, as `user_data.sha256_email_address` and `user_data.sha256_phone_number`. Each takes up to 3 values; more are cut with a warning.
+- Include the country code in phone numbers. The library can't guess it, and a number without one never matches.
+- Nothing is stored. The hashes live in memory only, so call `setUserData()` again on every start-up and in every tab or extension context.
+- Hits sent before the returned promise resolves go without `user_data`.
+- `user_data` is left out while `adUserData` consent is `'denied'`, and it comes back once consent is granted.
+- It needs `crypto.subtle`, which only exists in a secure context (HTTPS or `localhost`). Elsewhere the call does nothing and logs a warning; raw values are never sent.
+
+**Your obligations.** A hashed email address is still personal data. Before you send it you must:
+
+- have the user's consent to share it with Google for advertising, and send `adUserData: 'granted'` to match;
+- disclose it in your privacy policy;
+- follow Google's [customer data policies](https://support.google.com/adspolicy/answer/7475709) and, in the EEA/UK, the [EU user consent policy](https://www.google.com/about/company/user-consent-policy/).
+
+Clear it with `setUserData(null)` when the user signs out or withdraws consent.
+
 ## Chrome extensions
 
 1. Add the `storage` permission to `manifest.json`: `"permissions": ["storage"]`. The default extension CSP is fine, since no remote script is loaded.
@@ -256,7 +284,7 @@ Every hit first reads the stored session and adopts a newer one, so tabs agree o
 
 ## Debug mode
 
-`debug: true` tags every event with `debug_mode`, so it shows in [DebugView](https://support.google.com/analytics/answer/7201382). **Events are still recorded** and go out over your configured transport. Each payload is also posted to the [validation endpoint](https://developers.google.com/analytics/devguides/collection/protocol/ga4/validating-events), and any problems it reports are logged with `console.warn`.
+`debug: true` tags every event with `debug_mode`, so it shows in [DebugView](https://support.google.com/analytics/answer/7201382). **Events are still recorded** and go out over your configured transport. Each payload is also posted to the [validation endpoint](https://developers.google.com/analytics/devguides/collection/protocol/ga4/validating-events), and any problems it reports are logged with `console.warn`. That copy asks for `validation_behavior: 'ENFORCE_RECOMMENDATIONS'`, so wrong types and values over the limits are reported as well as malformed requests. The real hit is left at the default (`RELAXED`), which Google recommends for real traffic.
 
 ```typescript
 provideNgGa4({ ...config, debug: !environment.production })
