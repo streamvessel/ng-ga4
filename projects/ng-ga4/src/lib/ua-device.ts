@@ -16,6 +16,8 @@ export interface UaDeviceInfo {
     operating_system_version?: string;
     browser?: string;
     browser_version?: string;
+    model?: string;
+    brand?: string;
 }
 
 interface Detected {
@@ -85,7 +87,67 @@ export function deviceFromUserAgent(ua: string, maxTouchPoints = 0): UaDeviceInf
         }
     }
     info.category = category;
+
+    const hardware = detectHardware(ua, os?.name, category);
+    if (hardware.model) {
+        info.model = hardware.model;
+    }
+    if (hardware.brand) {
+        info.brand = hardware.brand;
+    }
     return info;
+}
+
+// Tokens that sit in the Android platform segment but are not a model name.
+//
+// "K" is Chrome's reduced user-agent: since Chrome 110 every Android UA carries
+// `Android 10; K` regardless of the real device, so it identifies nothing. Client Hints
+// `model` is where Chromium still exposes the real value.
+const NON_MODEL_ANDROID_TOKENS = /^(?:K|wv|Mobile|Tablet|U|Linux|rv:.*)$/;
+// Pre-KitKat UAs carry the locale here ("en-us", "de"). Lower-case only, so a short
+// model name is not mistaken for one.
+const LOCALE_TOKEN = /^[a-z]{2}(?:[-_][a-zA-Z]{2,4})?$/;
+
+// `model` is the device the UA names, `brand` its maker — but brand is only claimed
+// where the UA leaves no doubt. "iPhone"/"iPad"/"iPod" can only be Apple. An Android
+// model token can be from any of hundreds of makers, and its prefix ("SM-", "Pixel")
+// is a guess, so Android gets a model and no brand.
+//
+// Android tokens are sent raw ("SM-G991B", not "Galaxy S21"). Whether GA4 wants the raw
+// token or the marketing name has not been settled against a real property yet, and a
+// lookup table would be stale the week it shipped — see #36.
+function detectHardware(ua: string, os: string | undefined, category: string): { model?: string; brand?: string } {
+    const apple = /\((iPhone|iPad|iPod)\b/.exec(ua);
+    if (apple) {
+        return { model: apple[1], brand: 'Apple' };
+    }
+    // A desktop-mode iPad: detectCategory already trusted touch points to call this
+    // Macintosh UA a tablet, and the only Apple tablet is the iPad.
+    if (os === 'iOS' && category === 'tablet') {
+        return { model: 'iPad', brand: 'Apple' };
+    }
+    if (os === 'Android') {
+        return { model: androidModel(ua) };
+    }
+    return {};
+}
+
+function androidModel(ua: string): string | undefined {
+    // The platform segment: everything after "Android x.y" up to the closing paren,
+    // e.g. "(Linux; Android 13; SAMSUNG SM-S918B Build/TP1A.220624.014; wv)".
+    const segment = /Android[^;)]*;([^)]*)\)/.exec(ua);
+    if (!segment) {
+        return undefined;
+    }
+    for (const raw of segment[1].split(';')) {
+        // Old WebView UAs append the firmware build; Samsung Internet prefixes the maker.
+        // Stripping both makes the token match what Client Hints report for the same device.
+        const token = raw.replace(/\s+Build\/.*$/, '').replace(/^\s*SAMSUNG\s+/i, '').trim();
+        if (token && !NON_MODEL_ANDROID_TOKENS.test(token) && !LOCALE_TOKEN.test(token)) {
+            return token;
+        }
+    }
+    return undefined;
 }
 
 // Order matters: an iOS UA contains "like Mac OS X", an Android UA contains "Linux",

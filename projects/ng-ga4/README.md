@@ -265,7 +265,7 @@ provideNgGa4({ ...config, debug: !environment.production })
 ## Other notes
 
 - **Server-side rendering:** on the server the library does nothing: no storage and no hits. Calls made there are dropped, not replayed, since the browser sends its own page view once the app starts.
-- **Device detection:** the Measurement Protocol ignores the `User-Agent` header, so the library sends a `device` object built from User-Agent Client Hints where available (Chromium), filled in from a built-in user-agent parser elsewhere.
+- **Device detection:** the Measurement Protocol ignores the `User-Agent` header, so the library sends a `device` object built from User-Agent Client Hints where available (Chromium), filled in from a built-in user-agent parser elsewhere. Device model comes from Client Hints or the user agent; Android models are sent as the raw token (`SM-S918B`, not `Galaxy S23 Ultra`), and brand is only sent for Apple devices, the one case the user agent leaves no doubt about.
 - **API secret:** anyone can read it from the built bundle; that is inherent to the Measurement Protocol in a browser. It lets someone send fake events, not read your data. If you see abuse, delete the secret in GA4, create a new one and redeploy.
 
 ## Peer dependencies
