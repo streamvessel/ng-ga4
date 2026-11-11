@@ -13,6 +13,7 @@ Used in production in the [Stream Vessel](https://streamvessel.com) Chrome exten
 - No `gtag.js` and no external scripts
 - Automatic page views from the Angular Router
 - Persistent client ID and 30-minute sessions, kept in step across tabs
+- User-ID for cross-device reporting (`setUserId()`)
 - Real engagement time: visible and focused time since the last hit
 - Chrome extension support (`chrome.storage`), including MV3 service-worker teardown
 - Shares the `_ga` client ID with `gtag.js` when both run on a site
@@ -127,6 +128,7 @@ export class MyComponent {
 |---|---|
 | `trackEvent(name, params?)` | Send a custom event. Checked against GA4's naming rules first; see [Event validation](#event-validation). |
 | `trackPageView(path, title?)` | Send a page view. Called for you on navigation. |
+| `setUserId(userId)` | Send `user_id` on every hit from now on; `null` on sign-out. See [User ID](#user-id). |
 | `setConsent(consent)` | Update consent. Keys you leave out stay as they are. |
 | `setEnabled(enabled)` | Turn collection on or off. The first `true` runs the initialisation that `enabled: false` skipped. |
 | `flushStorage()` | Resolves once pending `chrome.storage` writes have landed. Resolves at once on the web. |
@@ -145,6 +147,26 @@ GA4's `/mp/collect` answers `204` even for an event it is about to discard, so a
 - **Warnings only, sent unchanged:** App-stream event names (`ad_impression`, `in_app_purchase`, `screen_view`); string values over 100 characters (1000 for `page_location`, 420 for `page_referrer`, 300 for `page_title`), since GA4 360 properties allow 500; and events with more than 25 parameters, counting the ones the library adds except `debug_mode`.
 
 In development (`isDevMode()`) or with `debug: true`, each problem is logged with `console.warn`, naming the event and the rule. In a production build without `debug`, invalid events and parameters are still dropped, silently.
+
+## User ID
+
+Call `setUserId()` when a user signs in, and `setUserId(null)` when they sign out. Every hit after that carries a top-level `user_id`, the same as `gtag('config', 'G-XXXXXXXXX', { user_id })`, so GA4 can join one person across devices and platforms.
+
+```typescript
+onSignIn(user: User) {
+    this.analytics.setUserId(user.id);
+}
+
+onSignOut() {
+    this.analytics.setUserId(null);
+}
+```
+
+- Use your own opaque ID, at most 256 characters. Never send an email address or other personal data. A longer value, or one that isn't a string, logs a warning and clears the user ID.
+- The ID is stored next to the client ID (`localStorage`, or `chrome.storage.local` in an extension) and comes back on the next load, so you don't need to set it again on every start-up. An empty string counts as `null`.
+- It is always the top-level field, never a user property: `user_id` is a reserved user property name.
+- Calling it before collection starts is fine; it is stored once `init()` runs. With `analyticsStorage` denied, an ID you set is sent but not stored; a stored one is deleted, and not sent, also on a start-up that begins denied.
+- Each tab or extension context keeps its own copy until its next load, so sign out in every context that is open.
 
 ## Engagement time
 
@@ -205,13 +227,13 @@ Events fired while disabled are dropped, not queued, so the first page view befo
 | `adPersonalization` | as `consent.ad_personalization` | GA4 acts on it |
 | `analyticsStorage` | no | Whether this library stores identifiers |
 
-Denying `analyticsStorage` stops every write to `localStorage`, `chrome.storage` and `_ga`, and deletes what is already stored, also on a start-up that begins denied. Collection continues with an ID held in memory, so each page load is a new user and session. Under `'storage'` the cookie is left alone; where `gtag.js` also runs, it writes `_ga` again on its next hit.
+Denying `analyticsStorage` stops every write to `localStorage`, `chrome.storage` and `_ga`, and deletes what is already stored (the user ID too), also on a start-up that begins denied. Collection continues with an ID held in memory, so each page load is a new user and session. Under `'storage'` the cookie is left alone; where `gtag.js` also runs, it writes `_ga` again on its next hit.
 
 Things to know:
 
 - **This library doesn't store consent, and each tab or extension context has its own.** Call `setConsent()` on every start-up from your own record of the user's choice, in every context. A tab that is still granted keeps writing session data to the shared store after another tab denies.
 - **`setEnabled(false)` stops sending but deletes nothing.** To remove stored identifiers, deny `analyticsStorage`.
-- **Granting again restores the client ID and session at once, but `_ga` only on the next page load.**
+- **Granting again restores the client ID, user ID and session at once, but `_ga` only on the next page load.**
 - An invalid consent value counts as `denied`, with a warning.
 
 ## Chrome extensions

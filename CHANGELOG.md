@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   In development (or with `debug: true`) each one logs a `console.warn` naming
   the rule; production stays silent. App-stream event names, over-long string
   values and more than 25 parameters are warned about but sent unchanged.
+- `setUserId(userId)` sends a top-level `user_id` on every hit, for GA4's User-ID
+  reporting identity and cross-device analysis ([#18](https://github.com/streamvessel/ng-ga4/issues/18)).
+  Pass `null` on sign-out. The ID is stored next to the client ID, so it survives
+  reloads, and follows `analyticsStorage` consent like the client ID does.
 
 ### Changed
 
