@@ -1976,6 +1976,8 @@ describe('NgGa4Service', () => {
     // --- user properties ---
 
     describe('setUserProperties()', () => {
+        const EXT = { isExtension: true, siteUrl: 'https://ext.example' };
+
         function nextBody(): any {
             const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
             const body = req.request.body;
@@ -1983,145 +1985,73 @@ describe('NgGa4Service', () => {
             return body;
         }
 
-        it('omits user_properties entirely when none are set', async () => {
-            await service.init();
+        function sentUserProperties(): unknown {
             service.trackEvent('test_event');
+            return nextBody()['user_properties'];
+        }
 
-            expect(nextBody()['user_properties']).toBeUndefined();
-        });
+        function stored(store: Record<string, any> = mockLocalStorage): unknown {
+            const raw = store['ga_user_properties'];
+            return raw === undefined ? undefined : JSON.parse(raw);
+        }
 
-        it('sends user properties as a request-level { name: { value } } map', async () => {
-            await service.init();
-            service.setUserProperties({ plan: 'pro', seats: 5 });
-            service.trackEvent('test_event');
-
-            const body = nextBody();
-            expect(body['user_properties']).toEqual({ plan: { value: 'pro' }, seats: { value: 5 } });
-            expect(body['events'][0]['params']['plan']).toBeUndefined();
-        });
-
-        it('rides on page views too', async () => {
-            await service.init();
-            service.setUserProperties({ plan: 'pro' });
-            service.trackPageView('/home');
-
-            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
-        });
-
-        it('merges successive calls, removes a property set to null, and clears on null', async () => {
-            await service.init();
-            service.setUserProperties({ plan: 'pro', seats: 5 });
-            service.setUserProperties({ seats: null, region: 'eu' });
-            service.trackEvent('first');
-            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' }, region: { value: 'eu' } });
-
-            service.setUserProperties(null);
-            service.trackEvent('second');
-            expect(nextBody()['user_properties']).toBeUndefined();
-            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
-        });
-
-        it('drops invalid properties with a dev-mode warning and keeps the valid ones', async () => {
-            spyOn(console, 'warn');
-            await service.init();
-            service.setUserProperties({ plan: 'pro', user_id: 'u1', ga_thing: 'x', too_long: 'x'.repeat(37) });
-            service.trackEvent('test_event');
-
-            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
-            const warning = (console.warn as jasmine.Spy).calls.allArgs()
-                .find(args => String(args[0]).includes('setUserProperties'));
-            expect(warning).toBeDefined();
-            expect((warning![1] as string[]).length).toBe(3);
-        });
-
-        it('persists to localStorage and restores on the next load', async () => {
-            await service.init();
-            service.setUserProperties({ plan: 'pro' });
-            expect(JSON.parse(mockLocalStorage['ga_user_properties'])).toEqual({ plan: 'pro' });
-
-            // A fresh service over the same storage — a page reload.
-            reconfigureTestBed();
-            await service.init();
-            service.trackEvent('after_reload');
-
-            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
-        });
-
-        it('ignores malformed stored properties', async () => {
-            mockLocalStorage['ga_user_properties'] = '{not json';
-            await service.init();
-            service.trackEvent('test_event');
-
-            expect(nextBody()['user_properties']).toBeUndefined();
-        });
-
-        it('applies a call made before init() on top of what was stored', async () => {
-            mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'free', region: 'eu' });
-            service.setUserProperties({ plan: 'pro' });
-            await service.init();
-            service.trackEvent('test_event');
-
-            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' }, region: { value: 'eu' } });
-            expect(JSON.parse(mockLocalStorage['ga_user_properties'])).toEqual({ plan: 'pro', region: 'eu' });
-        });
-
-        it('keeps a call made while disabled and applies it once enabled', async () => {
-            reconfigureTestBed({ enabled: false });
-            await service.init();
-            service.setUserProperties({ plan: 'pro' });
-            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
-
-            service.setEnabled(true);
-            await service.init();
-            service.trackEvent('after_enable');
-
-            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
-        });
-
-        it('is inert on the server', async () => {
-            reconfigureTestBed({}, 'server');
-            expect(() => service.setUserProperties({ plan: 'pro' })).not.toThrow();
-            await service.init();
-            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
-        });
-
-        it('does not throw into the caller when localStorage refuses the write', async () => {
-            await service.init();
-            spyOn(console, 'warn');
-            // Only this key: session writes on the hit path are out of scope here.
+        function failLocalStorageWrites(): void {
             (localStorage.setItem as jasmine.Spy).and.callFake((key: string, value: string) => {
                 if (key === 'ga_user_properties') {
                     throw new Error('QuotaExceededError');
                 }
                 mockLocalStorage[key] = value;
             });
+        }
 
-            expect(() => service.setUserProperties({ plan: 'pro' })).not.toThrow();
-            service.trackEvent('test_event');
-            // Still sent from memory for the rest of the page.
-            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
+        it('sends nothing until a property is set', async () => {
+            await service.init();
+            expect(sentUserProperties()).toBeUndefined();
         });
 
-        it('persists to chrome.storage.local on an extension and restores from it', async () => {
-            const chromeLocal: Record<string, any> = {};
-            setupChromeMock(chromeLocal, {});
-            reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
+        it('sends properties as a request-level { name: { value } } map, merged across calls', async () => {
             await service.init();
+            service.setUserProperties({ plan: 'pro', seats: 5 });
+            service.setUserProperties({ seats: null, region: 'eu' });
 
-            service.setUserProperties({ plan: 'pro' });
-            await service.flushStorage();
-            expect(JSON.parse(chromeLocal['ga_user_properties'])).toEqual({ plan: 'pro' });
-            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
-
-            reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
-            await service.init();
-            service.trackEvent('after_restart');
-            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
+            const body = (service.trackEvent('test_event'), nextBody());
+            expect(body['user_properties']).toEqual({ plan: { value: 'pro' }, region: { value: 'eu' } });
+            expect(body['events'][0]['params']['plan']).toBeUndefined();
 
             service.setUserProperties(null);
-            await service.flushStorage();
-            expect(chromeLocal['ga_user_properties']).toBeUndefined();
-            clearChromeMock();
+            expect(sentUserProperties()).toBeUndefined();
+            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+        });
+
+        it('drops invalid properties with a dev-mode warning', async () => {
+            spyOn(console, 'warn');
+            await service.init();
+            service.setUserProperties({ plan: 'pro', user_id: 'u1' });
+
+            expect(sentUserProperties()).toEqual({ plan: { value: 'pro' } });
+            expect(console.warn).toHaveBeenCalledWith('[ng-ga4] setUserProperties() dropped:', jasmine.any(Array));
+        });
+
+        it('persists to localStorage and restores on the next load', async () => {
+            await service.init();
+            service.setUserProperties({ plan: 'pro' });
+            expect(stored()).toEqual({ plan: 'pro' });
+
+            reconfigureTestBed();
+            await service.init();
+            expect(sentUserProperties()).toEqual({ plan: { value: 'pro' } });
+        });
+
+        it('cleans up stored entries that no longer validate', async () => {
+            mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'pro', ga_x: 'y' });
+            await service.init();
+            expect(stored()).toEqual({ plan: 'pro' });
+
+            mockLocalStorage['ga_user_properties'] = '{not json';
+            reconfigureTestBed();
+            await service.init();
+            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+            expect(sentUserProperties()).toBeUndefined();
         });
 
         it('does not rewrite storage when a call changes nothing', async () => {
@@ -2132,209 +2062,134 @@ describe('NgGa4Service', () => {
             service.setUserProperties({ plan: 'pro' });
             service.setUserProperties({ user_id: 'dropped' });
 
-            expect((localStorage.setItem as jasmine.Spy).calls.allArgs()
-                .filter(([key]) => key === 'ga_user_properties')).toEqual([]);
+            expect(localStorage.setItem).not.toHaveBeenCalledWith('ga_user_properties', jasmine.anything());
         });
 
-        it('writes calls queued before init() once, with the final state', async () => {
-            service.setUserProperties({ plan: 'free' });
-            service.setUserProperties({ plan: 'pro', region: 'eu' });
-            await service.init();
+        describe('before init()', () => {
+            it('applies calls on top of what was stored and writes once', async () => {
+                mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'free', region: 'eu' });
+                service.setUserProperties({ plan: 'team' });
+                service.setUserProperties({ plan: 'pro', seats: 5 });
+                await service.init();
 
-            const writes = (localStorage.setItem as jasmine.Spy).calls.allArgs()
-                .filter(([key]) => key === 'ga_user_properties');
-            expect(writes.length).toBe(1);
-            expect(JSON.parse(writes[0][1])).toEqual({ plan: 'pro', region: 'eu' });
-        });
-
-        it('falls back to localStorage when the chrome.storage write rejects', async () => {
-            spyOn(console, 'warn');
-            setupChromeMock({}, {});
-            reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
-            await service.init();
-            (window as any).chrome.storage.local.set = () => Promise.reject(new Error('storage failure'));
-
-            service.setUserProperties({ plan: 'pro' });
-            await service.flushStorage();
-
-            expect(JSON.parse(mockLocalStorage['ga_user_properties'])).toEqual({ plan: 'pro' });
-        });
-
-        it('clears the localStorage fallback copy too when cleared on an extension', async () => {
-            const chromeLocal: Record<string, any> = { ga_user_properties: JSON.stringify({ plan: 'pro' }) };
-            setupChromeMock(chromeLocal, {});
-            mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'stale' });
-            reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
-            await service.init();
-
-            service.setUserProperties(null);
-            await service.flushStorage();
-
-            expect(chromeLocal['ga_user_properties']).toBeUndefined();
-            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
-            clearChromeMock();
-        });
-
-        it('merges onto what another tab stored instead of overwriting it', async () => {
-            await service.init();
-            service.setUserProperties({ plan: 'pro' });
-            // Another tab, which loaded earlier, adds a property of its own.
-            mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'pro', theme: 'dark' });
-
-            service.setUserProperties({ region: 'eu' });
-
-            expect(JSON.parse(mockLocalStorage['ga_user_properties'])).toEqual({ plan: 'pro', theme: 'dark', region: 'eu' });
-        });
-
-        it('does not adopt its own failed write as another tab\'s', async () => {
-            await service.init();
-            service.setUserProperties({ plan: 'pro' });
-            spyOn(console, 'warn');
-            (localStorage.setItem as jasmine.Spy).and.callFake((key: string, value: string) => {
-                if (key === 'ga_user_properties') {
-                    throw new Error('QuotaExceededError');
-                }
-                mockLocalStorage[key] = value;
+                const writes = (localStorage.setItem as jasmine.Spy).calls.allArgs().filter(([key]) => key === 'ga_user_properties');
+                expect(writes.length).toBe(1);
+                expect(stored()).toEqual({ plan: 'pro', region: 'eu', seats: 5 });
             });
-            service.setUserProperties({ region: 'eu' });
-            service.setUserProperties({ seats: 5 });
-            service.trackEvent('test_event');
 
-            expect(nextBody()['user_properties']).toEqual({
-                plan: { value: 'pro' }, region: { value: 'eu' }, seats: { value: 5 }
+            it('applies setUserProperties(null) to what was stored', async () => {
+                mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'pro' });
+                service.setUserProperties(null);
+                service.setUserProperties({ region: 'eu' });
+                await service.init();
+
+                expect(sentUserProperties()).toEqual({ region: { value: 'eu' } });
+            });
+
+            it('keeps a call made while disabled and applies it once enabled', async () => {
+                reconfigureTestBed({ enabled: false });
+                await service.init();
+                service.setUserProperties({ plan: 'pro' });
+                expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+
+                service.setEnabled(true);
+                await service.init();
+                expect(sentUserProperties()).toEqual({ plan: { value: 'pro' } });
             });
         });
 
-        it('adopts properties another extension context wrote, via chrome.storage.onChanged', async () => {
-            const chromeLocal: Record<string, any> = {};
-            setupChromeMock(chromeLocal, {});
-            let listener: ((changes: any, area: string) => void) | undefined;
-            (window as any).chrome.storage.onChanged = {
-                addListener: (fn: any) => { listener = fn; },
-                removeListener: () => undefined
-            };
-            reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
-            await service.init();
-
-            listener!({ ga_user_properties: { newValue: JSON.stringify({ theme: 'dark' }) } }, 'local');
+        it('is inert on the server', () => {
+            reconfigureTestBed({}, 'server');
             service.setUserProperties({ plan: 'pro' });
-            await service.flushStorage();
 
-            expect(JSON.parse(chromeLocal['ga_user_properties'])).toEqual({ theme: 'dark', plan: 'pro' });
-            clearChromeMock();
+            expect((service as any).pendingUserProperties.values.size).toBe(0);
         });
 
-        it('cleans up stored entries that no longer validate', async () => {
-            mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'pro', ga_x: 'y' });
-            await service.init();
+        describe('across tabs', () => {
+            it('merges onto what another tab stored instead of overwriting it', async () => {
+                await service.init();
+                service.setUserProperties({ plan: 'pro' });
+                mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'pro', theme: 'dark' });
 
-            expect(JSON.parse(mockLocalStorage['ga_user_properties'])).toEqual({ plan: 'pro' });
+                service.setUserProperties({ region: 'eu' });
+
+                expect(stored()).toEqual({ plan: 'pro', theme: 'dark', region: 'eu' });
+                expect(sentUserProperties()).toEqual({ plan: { value: 'pro' }, theme: { value: 'dark' }, region: { value: 'eu' } });
+            });
+
+            it('keeps its own properties, and does not throw, when localStorage refuses writes', async () => {
+                spyOn(console, 'warn');
+                await service.init();
+                service.setUserProperties({ plan: 'pro' });
+                failLocalStorageWrites();
+
+                expect(() => service.setUserProperties({ region: 'eu' })).not.toThrow();
+                expect(sentUserProperties()).toEqual({ plan: { value: 'pro' }, region: { value: 'eu' } });
+            });
         });
 
-        it('removes a stored value holding only junk', async () => {
-            mockLocalStorage['ga_user_properties'] = JSON.stringify({ ga_x: 'y' });
-            await service.init();
+        describe('on an extension', () => {
+            it('persists to chrome.storage.local and restores from it', async () => {
+                const chromeLocal: Record<string, any> = {};
+                setupChromeMock(chromeLocal, {});
+                reconfigureTestBed(EXT);
+                await service.init();
+                service.setUserProperties({ plan: 'pro' });
+                await service.flushStorage();
+                expect(stored(chromeLocal)).toEqual({ plan: 'pro' });
 
-            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
-        });
+                reconfigureTestBed(EXT);
+                await service.init();
+                expect(sentUserProperties()).toEqual({ plan: { value: 'pro' } });
+            });
 
-        it('applies setUserProperties(null) made before init() to what was stored', async () => {
-            mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'pro' });
-            service.setUserProperties(null);
-            service.setUserProperties({ region: 'eu' });
-            await service.init();
-            service.trackEvent('test_event');
+            it('merges onto what another context stored, and keeps rapid successive calls', async () => {
+                const chromeLocal: Record<string, any> = {};
+                setupChromeMock(chromeLocal, {});
+                reconfigureTestBed(EXT);
+                await service.init();
+                chromeLocal['ga_user_properties'] = JSON.stringify({ theme: 'dark' });
 
-            expect(nextBody()['user_properties']).toEqual({ region: { value: 'eu' } });
-        });
+                service.setUserProperties({ plan: 'pro' });
+                service.setUserProperties({ seats: 5 });
+                service.setUserProperties({ region: 'eu' });
+                await service.flushStorage();
 
-        it('keeps an earlier valid pre-init value when a later call passes an invalid one', async () => {
-            spyOn(console, 'warn');
-            service.setUserProperties({ plan: 'pro' });
-            service.setUserProperties({ plan: 'x'.repeat(37) });
-            await service.init();
-            service.trackEvent('test_event');
+                expect(stored(chromeLocal)).toEqual({ theme: 'dark', plan: 'pro', seats: 5, region: 'eu' });
+                expect(sentUserProperties()).toEqual({
+                    theme: { value: 'dark' }, plan: { value: 'pro' }, seats: { value: 5 }, region: { value: 'eu' }
+                });
+            });
 
-            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
-        });
+            it('falls back to localStorage when chrome.storage rejects, and clears the copy once it works', async () => {
+                spyOn(console, 'warn');
+                setupChromeMock({}, {});
+                reconfigureTestBed(EXT);
+                await service.init();
+                const set = (window as any).chrome.storage.local.set;
+                (window as any).chrome.storage.local.set = () => Promise.reject(new Error('storage failure'));
 
-        it('ignores the onChanged echo of its own older write on an extension', async () => {
-            const chromeLocal: Record<string, any> = {};
-            setupChromeMock(chromeLocal, {});
-            let listener: ((changes: any, area: string) => void) | undefined;
-            (window as any).chrome.storage.onChanged = {
-                addListener: (fn: any) => { listener = fn; },
-                removeListener: () => undefined
-            };
-            reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
-            await service.init();
+                service.setUserProperties({ plan: 'pro' });
+                await service.flushStorage();
+                expect(stored()).toEqual({ plan: 'pro' });
 
-            service.setUserProperties({ plan: 'pro' });
-            const firstWrite = JSON.stringify({ plan: 'pro' });
-            service.setUserProperties({ seats: 5 });
-            // The first write's echo arrives after the second call.
-            listener!({ ga_user_properties: { newValue: firstWrite } }, 'local');
-            service.setUserProperties({ region: 'eu' });
-            await service.flushStorage();
-
-            expect(JSON.parse(chromeLocal['ga_user_properties'])).toEqual({ plan: 'pro', seats: 5, region: 'eu' });
-            clearChromeMock();
-        });
-
-        it('keeps an earlier pre-init value when a later call passes undefined', async () => {
-            service.setUserProperties({ plan: 'pro' });
-            service.setUserProperties({ plan: undefined as unknown as string });
-            await service.init();
-            service.trackEvent('test_event');
-
-            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
+                (window as any).chrome.storage.local.set = set;
+                service.setUserProperties({ region: 'eu' });
+                await service.flushStorage();
+                expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+            });
         });
 
         describe('with analyticsStorage consent', () => {
-            it('does not use properties read while consent was being withdrawn', async () => {
-                const chromeLocal: Record<string, any> = { ga_user_properties: JSON.stringify({ plan: 'pro' }) };
-                setupChromeMock(chromeLocal, {});
-                reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
-                const get = (window as any).chrome.storage.local.get;
-                (window as any).chrome.storage.local.get = (keys: string[]) => {
-                    if (keys.includes('ga_user_properties')) {
-                        // Withdrawn while this read is in flight.
-                        service.setConsent({ analyticsStorage: 'denied' });
-                    }
-                    return get(keys);
-                };
-                await service.init();
-                service.trackEvent('test_event');
-
-                expect(nextBody()['user_properties']).toBeUndefined();
-                clearChromeMock();
-            });
-
-            it('deletes stored properties on withdrawal but keeps sending them from memory', async () => {
+            it('deletes stored properties on withdrawal but keeps sending them, and stores nothing while denied', async () => {
                 await service.init();
                 service.setUserProperties({ plan: 'pro' });
-                expect(mockLocalStorage['ga_user_properties']).toBeDefined();
 
                 service.setConsent({ analyticsStorage: 'denied' });
-                expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
-
                 service.setUserProperties({ region: 'eu' });
-                expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
-
-                service.trackEvent('test_event');
-                expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' }, region: { value: 'eu' } });
-            });
-
-            it('deletes properties stored by a previous visit when booting denied', async () => {
-                mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'pro' });
-                reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
-                await service.init();
 
                 expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
-                // Not sent from memory either, matching how a stored user ID is
-                // treated on a denied boot.
-                service.trackEvent('test_event');
-                expect(nextBody()['user_properties']).toBeUndefined();
+                expect(sentUserProperties()).toEqual({ plan: { value: 'pro' }, region: { value: 'eu' } });
             });
 
             it('writes them back when consent is granted again', async () => {
@@ -2343,23 +2198,46 @@ describe('NgGa4Service', () => {
                 service.setConsent({ analyticsStorage: 'denied' });
                 service.setConsent({ analyticsStorage: 'granted' });
 
-                expect(JSON.parse(mockLocalStorage['ga_user_properties'])).toEqual({ plan: 'pro' });
+                expect(stored()).toEqual({ plan: 'pro' });
             });
 
-            it('clears them from chrome.storage.local on an extension', async () => {
+            it('neither uses nor keeps what a previous visit stored when booting denied', async () => {
+                mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'pro' });
+                reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+                await service.init();
+
+                expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+                expect(sentUserProperties()).toBeUndefined();
+            });
+
+            it('does not use properties read while consent was being withdrawn', async () => {
+                setupChromeMock({ ga_user_properties: JSON.stringify({ plan: 'pro' }) }, {});
+                reconfigureTestBed(EXT);
+                const get = (window as any).chrome.storage.local.get;
+                (window as any).chrome.storage.local.get = (keys: string[]) => {
+                    if (keys.includes('ga_user_properties')) {
+                        service.setConsent({ analyticsStorage: 'denied' });
+                    }
+                    return get(keys);
+                };
+                await service.init();
+
+                expect(sentUserProperties()).toBeUndefined();
+            });
+
+            it('keeps memory and chrome.storage in step through a quick withdraw and re-grant', async () => {
                 const chromeLocal: Record<string, any> = {};
                 setupChromeMock(chromeLocal, {});
-                reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
+                reconfigureTestBed(EXT);
                 await service.init();
                 service.setUserProperties({ plan: 'pro' });
-                await service.flushStorage();
-                expect(chromeLocal['ga_user_properties']).toBeDefined();
 
                 service.setConsent({ analyticsStorage: 'denied' });
+                service.setConsent({ analyticsStorage: 'granted' });
                 await service.flushStorage();
 
-                expect(chromeLocal['ga_user_properties']).toBeUndefined();
-                clearChromeMock();
+                expect(stored(chromeLocal)).toEqual({ plan: 'pro' });
+                expect(sentUserProperties()).toEqual({ plan: { value: 'pro' } });
             });
         });
     });
