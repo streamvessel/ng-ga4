@@ -101,20 +101,23 @@ describe('ga4-validation', () => {
 
     describe('validateEventParams', () => {
         it('passes valid params through untouched with no problems', () => {
-            const result = validateEventParams({ method: 'email', value: 3 }, true);
+            const result = validateEventParams({ method: 'email', value: 3 });
             expect(result.params).toEqual({ method: 'email', value: 3 });
             expect(result.problems).toEqual([]);
         });
 
         it('removes params with invalid names and reports each', () => {
-            const result = validateEventParams({ method: 'email', ga_x: 1, 'bad-name': 2 }, true);
+            const result = validateEventParams({ method: 'email', ga_x: 1, 'bad-name': 2 });
             expect(result.params).toEqual({ method: 'email' });
-            expect(result.problems.length).toBe(2);
+            expect(result.problems).toEqual([
+                jasmine.stringMatching(/^parameter name "ga_x" uses the reserved prefix "ga_"; it was removed$/),
+                jasmine.stringMatching(/^parameter name "bad-name" must start with a letter.*; it was removed$/)
+            ]);
         });
 
         it('keeps an over-long value but reports it', () => {
             const long = 'a'.repeat(150);
-            const result = validateEventParams({ term: long }, true);
+            const result = validateEventParams({ term: long });
             expect(result.params).toEqual({ term: long });
             expect(result.problems).toEqual([jasmine.stringMatching(/150 characters/)]);
         });
@@ -124,7 +127,7 @@ describe('ga4-validation', () => {
             for (let i = 0; i < 26; i++) {
                 params[`p${i}`] = i;
             }
-            const result = validateEventParams(params, true);
+            const result = validateEventParams(params);
             expect(Object.keys(result.params).length).toBe(26);
             expect(result.problems).toEqual([jasmine.stringMatching(/26 parameters; the limit is 25/)]);
         });
@@ -134,7 +137,7 @@ describe('ga4-validation', () => {
             for (let i = 0; i < 30; i++) {
                 params[`u${i}`] = undefined;
             }
-            const result = validateEventParams(params, true);
+            const result = validateEventParams(params);
             expect(result.params).toEqual({ kept: 1 });
             expect(result.problems).toEqual([]);
         });
@@ -155,7 +158,7 @@ describe('ga4-validation', () => {
             for (let i = 0; i < 25; i++) {
                 params[`p${i}`] = i;
             }
-            const result = validateEventParams(params, true);
+            const result = validateEventParams(params);
             expect(result.problems.some(p => /parameters; the limit/.test(p))).toBeFalse();
         });
     });

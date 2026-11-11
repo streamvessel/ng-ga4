@@ -1984,7 +1984,7 @@ describe('NgGa4Service', () => {
 
                 httpMock.expectNone((r) => r.url.includes('mp/collect'));
                 expect(console.warn).toHaveBeenCalledWith(
-                    jasmine.stringMatching(/^\[ng-ga4\] trackEvent: .*"session_start" is reserved.*not sent/)
+                    jasmine.stringMatching(/^\[ng-ga4\] trackEvent\("session_start"\): .*"session_start" is reserved.*not sent/)
                 );
             });
 

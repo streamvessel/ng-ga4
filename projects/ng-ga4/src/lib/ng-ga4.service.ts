@@ -431,7 +431,7 @@ export class NgGa4Service implements OnDestroy {
         // activity.
         const nameProblem = eventNameProblem(name);
         if (nameProblem) {
-            this.reportProblems('trackEvent', [`${nameProblem}. The event was not sent`]);
+            this.reportProblems(name, [`${nameProblem}. The event was not sent`]);
             return;
         }
 
@@ -449,18 +449,20 @@ export class NgGa4Service implements OnDestroy {
             ...params,
             ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
         }, this.warnOnInvalid);
-        this.reportProblems(`trackEvent("${name}")`, validation.problems);
+        this.reportProblems(name, validation.problems);
 
         this.sendToGA4([{ name, params: validation.params }]);
     }
 
-    // The one place the dev-only warning policy lives, for every validated call.
-    private reportProblems(context: string, problems: string[]): void {
-        if (!this.warnOnInvalid) {
+    // The dev-only warning policy for trackEvent() validation. Not used by
+    // resolveEngagementEventName(): a bad engagementEventName is a config error
+    // caught once at startup, and stays a warning in every build.
+    private reportProblems(eventName: unknown, problems: string[]): void {
+        if (!this.warnOnInvalid || problems.length === 0) {
             return;
         }
         for (const problem of problems) {
-            console.warn(`[ng-ga4] ${context}: ${problem}.`);
+            console.warn(`[ng-ga4] trackEvent("${eventName}"): ${problem}.`);
         }
     }
 

@@ -23,7 +23,7 @@ const PARAM_VALUE_LENGTH_OVERRIDES: Readonly<Record<string, number>> = {
  * Prefixes GA4 reserves for its own names. `_` and `gtag.` could not pass the
  * character rule anyway, but are listed so the warning names the rule broken.
  */
-export const RESERVED_NAME_PREFIXES: readonly string[] = ['_', 'firebase_', 'ga_', 'google_', 'gtag.'];
+export const RESERVED_NAME_PREFIXES: readonly string[] = Object.freeze(['_', 'firebase_', 'ga_', 'google_', 'gtag.']);
 
 const NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
 
@@ -124,7 +124,7 @@ export function paramValueProblem(name: string, value: unknown): string | null {
 export interface Ga4ParamsValidation {
     /** The params with every invalidly named one removed. */
     params: Record<string, unknown>;
-    /** One message per rule broken. Empty when `report` is false. */
+    /** One message per rule broken. Always empty when `report` is false. */
     problems: string[];
 }
 
@@ -137,7 +137,7 @@ export interface Ga4ParamsValidation {
  * With `report` false, only the removal happens: the advisory checks, whose
  * sole output is a message, are skipped and nothing is collected.
  */
-export function validateEventParams(params: Record<string, unknown>, report: boolean): Ga4ParamsValidation {
+export function validateEventParams(params: Record<string, unknown>, report = true): Ga4ParamsValidation {
     const result: Record<string, unknown> = {};
     const problems: string[] = [];
     for (const name of Object.keys(params)) {
@@ -160,9 +160,11 @@ export function validateEventParams(params: Record<string, unknown>, report: boo
         }
         result[name] = value;
     }
-    const count = Object.keys(result).length;
-    if (report && count > MAX_PARAMS_PER_EVENT) {
-        problems.push(`event has ${count} parameters; the limit is ${MAX_PARAMS_PER_EVENT}`);
+    if (report) {
+        const count = Object.keys(result).length;
+        if (count > MAX_PARAMS_PER_EVENT) {
+            problems.push(`event has ${count} parameters; the limit is ${MAX_PARAMS_PER_EVENT}`);
+        }
     }
     return { params: result, problems };
 }
