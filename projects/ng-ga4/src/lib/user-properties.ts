@@ -11,8 +11,8 @@ export type Ga4UserPropertiesPayload = Record<string, { value: string | number }
 // https://developers.google.com/analytics/devguides/collection/protocol/ga4/reference#reserved_names
 // https://developers.google.com/analytics/devguides/collection/protocol/ga4/sending-events#limitations
 export const MAX_USER_PROPERTIES = 25;
-export const MAX_USER_PROPERTY_NAME_LENGTH = 24;
-export const MAX_USER_PROPERTY_VALUE_LENGTH = 36;
+const MAX_USER_PROPERTY_NAME_LENGTH = 24;
+const MAX_USER_PROPERTY_VALUE_LENGTH = 36;
 
 const RESERVED_USER_PROPERTY_NAMES = new Set([
     'first_open_time',
@@ -26,13 +26,7 @@ const RESERVED_USER_PROPERTY_NAMES = new Set([
 // for the error message only.
 const RESERVED_USER_PROPERTY_PREFIXES = ['_', 'firebase_', 'ga_', 'google_'];
 
-/**
- * Why a user property name is unusable, or `null` if it is fine.
- *
- * Exported for the dev-time validator #29 plans for event and parameter
- * names; the rules overlap but are not identical (24 characters here, 40
- * there, and a different reserved list).
- */
+/** Why a user property name is unusable, or `null` if it is fine. */
 export function userPropertyNameProblem(name: string): string | null {
     const prefix = RESERVED_USER_PROPERTY_PREFIXES.find(p => name.startsWith(p));
     if (prefix) {
@@ -104,15 +98,10 @@ export function mergeUserProperties(
 export function toUserPropertiesPayload(
     properties: Readonly<Record<string, string | number>>
 ): Ga4UserPropertiesPayload | null {
-    const names = Object.keys(properties);
-    if (!names.length) {
-        return null;
-    }
-    const payload: Ga4UserPropertiesPayload = {};
-    for (const name of names) {
-        payload[name] = { value: properties[name] };
-    }
-    return payload;
+    const entries = Object.entries(properties);
+    return entries.length
+        ? Object.fromEntries(entries.map(([name, value]) => [name, { value }]))
+        : null;
 }
 
 /**

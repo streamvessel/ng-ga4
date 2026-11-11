@@ -2110,7 +2110,7 @@ describe('NgGa4Service', () => {
 
             service.setUserProperties({ plan: 'pro' });
             await service.flushStorage();
-            expect(chromeLocal['ga_user_properties']).toEqual({ plan: 'pro' });
+            expect(JSON.parse(chromeLocal['ga_user_properties'])).toEqual({ plan: 'pro' });
             expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
 
             reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
@@ -2121,6 +2121,57 @@ describe('NgGa4Service', () => {
             service.setUserProperties(null);
             await service.flushStorage();
             expect(chromeLocal['ga_user_properties']).toBeUndefined();
+            clearChromeMock();
+        });
+
+        it('does not rewrite storage when a call changes nothing', async () => {
+            await service.init();
+            service.setUserProperties({ plan: 'pro' });
+            (localStorage.setItem as jasmine.Spy).calls.reset();
+
+            service.setUserProperties({ plan: 'pro' });
+            service.setUserProperties({ user_id: 'dropped' });
+
+            expect((localStorage.setItem as jasmine.Spy).calls.allArgs()
+                .filter(([key]) => key === 'ga_user_properties')).toEqual([]);
+        });
+
+        it('writes calls queued before init() once, with the final state', async () => {
+            service.setUserProperties({ plan: 'free' });
+            service.setUserProperties({ plan: 'pro', region: 'eu' });
+            await service.init();
+
+            const writes = (localStorage.setItem as jasmine.Spy).calls.allArgs()
+                .filter(([key]) => key === 'ga_user_properties');
+            expect(writes.length).toBe(1);
+            expect(JSON.parse(writes[0][1])).toEqual({ plan: 'pro', region: 'eu' });
+        });
+
+        it('falls back to localStorage when the chrome.storage write rejects', async () => {
+            spyOn(console, 'warn');
+            setupChromeMock({}, {});
+            reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
+            await service.init();
+            (window as any).chrome.storage.local.set = () => Promise.reject(new Error('storage failure'));
+
+            service.setUserProperties({ plan: 'pro' });
+            await service.flushStorage();
+
+            expect(JSON.parse(mockLocalStorage['ga_user_properties'])).toEqual({ plan: 'pro' });
+        });
+
+        it('clears the localStorage fallback copy too when cleared on an extension', async () => {
+            const chromeLocal: Record<string, any> = { ga_user_properties: JSON.stringify({ plan: 'pro' }) };
+            setupChromeMock(chromeLocal, {});
+            mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'stale' });
+            reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
+            await service.init();
+
+            service.setUserProperties(null);
+            await service.flushStorage();
+
+            expect(chromeLocal['ga_user_properties']).toBeUndefined();
+            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
             clearChromeMock();
         });
 
