@@ -13,7 +13,9 @@ import {
     mergeUserProperties,
     NgGa4UserPropertyValue,
     parseStoredUserProperties,
-    toUserPropertiesPayload
+    toUserPropertiesPayload,
+    userPropertyNameProblem,
+    userPropertyValueProblem
 } from './user-properties';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 
@@ -68,6 +70,10 @@ export class NgGa4Service implements OnDestroy {
     // The raw stored value as this context last read or wrote it — on the web,
     // a different value in localStorage means another tab wrote since.
     private lastStoredUserProperties: string | null = null;
+    // Extensions only: values this context wrote to chrome.storage whose
+    // onChanged echo has not arrived yet ('' for a removal), counted. An echo
+    // of an older write must not roll back newer state held in memory.
+    private ownUserPropertyWrites = new Map<string, number>();
     private engagement: EngagementTimer | null = null;
     // Resolved once, in init(), by resolveEngagementEventName() — validating on
     // every flush would warn on every window switch for a misconfigured name.
@@ -302,10 +308,27 @@ export class NgGa4Service implements OnDestroy {
                 pending.clear = true;
                 pending.updates.clear();
             } else {
+                const problems: string[] = [];
                 for (const [name, value] of Object.entries(properties)) {
-                    if (value !== undefined) {
+                    if (value === undefined) {
+                        continue;
+                    }
+                    // Validated now, not at drain: folding an invalid value in would
+                    // replace a valid one set earlier, which the drain then drops —
+                    // losing the property, where the same calls after init keep it.
+                    // The 25-property cap still waits for the drain, since it
+                    // depends on what was stored.
+                    const problem = value === null
+                        ? null
+                        : userPropertyNameProblem(name) ?? userPropertyValueProblem(name, value);
+                    if (problem) {
+                        problems.push(problem);
+                    } else {
                         pending.updates.set(name, value);
                     }
+                }
+                if (problems.length && isDevMode()) {
+                    console.warn('[ng-ga4] setUserProperties() dropped:', problems);
                 }
             }
             return;
@@ -1272,7 +1295,20 @@ export class NgGa4Service implements OnDestroy {
                 // overwriting them; skipped before the initial load, which reads
                 // the same value itself, and while storage is denied.
                 if ('ga_user_properties' in changes && !this.pendingUserProperties && this.consent.storageAllowed) {
-                    this.userProperties = parseStoredUserProperties(changes['ga_user_properties'].newValue);
+                    const newValue = changes['ga_user_properties'].newValue;
+                    const key = typeof newValue === 'string' ? newValue : '';
+                    const own = this.ownUserPropertyWrites.get(key) ?? 0;
+                    if (own > 0) {
+                        // This context's own write coming back: memory already
+                        // holds that state or newer.
+                        if (own === 1) {
+                            this.ownUserPropertyWrites.delete(key);
+                        } else {
+                            this.ownUserPropertyWrites.set(key, own - 1);
+                        }
+                    } else {
+                        this.userProperties = parseStoredUserProperties(newValue);
+                    }
                 }
             }
         };
@@ -1455,7 +1491,12 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private saveUserProperties(): void {
-        if (!Object.keys(this.userProperties).length) {
+        const empty = !Object.keys(this.userProperties).length;
+        if (this.config.isExtension && chrome?.storage?.onChanged && this.consent.storageAllowed) {
+            const key = empty ? '' : JSON.stringify(this.userProperties);
+            this.ownUserPropertyWrites.set(key, (this.ownUserPropertyWrites.get(key) ?? 0) + 1);
+        }
+        if (empty) {
             this.removePersistent('ga_user_properties', 'user properties');
         } else {
             const json = JSON.stringify(this.userProperties);

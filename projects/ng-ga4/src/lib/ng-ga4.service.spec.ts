@@ -2248,6 +2248,39 @@ describe('NgGa4Service', () => {
             expect(nextBody()['user_properties']).toEqual({ region: { value: 'eu' } });
         });
 
+        it('keeps an earlier valid pre-init value when a later call passes an invalid one', async () => {
+            spyOn(console, 'warn');
+            service.setUserProperties({ plan: 'pro' });
+            service.setUserProperties({ plan: 'x'.repeat(37) });
+            await service.init();
+            service.trackEvent('test_event');
+
+            expect(nextBody()['user_properties']).toEqual({ plan: { value: 'pro' } });
+        });
+
+        it('ignores the onChanged echo of its own older write on an extension', async () => {
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal, {});
+            let listener: ((changes: any, area: string) => void) | undefined;
+            (window as any).chrome.storage.onChanged = {
+                addListener: (fn: any) => { listener = fn; },
+                removeListener: () => undefined
+            };
+            reconfigureTestBed({ isExtension: true, siteUrl: 'https://ext.example' });
+            await service.init();
+
+            service.setUserProperties({ plan: 'pro' });
+            const firstWrite = JSON.stringify({ plan: 'pro' });
+            service.setUserProperties({ seats: 5 });
+            // The first write's echo arrives after the second call.
+            listener!({ ga_user_properties: { newValue: firstWrite } }, 'local');
+            service.setUserProperties({ region: 'eu' });
+            await service.flushStorage();
+
+            expect(JSON.parse(chromeLocal['ga_user_properties'])).toEqual({ plan: 'pro', seats: 5, region: 'eu' });
+            clearChromeMock();
+        });
+
         it('keeps an earlier pre-init value when a later call passes undefined', async () => {
             service.setUserProperties({ plan: 'pro' });
             service.setUserProperties({ plan: undefined as unknown as string });
