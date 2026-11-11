@@ -30,20 +30,21 @@ describe('regionFromCountry', () => {
         expect(regionFromCountry('TW')).toEqual({ continent_id: '142', subcontinent_id: '030' });
     });
 
-    it('covers every country the time zone lookup can produce, except Antarctica', () => {
+    it('gives every country the time zone lookup can produce, except Antarctica, three-digit M49 codes', () => {
         const zones: string[] = (Intl as any).supportedValuesOf?.('timeZone') ?? [];
         expect(zones.length).toBeGreaterThan(0);
-        const missing = zones
+        const bad = zones
             .map(zone => countryFromTimeZone(zone))
             .filter((country): country is string => !!country && country !== 'AQ')
-            .filter(country => !regionFromCountry(country));
-        expect(missing).toEqual([]);
+            .filter(country => {
+                const region = regionFromCountry(country);
+                return !region || !/^\d{3}$/.test(region.continent_id) || !/^\d{3}$/.test(region.subcontinent_id);
+            });
+        expect(bad).toEqual([]);
     });
 
-    it('returns three-digit zero-padded codes', () => {
-        const region = regionFromCountry('NZ');
-        expect(region?.continent_id).toMatch(/^\d{3}$/);
-        expect(region?.subcontinent_id).toMatch(/^\d{3}$/);
+    it('returns region objects that cannot be mutated', () => {
+        expect(Object.isFrozen(regionFromCountry('FR'))).toBe(true);
     });
 
     it('returns undefined for Antarctica, unknown codes and inherited keys', () => {
@@ -57,11 +58,5 @@ describe('regionFromCountry', () => {
         expect(regionFromCountry('')).toBeUndefined();
         expect(regionFromCountry(null)).toBeUndefined();
         expect(regionFromCountry(undefined)).toBeUndefined();
-    });
-
-    it('returns a fresh object each call', () => {
-        const first = regionFromCountry('FR')!;
-        first.continent_id = 'tampered';
-        expect(regionFromCountry('FR')).toEqual({ continent_id: '150', subcontinent_id: '155' });
     });
 });

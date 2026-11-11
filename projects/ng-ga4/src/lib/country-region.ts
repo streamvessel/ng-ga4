@@ -84,20 +84,19 @@ const M49_GROUPS: ReadonlyArray<readonly [string, string, string]> = [
 ];
 
 // A Map rather than an object literal, so inherited keys like 'constructor'
-// can never be mistaken for a country.
-const COUNTRY_TO_REGION = new Map<string, CountryRegion>();
+// can never be mistaken for a country. Each region object is shared by every
+// country in its group and handed out as is, so it is frozen.
+const COUNTRY_TO_REGION = new Map<string, Readonly<CountryRegion>>();
 for (const [continent_id, subcontinent_id, countries] of M49_GROUPS) {
-    const region: CountryRegion = { continent_id, subcontinent_id };
+    const region = Object.freeze({ continent_id, subcontinent_id });
     for (const country of countries.split(' ')) {
         COUNTRY_TO_REGION.set(country, region);
     }
 }
 
-export function regionFromCountry(country: string | null | undefined): CountryRegion | undefined {
+export function regionFromCountry(country: string | null | undefined): Readonly<CountryRegion> | undefined {
     if (!country) {
         return undefined;
     }
-    const region = COUNTRY_TO_REGION.get(country);
-    // A copy, so a caller mutating the result cannot corrupt the shared table.
-    return region ? { ...region } : undefined;
+    return COUNTRY_TO_REGION.get(country);
 }
