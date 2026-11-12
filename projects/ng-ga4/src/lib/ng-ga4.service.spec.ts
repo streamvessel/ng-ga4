@@ -2699,6 +2699,7 @@ describe('NgGa4Service', () => {
 
         it('sends only country_id when the country has no M49 region', async () => {
             spyOn<any>(service, 'getTimeZone').and.returnValue('Antarctica/Troll');
+            spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
 
             await service.init();
             service.trackEvent('x');

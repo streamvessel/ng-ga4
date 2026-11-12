@@ -23,11 +23,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Subcontinent dimensions used to read `(not set)`
   ([#22](https://github.com/streamvessel/ng-ga4/issues/22)).
 
-### Fixed
-
-- The time-zone-to-country lookup no longer returns `Object.prototype` members for
-  names such as `constructor`.
-
 ## [0.2.2] - 2026-10-27
 
 ### Fixed
