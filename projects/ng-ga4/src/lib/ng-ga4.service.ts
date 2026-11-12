@@ -1,4 +1,4 @@
-import { Inject, Injectable, NgZone, OnDestroy, PLATFORM_ID } from '@angular/core';
+import { Inject, Injectable, isDevMode, NgZone, OnDestroy, PLATFORM_ID } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { isPlatformBrowser } from '@angular/common';
 import { NavigationEnd, Router } from '@angular/router';
@@ -9,6 +9,18 @@ import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
 import { EnhancedMeasurement } from './enhanced-measurement';
+import {
+    applyUserPropertyUpdate,
+    emptyUserPropertyUpdate,
+    foldUserPropertyUpdate,
+    Ga4UserPropertiesPayload,
+    NgGa4UserPropertyValue,
+    parseStoredUserProperties,
+    serializeUserProperties,
+    toUserPropertiesPayload,
+    UserProperties,
+    UserPropertyUpdate
+} from './user-properties';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 
 interface Ga4Device {
@@ -42,14 +54,26 @@ export class NgGa4Service implements OnDestroy {
     // Set by trackPageView(); read by flushEngagement() to attribute the
     // hide-time event's page_location (see flushEngagement for the null case).
     private lastPagePath: string | null = null;
+    // Top-level MP `user_id` (#18). Never a user property: `user_id` is a
+    // reserved user property name there.
+    private userId: string | null = null;
+    // Set by setUserId(). The app's own call is newer than anything on disk, so
+    // init() must not overwrite it with a value it loads afterwards.
+    private userIdSetByApp = false;
     private device: Ga4Device | null = null;
     private userLocation: Ga4UserLocation | null = null;
     private pendingCalls: Array<() => void> = [];
+    // What this context sends as user_properties. Loaded from storage in init().
+    private userProperties: UserProperties = {};
+    // setUserProperties() calls made before that load, folded together and
+    // applied on top of what was stored. `null` once loaded.
+    private pendingUserProperties: UserPropertyUpdate | null = emptyUserPropertyUpdate();
     private engagement: EngagementTimer | null = null;
     private enhancedMeasurement: EnhancedMeasurement | null = null;
     // Resolved once, in init(), by resolveEngagementEventName() — validating on
     // every flush would warn on every window switch for a misconfigured name.
     private engagementEventName = 'page_engagement';
+    private readonly MAX_USER_ID_LENGTH = 256;
     private readonly SESSION_TIMEOUT_MS = 30 * 60 * 1000;
     // Below this, a flush is noise — the time is not discarded, it rides out on
     // the next flush or hit. Blur never reaches this check (see registerEngagementListeners).
@@ -116,6 +140,12 @@ export class NgGa4Service implements OnDestroy {
 
     private async runInit(): Promise<void> {
         this.initialized = true;
+        // A setUserId() made before init() started was held in memory only (see
+        // setUserId). Written here, before the first await, so a call made
+        // during the awaits below — which persists itself — is not written twice.
+        if (this.userIdSetByApp) {
+            this.persistUserId(this.userId);
+        }
 
         // Created here, not in the constructor: the constructor also runs on
         // the server, where `document` does not exist.
@@ -141,7 +171,11 @@ export class NgGa4Service implements OnDestroy {
         this.zone.runOutsideAngular(() => enhanced.start());
 
         const clientId = await this.loadOrCreateClientId();
+        if (!this.userIdSetByApp) {
+            await this.restoreUserId();
+        }
         this.sessionNumber = await this.loadSessionNumber();
+        await this.restoreUserProperties();
         await this.restoreOrStartSession();
         await this.collectContext();
         // Assign clientId last so the `!this.clientId` guard in track* gates sends
@@ -179,6 +213,26 @@ export class NgGa4Service implements OnDestroy {
         // settles would stall bootstrap — but loadOrCreateClientIdFromChromeStorage
         // already awaits one above, so this adds no new class of hazard.
         await this.flushStorage();
+    }
+
+    /**
+     * Set the signed-in user's ID, sent as the top-level `user_id` of every hit
+     * from here on — the equivalent of `gtag('config', id, { user_id })`. Pass
+     * `null` on sign-out to stop sending it.
+     *
+     * Persisted alongside the client ID, so it survives reloads, and subject to
+     * the same `analyticsStorage` consent: while that is denied it is held in
+     * memory only. Never send PII (an email address, say) as a user ID.
+     */
+    setUserId(userId: string | null): void {
+        const next = this.normaliseUserId(userId);
+        this.userId = next;
+        this.userIdSetByApp = true;
+        // Before init() starts nothing is written — `enabled: false` promises no
+        // storage writes until collection is turned on. runInit() persists it then.
+        if (this.initialized) {
+            this.persistUserId(next);
+        }
     }
 
     /**
@@ -228,6 +282,26 @@ export class NgGa4Service implements OnDestroy {
         // Caught, not `void`ed: a storage failure during a late init would
         // otherwise surface as an unhandled promise rejection in the host app.
         this.init().catch(err => console.warn('[ng-ga4] init failed', err));
+    }
+
+    /**
+     * Set user properties, the equivalent of `gtag('set', 'user_properties', {...})`.
+     * Merges into what is set: a `null` value removes that property, an
+     * `undefined` one is ignored, and `null` instead of an object removes all.
+     * Sent as `user_properties` on every later hit and stored next to the client
+     * ID. Anything GA4 would reject is dropped, with a warning in dev mode — see
+     * the README for the limits. Calls made before `init()` finishes are applied
+     * once it does.
+     */
+    setUserProperties(properties: Record<string, NgGa4UserPropertyValue> | null): void {
+        if (!this.isBrowser) {
+            return;
+        }
+        const update = this.pendingUserProperties ?? emptyUserPropertyUpdate();
+        this.warnDroppedUserProperties(foldUserPropertyUpdate(update, properties));
+        if (!this.pendingUserProperties) {
+            this.updateUserProperties(update, false);
+        }
     }
 
     /**
@@ -297,7 +371,7 @@ export class NgGa4Service implements OnDestroy {
         if (this.config.isExtension && chrome?.storage) {
             this.enqueueStorageWrite(
                 'chrome.storage.local.remove',
-                () => chrome.storage.local.remove(['ga_client_id', 'ga_session_number'])
+                () => chrome.storage.local.remove(['ga_client_id', 'ga_session_number', 'ga_user_id', 'ga_user_properties'])
             );
             this.enqueueStorageWrite(
                 'chrome.storage.session.remove',
@@ -316,6 +390,8 @@ export class NgGa4Service implements OnDestroy {
         localStorage.removeItem('ga_session_id');
         localStorage.removeItem('ga_last_activity');
         localStorage.removeItem('ga_session_number');
+        localStorage.removeItem('ga_user_id');
+        localStorage.removeItem('ga_user_properties');
         this.deleteGaCookie();
     }
 
@@ -374,6 +450,13 @@ export class NgGa4Service implements OnDestroy {
         }
         this.saveSessionNumber(this.sessionNumber);
         this.saveSessionState();
+        if (this.userId) {
+            this.saveUserId(this.userId);
+        }
+        if (Object.keys(this.userProperties).length) {
+            // Re-grant writes this context's whole map back, as for the client ID.
+            this.persistUserPropertyUpdate({ clear: true, values: new Map(Object.entries(this.userProperties)) });
+        }
     }
 
     ngOnDestroy(): void {
@@ -477,10 +560,12 @@ export class NgGa4Service implements OnDestroy {
 
         const body: {
             client_id: string;
+            user_id?: string;
             events: Array<{ name: string; params?: Record<string, any> }>;
             device?: Ga4Device;
             user_location?: Ga4UserLocation;
             consent?: Ga4ConsentPayload;
+            user_properties?: Ga4UserPropertiesPayload;
         } = {
             client_id: this.clientId,
             // debug_mode has to ride on every event in the batch — DebugView only
@@ -489,6 +574,11 @@ export class NgGa4Service implements OnDestroy {
                 ? events.map(event => ({ ...event, params: { ...event.params, debug_mode: 1 } }))
                 : events
         };
+        // Omitted when unset, so an app that never calls setUserId() sends exactly
+        // what it sent before.
+        if (this.userId) {
+            body.user_id = this.userId;
+        }
         // `device` and `user_location` are request-level fields (siblings of
         // `client_id`/`events`), not per-event params. /mp/collect does not infer
         // device/geo from the request, so we supply them explicitly.
@@ -504,6 +594,11 @@ export class NgGa4Service implements OnDestroy {
         const consentPayload = this.consent.toPayload();
         if (consentPayload) {
             body.consent = consentPayload;
+        }
+        // Omitted when empty, for the same byte-identical reason as `consent`.
+        const userPropertiesPayload = toUserPropertiesPayload(this.userProperties);
+        if (userPropertiesPayload) {
+            body.user_properties = userPropertiesPayload;
         }
 
         // The validation endpoint records nothing — "events sent to the validation
@@ -1201,6 +1296,234 @@ export class NgGa4Service implements OnDestroy {
         } else {
             localStorage.setItem('ga_session_id', this.sessionId);
             localStorage.setItem('ga_last_activity', this.lastActivityTimestamp.toString());
+        }
+    }
+
+    // --- Storage: user ID (persistent — chrome.storage.local / localStorage) ---
+
+    // GA4 documents a 256-character maximum (Analytics Help, "Measure activity
+    // across platforms with User-ID"); counted in code points, not UTF-16 units.
+    private isValidUserId(userId: unknown): userId is string {
+        return typeof userId === 'string' && userId.length > 0 && [...userId].length <= this.MAX_USER_ID_LENGTH;
+    }
+
+    // An empty string is treated as "no user", since GA4 has nothing to join on.
+    // Anything else invalid clears too, rather than keep attributing hits to
+    // the previous user.
+    private normaliseUserId(userId: unknown): string | null {
+        if (this.isValidUserId(userId)) {
+            return userId;
+        }
+        if (userId != null && userId !== '') {
+            const why = typeof userId === 'string'
+                ? `is longer than ${this.MAX_USER_ID_LENGTH} characters`
+                : `must be a string or null, got ${typeof userId}`;
+            console.warn(`[ng-ga4] setUserId(): the user ID ${why}; clearing the user ID.`);
+        }
+        return null;
+    }
+
+    private async restoreUserId(): Promise<void> {
+        // Booting denied: a stored ID was written under an earlier consent and is
+        // about to be deleted by clearPersistedIdentity(). Using it for this page
+        // load would tie a denied-storage visit to a known person.
+        if (!this.consent.storageAllowed) {
+            return;
+        }
+        const stored = await this.loadUserId();
+        // setUserId() may have run during the await above; it wins, and has
+        // already persisted itself since `initialized` was set by then.
+        if (this.userIdSetByApp) {
+            return;
+        }
+        if (this.isValidUserId(stored)) {
+            this.userId = stored;
+        } else if (stored != null) {
+            // Junk on disk (not ours, or a since-tightened rule): drop it
+            // quietly rather than skip it on every start-up.
+            this.removeUserId();
+        }
+    }
+
+    private loadUserId(): Promise<unknown> {
+        return this.readPersistent('ga_user_id');
+    }
+
+    private persistUserId(userId: string | null): void {
+        if (userId === null) {
+            this.removeUserId();
+        } else {
+            this.saveUserId(userId);
+        }
+    }
+
+    // Best effort, and never throws: setUserId() is called from app code (a
+    // sign-in handler), and a storage failure must not surface there. The user ID
+    // is still sent from memory for the rest of this page's life.
+    private saveUserId(userId: string): void {
+        if (!this.isBrowser || !this.consent.storageAllowed) {
+            return;
+        }
+        if (this.config.isExtension && chrome?.storage) {
+            this.enqueueStorageWrite(
+                'chrome.storage.local.set (user id)',
+                // Recovers into localStorage, which loadUserId() falls back to
+                // when chrome.storage is broken — same as repersistIdentity.
+                // The rejection can land after a sign-out or a consent
+                // withdrawal already deleted the local copy, so the fallback
+                // only writes if this ID is still current and still allowed.
+                () => chrome.storage.local.set({ ga_user_id: userId })
+                    .catch(err => {
+                        console.warn('[ng-ga4] chrome.storage.local.set failed', err);
+                        if (this.userId === userId && this.consent.storageAllowed) {
+                            this.saveUserIdToLocalStorage(userId);
+                        }
+                    })
+            );
+            return;
+        }
+        this.saveUserIdToLocalStorage(userId);
+    }
+
+    private saveUserIdToLocalStorage(userId: string): void {
+        try {
+            localStorage.setItem('ga_user_id', userId);
+        } catch (err) {
+            console.warn('[ng-ga4] could not persist the user ID', err);
+        }
+    }
+
+    // Not consent-gated: deleting is always allowed. Clears both stores on an
+    // extension, since loadUserId() falls back to localStorage when
+    // chrome.storage throws and a stale copy there would come back after sign-out.
+    private removeUserId(): void {
+        if (!this.isBrowser) {
+            return;
+        }
+        if (this.config.isExtension && chrome?.storage) {
+            this.enqueueStorageWrite(
+                'chrome.storage.local.remove (user id)',
+                () => chrome.storage.local.remove(['ga_user_id'])
+            );
+        }
+        try {
+            localStorage.removeItem('ga_user_id');
+        } catch (err) {
+            console.warn('[ng-ga4] could not remove the user ID', err);
+        }
+    }
+
+    // --- Storage: user properties (persistent — chrome.storage.local / localStorage) ---
+    //
+    // Each write applies only this call's change to what is stored now. Other
+    // tabs and extension contexts share the key, and writing this context's
+    // whole, possibly stale, map would delete what they set.
+
+    // Guarded: a retried init must not reload over properties set since.
+    private async restoreUserProperties(): Promise<void> {
+        const pending = this.pendingUserProperties;
+        if (!pending) {
+            return;
+        }
+        // Denied: what is stored is about to be deleted, so it is not used either.
+        // Checked again after the read, since consent can change meanwhile.
+        const raw = this.consent.storageAllowed ? await this.readPersistent('ga_user_properties') : null;
+        const stored = this.consent.storageAllowed ? raw : null;
+        this.pendingUserProperties = null;
+        this.userProperties = parseStoredUserProperties(stored);
+        // Rewritten when parsing dropped junk, so it is cleaned up once.
+        const dirty = stored != null && stored !== serializeUserProperties(this.userProperties);
+        this.updateUserProperties(pending, dirty);
+    }
+
+    private updateUserProperties(update: UserPropertyUpdate, forceWrite: boolean): void {
+        const before = serializeUserProperties(this.userProperties);
+        const { properties, problems } = applyUserPropertyUpdate(this.userProperties, update);
+        this.warnDroppedUserProperties(problems);
+        this.userProperties = properties;
+        // Skipped when nothing changed: apps tend to call this on every route.
+        if (forceWrite || serializeUserProperties(properties) !== before) {
+            this.persistUserPropertyUpdate(update);
+        }
+    }
+
+    // "Warn in dev, drop in prod" (#19): GA4 would reject these anyway.
+    private warnDroppedUserProperties(problems: string[]): void {
+        if (problems.length && isDevMode()) {
+            console.warn('[ng-ga4] setUserProperties() dropped:', problems);
+        }
+    }
+
+    // On success, adopts the merged result, so this context also sends what
+    // others stored. On failure, keeps its own map rather than lose properties.
+    private persistUserPropertyUpdate(update: UserPropertyUpdate): void {
+        if (!this.consent.storageAllowed) {
+            return;
+        }
+        const merge = (raw: unknown) => applyUserPropertyUpdate(parseStoredUserProperties(raw), update).properties;
+        const writeLocal = () => {
+            try {
+                const next = merge(localStorage.getItem('ga_user_properties'));
+                const json = serializeUserProperties(next);
+                if (json === null) {
+                    localStorage.removeItem('ga_user_properties');
+                } else {
+                    localStorage.setItem('ga_user_properties', json);
+                }
+                this.userProperties = next;
+            } catch (err) {
+                console.warn('[ng-ga4] could not persist user properties', err);
+            }
+        };
+        if (!(this.config.isExtension && chrome?.storage)) {
+            writeLocal();
+            return;
+        }
+        // Queued, so this read-modify-write cannot interleave with other writes.
+        this.enqueueStorageWrite('chrome.storage.local (user properties)', async () => {
+            if (!this.consent.storageAllowed) {
+                return;
+            }
+            try {
+                const next = merge((await chrome.storage.local.get(['ga_user_properties']))['ga_user_properties']);
+                if (!this.consent.storageAllowed) {
+                    return;
+                }
+                const json = serializeUserProperties(next);
+                await (json === null
+                    ? chrome.storage.local.remove(['ga_user_properties'])
+                    : chrome.storage.local.set({ ga_user_properties: json }));
+                this.userProperties = next;
+                // Drop a fallback copy from an earlier failure: it is stale now.
+                try {
+                    localStorage.removeItem('ga_user_properties');
+                } catch {
+                    // Unreadable localStorage holds no copy either.
+                }
+            } catch (err) {
+                // readPersistent() reads this fallback when chrome.storage fails.
+                console.warn('[ng-ga4] chrome.storage.local failed, falling back to localStorage', err);
+                if (this.consent.storageAllowed) {
+                    writeLocal();
+                }
+            }
+        });
+    }
+
+    // chrome.storage.local on an extension, localStorage otherwise or when it throws.
+    private async readPersistent(key: string): Promise<unknown> {
+        if (this.config.isExtension && chrome?.storage) {
+            try {
+                const result = await chrome.storage.local.get([key]);
+                return result[key];
+            } catch (err) {
+                console.warn('[ng-ga4] chrome.storage.local.get failed, falling back to localStorage', err);
+            }
+        }
+        try {
+            return localStorage.getItem(key);
+        } catch {
+            return null;
         }
     }
 

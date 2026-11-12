@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `setUserId(userId)` sends a top-level `user_id` on every hit, for GA4's User-ID
+  reporting identity and cross-device analysis ([#18](https://github.com/streamvessel/ng-ga4/issues/18)).
+  Pass `null` on sign-out. The ID is stored next to the client ID, so it survives
+  reloads, and follows `analyticsStorage` consent like the client ID does.
+- `setUserProperties()`, the equivalent of `gtag('set', 'user_properties', { ... })`
+  ([#19](https://github.com/streamvessel/ng-ga4/issues/19)). Properties merge across
+  calls, go out as `user_properties` on every hit, and are stored next to the client
+  ID so they survive a reload; denying `analyticsStorage` deletes them along with it.
+  Names and values GA4 would reject are dropped, with a warning in dev mode.
 - `enhancedMeasurement` config: opt-in `scroll`, outbound `click`, `file_download`,
   `view_search_results`, `form_start`, `form_submit`, `video_start`, `video_progress`
   and `video_complete` events with `gtag.js`'s names and parameters
