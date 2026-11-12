@@ -33,6 +33,12 @@ describe('countryFromTimeZone', () => {
         expect(countryFromTimeZone('Not/AZone')).toBeUndefined();
     });
 
+    it('returns undefined for keys inherited from Object.prototype', () => {
+        expect(countryFromTimeZone('constructor')).toBeUndefined();
+        expect(countryFromTimeZone('toString')).toBeUndefined();
+        expect(countryFromTimeZone('__proto__')).toBeUndefined();
+    });
+
     it('returns undefined for empty, null or undefined input', () => {
         expect(countryFromTimeZone('')).toBeUndefined();
         expect(countryFromTimeZone(null)).toBeUndefined();

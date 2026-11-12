@@ -187,5 +187,7 @@ export function countryFromTimeZone(timeZone: string | null | undefined): string
     if (!timeZone) {
         return undefined;
     }
-    return TZ_TO_COUNTRY[timeZone];
+    // Own keys only: a plain object literal inherits 'constructor', 'toString'
+    // and '__proto__', which would otherwise come back as a function or object.
+    return Object.hasOwn(TZ_TO_COUNTRY, timeZone) ? TZ_TO_COUNTRY[timeZone] : undefined;
 }
