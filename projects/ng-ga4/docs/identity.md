@@ -1,6 +1,6 @@
 # Identity: client ID, user ID and user properties
 
-> Documented for the latest `master`, which can be ahead of the release on npm. Unreleased changes are listed under [Unreleased](../../../CHANGELOG.md#unreleased) in the changelog.
+> Describes the latest `master`. See [Which version these docs describe](README.md#which-version-these-docs-describe).
 
 ## Client ID and gtag.js
 

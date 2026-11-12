@@ -36,6 +36,15 @@ jobs:
       - name: Lint
         run: pnpm run lint
 
+      # npm renders only the library README, so a relative or anchor-only link there
+      # 404s on npmjs.com (fixed once in 0.2.1). Topic docs live under docs/ on GitHub.
+      - name: Library README links are absolute
+        run: |
+          if grep -nP '\]\((?!https?://)' projects/ng-ga4/README.md; then
+            echo "::error file=projects/ng-ga4/README.md::Use absolute https:// links; npm renders only this file."
+            exit 1
+          fi
+
       - name: Unit tests (headless)
         run: pnpm exec ng test ng-ga4 --watch=false --browsers=ChromeHeadlessCI --no-progress
 

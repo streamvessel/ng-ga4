@@ -1,6 +1,6 @@
 # Engagement time and debug mode
 
-> Documented for the latest `master`, which can be ahead of the release on npm. Unreleased changes are listed under [Unreleased](../../../CHANGELOG.md#unreleased) in the changelog.
+> Describes the latest `master`. See [Which version these docs describe](README.md#which-version-these-docs-describe).
 
 ## Engagement time
 

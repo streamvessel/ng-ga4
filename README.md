@@ -45,7 +45,6 @@ projects/ng-ga4/          # the library, the only published package
 ├── README.md             #   overview and API, the only doc published to npm
 ├── docs/                 #   topic docs (configuration, identity, consent, …), GitHub only
 │   └── limitations.md    #   what the Measurement Protocol can't do, with measurements
-├── LIMITATIONS.md        #   stub pointing to docs/limitations.md, for links from older npm READMEs
 └── ng-package.json       #   ng-packagr config (builds to dist/ng-ga4)
 .github/workflows/        # ci.yml (lint, test, build), publish.yml (manual release)
 ```

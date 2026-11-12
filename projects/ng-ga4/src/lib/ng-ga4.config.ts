@@ -104,7 +104,8 @@ export interface NgGa4Config {
      * not send this event; the accrued time rides out on the next hit or the
      * eventual hide. Always sent over the unload-safe transport chain
      * (`sendBeacon` → `fetch(keepalive)` → XHR), regardless of the configured
-     * `transport`. See https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md#engagement-time
+     * `transport`. See
+     * https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md#engagement-time
      * for the full reasoning.
      */
     sendEngagementOnHide?: boolean;
@@ -115,7 +116,8 @@ export interface NgGa4Config {
      * it appears as an ordinary custom event in Events reports. Validated at
      * startup against the Measurement Protocol's naming rules; an invalid or
      * reserved value logs a console warning and falls back to the default.
-     * See https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md#engagement-time
+     * See
+     * https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md#engagement-time
      * for the full reasoning.
      */
     engagementEventName?: string;
