@@ -138,7 +138,8 @@ export interface NgGa4Config {
     /**
      * Automatically collected events matching gtag.js's Enhanced Measurement:
      * `scroll`, outbound `click`, `file_download`, `view_search_results`,
-     * `form_start` and `form_submit`. Every flag is off by default, so leaving
+     * `form_start`, `form_submit`, and `video_start` / `video_progress` /
+     * `video_complete` for native `<video>`. Every flag is off by default, so leaving
      * this out sends exactly what earlier versions sent. See "Enhanced
      * measurement" in the README.
      */

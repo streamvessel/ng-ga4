@@ -101,7 +101,7 @@ bootstrapApplication(AppComponent, {
 - `sendEngagementOnHide` (`boolean`, default `true`): send the engagement time left over when the page is hidden or closed. See [Engagement time](#engagement-time).
 - `engagementEventName` (`string`, default `'page_engagement'`): name of that event. An invalid or reserved name (such as `user_engagement`) logs a warning and falls back to the default.
 - `consent` (`NgGa4Consent`, default: storage granted): initial consent state. See [Consent](#consent).
-- `enhancedMeasurement` (`NgGa4EnhancedMeasurement`, default: all off): automatic `scroll`, outbound `click`, `file_download`, `view_search_results`, `form_start` and `form_submit` events. See [Enhanced measurement](#enhanced-measurement).
+- `enhancedMeasurement` (`NgGa4EnhancedMeasurement`, default: all off): automatic `scroll`, outbound `click`, `file_download`, `view_search_results`, `form_start`, `form_submit` and `<video>` events. See [Enhanced measurement](#enhanced-measurement).
 
 ## Usage
 
@@ -162,7 +162,8 @@ provideNgGa4({
         outboundClicks: true,
         fileDownloads: true,
         siteSearch: true,
-        forms: true
+        forms: true,
+        video: true
     }
 })
 ```
@@ -172,8 +173,9 @@ provideNgGa4({
 - `fileDownloads`: `file_download` with `file_extension`, `file_name` (the link's path), `link_url`, `link_text`, `link_id` and `link_classes` for a link whose path ends in one of the extensions Google lists: `pdf`, `xls(x)`, `doc(x)`, `txt`, `rtf`, `csv`, `exe`, `key`, `pps`, `ppt(x)`, `7z`, `pkg`, `rar`, `gz`, `zip`, `avi`, `mov`, `mp4`, `mp(e)g`, `wmv`, `mid(i)`, `mp3`, `wav`, `wma`. A download to another host sends `file_download` only, not a `click` as well.
 - `siteSearch`: `view_search_results` with `search_term` after a page view whose path has a `q`, `s`, `search`, `query` or `keyword` query parameter (the first one present, in that order). The term comes from the path you reported, so a query you strip before calling `trackPageView` is never read.
 - `forms`: `form_start` the first time the user types into or changes a field of a form, once per form per page view, and `form_submit` when it is submitted, with `form_id`, `form_name`, `form_destination` and, on submit, `form_submit_text` (the button's text). Focusing a field isn't enough to count as a start. `form_destination` is only sent when the form has an `action` attribute; without one it would be the current address, unfiltered.
+- `video`: `video_start` when a native `<video>` starts playing, `video_progress` as playback passes 10%, 25%, 50% and 75%, and `video_complete` when it ends, with `video_provider: 'html5'`, `video_title` (the `title` or `aria-label` attribute), `video_url`, `video_current_time`, `video_duration`, `video_percent` and `visible` (whether the player was on screen). Pausing and resuming doesn't start it again; a replay after the end, a new source or the next page view does. A seek past several milestones sends only the furthest one. `video_url` drops the query and fragment, which often hold a signed token, and is empty for `blob:` sources such as hls.js players. A live stream sends `video_start` and `video_complete` but no progress. Every `<video>` counts, including a muted background loop, which sends a start and up to four progress events per page view.
 
-All of these carry the same `page_location` as the hide-time engagement event (see [Engagement time](#engagement-time)), go through `trackEvent`, and stop with `setEnabled(false)`. The listeners run outside Angular's zone, so they don't trigger change detection, and are removed when the service is destroyed. Nothing is registered on the server, or in an extension's service worker, which has no page. Forms inside a shadow root aren't seen, because their `submit` and `input` events don't leave it. Video events (`video_start`, `video_progress`, `video_complete`) are not supported.
+All of these carry the same `page_location` as the hide-time engagement event (see [Engagement time](#engagement-time)), go through `trackEvent`, and stop with `setEnabled(false)`. The listeners run outside Angular's zone, so they don't trigger change detection, and are removed when the service is destroyed. Nothing is registered on the server, or in an extension's service worker, which has no page. Forms and videos inside a shadow root aren't seen, because their `submit`, `input` and media events don't leave it. Embedded YouTube players aren't tracked: gtag.js does that through YouTube's player script, and this library loads no external scripts.
 
 ## Client ID and gtag.js
 

@@ -17,6 +17,13 @@ export interface NgGa4EnhancedMeasurement {
     siteSearch?: boolean;
     /** `form_start` on the first input into a form per page view, and `form_submit` on submit. */
     forms?: boolean;
+    /**
+     * `video_start`, `video_progress` (10/25/50/75%) and `video_complete` for
+     * native `<video>` elements, with `video_provider: 'html5'`. gtag.js only
+     * tracks embedded YouTube players; this covers the HTML5 player instead and
+     * loads nothing.
+     */
+    video?: boolean;
 }
 
 export interface EnhancedMeasurementHost {
@@ -37,6 +44,8 @@ const FILE_DOWNLOAD_EXTENSION =
 const SITE_SEARCH_PARAMS = ['q', 's', 'search', 'query', 'keyword'];
 
 const SCROLL_THRESHOLD = 0.9;
+// gtag.js's video_progress milestones, in percent.
+const VIDEO_PROGRESS_MILESTONES = [10, 25, 50, 75];
 // gtag.js truncates link text, button text and the search term to 100
 // characters, the Measurement Protocol's limit for a parameter value.
 const MAX_TEXT_LENGTH = 100;
@@ -55,6 +64,7 @@ export class EnhancedMeasurement {
     private readonly siteHostname: string | null;
     private scrolled = false;
     private startedForms = new WeakSet<HTMLFormElement>();
+    private videos = new WeakMap<HTMLVideoElement, VideoState>();
 
     constructor(
         private readonly options: NgGa4EnhancedMeasurement,
@@ -95,6 +105,13 @@ export class EnhancedMeasurement {
             this.listen(doc, 'change', e => this.onFormInteraction(e), true);
             this.listen(doc, 'submit', e => this.onSubmit(e as SubmitEvent), true);
         }
+        if (options.video) {
+            // Media events don't bubble, but a capture listener on document still
+            // sees them for every <video> in the light DOM.
+            this.listen(doc, 'play', e => this.onVideoPlay(e, win), true);
+            this.listen(doc, 'timeupdate', e => this.onVideoTimeUpdate(e, win), true);
+            this.listen(doc, 'ended', e => this.onVideoEnded(e, win), true);
+        }
     }
 
     stop(): void {
@@ -114,6 +131,7 @@ export class EnhancedMeasurement {
     pageViewed(pagePath: string): void {
         this.scrolled = false;
         this.startedForms = new WeakSet();
+        this.videos = new WeakMap();
         if (!this.options.siteSearch) {
             return;
         }
@@ -207,6 +225,78 @@ export class EnhancedMeasurement {
             ...(submitText ? { form_submit_text: truncate(submitText) } : {})
         });
     }
+
+    // Starts on the first play of a source, and again on a replay after it
+    // ended. A pause and resume is the same view, so it doesn't count.
+    private onVideoPlay(event: Event, win: Window): void {
+        const video = event.target;
+        if (!(video instanceof HTMLVideoElement)) {
+            return;
+        }
+        const state = this.videos.get(video);
+        if (state && state.src === video.currentSrc && !state.ended) {
+            return;
+        }
+        this.videos.set(video, { src: video.currentSrc, milestones: new Set(), ended: false });
+        this.send('video_start', videoParams(video, win, 0));
+    }
+
+    // A seek past several milestones sends only the furthest, so jumping to the
+    // end doesn't send four events at once; the ones skipped count as passed.
+    private onVideoTimeUpdate(event: Event, win: Window): void {
+        const tracked = this.trackedVideo(event);
+        if (!tracked || !isFinite(tracked.video.duration) || tracked.video.duration <= 0) {
+            return;
+        }
+        const { video, state } = tracked;
+        const percent = (video.currentTime / video.duration) * 100;
+        const reached = VIDEO_PROGRESS_MILESTONES.filter(m => percent >= m && !state.milestones.has(m));
+        if (reached.length) {
+            reached.forEach(m => state.milestones.add(m));
+            this.send('video_progress', videoParams(video, win, reached[reached.length - 1]));
+        }
+    }
+
+    private onVideoEnded(event: Event, win: Window): void {
+        const tracked = this.trackedVideo(event);
+        if (tracked) {
+            tracked.state.ended = true;
+            this.send('video_complete', videoParams(tracked.video, win, 100));
+        }
+    }
+
+    // A video already started and not yet ended; progress and completion only
+    // count for those.
+    private trackedVideo(event: Event): { video: HTMLVideoElement; state: VideoState } | null {
+        const video = event.target;
+        const state = video instanceof HTMLVideoElement ? this.videos.get(video) : undefined;
+        return video instanceof HTMLVideoElement && state && !state.ended ? { video, state } : null;
+    }
+}
+
+interface VideoState {
+    src: string;
+    milestones: Set<number>;
+    ended: boolean;
+}
+
+// gtag.js's video parameters. video_url drops the query and fragment, which
+// on a CDN often hold a signed token, and is left empty for blob: and other
+// non-http sources (MSE players such as hls.js), where it would mean nothing.
+function videoParams(video: HTMLVideoElement, win: Window, percent: number): Record<string, unknown> {
+    const url = parseUrl(video.currentSrc);
+    const rect = video.getBoundingClientRect();
+    const duration = isFinite(video.duration) ? Math.round(video.duration) : undefined;
+    return {
+        video_provider: 'html5',
+        video_title: truncate(normaliseText(video.getAttribute('title') ?? video.getAttribute('aria-label'))),
+        video_url: url && (url.protocol === 'http:' || url.protocol === 'https:') ? url.origin + url.pathname : '',
+        video_current_time: Math.floor(video.currentTime),
+        ...(duration !== undefined ? { video_duration: duration } : {}),
+        video_percent: percent,
+        visible: rect.bottom > 0 && rect.right > 0 && rect.top < win.innerHeight && rect.left < win.innerWidth
+            && video.ownerDocument.visibilityState !== 'hidden'
+    };
 }
 
 /** The search term in a reported page path, or null when it has none. */

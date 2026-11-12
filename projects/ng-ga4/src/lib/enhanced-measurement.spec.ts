@@ -383,4 +383,160 @@ describe('EnhancedMeasurement', () => {
             }]);
         });
     });
+
+    describe('video', () => {
+        let video: HTMLVideoElement;
+        let rect: Partial<DOMRect>;
+
+        // duration, currentTime and currentSrc are driven by real media loading;
+        // own properties shadow the prototype accessors so the spec sets them.
+        function setMedia(props: { duration?: number; currentTime?: number; currentSrc?: string }): void {
+            for (const [key, value] of Object.entries(props)) {
+                Object.defineProperty(video, key, { value, configurable: true, writable: true });
+            }
+        }
+
+        function fire(type: 'play' | 'timeupdate' | 'ended'): void {
+            video.dispatchEvent(new Event(type));
+        }
+
+        function at(seconds: number): void {
+            setMedia({ currentTime: seconds });
+            fire('timeupdate');
+        }
+
+        beforeEach(() => {
+            create({ video: true }, fakeWindow({ innerHeight: 800, innerWidth: 1200 }));
+            video = document.createElement('video');
+            video.setAttribute('title', ' Product  tour ');
+            rect = { top: 10, left: 10, bottom: 300, right: 500 };
+            video.getBoundingClientRect = () => rect as DOMRect;
+            setMedia({ duration: 100.4, currentTime: 0, currentSrc: 'https://cdn.example.com/v/tour.mp4?token=secret#t=5' });
+            fixture.appendChild(video);
+        });
+
+        it('sends video_start with gtag parameters on the first play', () => {
+            fire('play');
+            expect(sent).toEqual([{
+                name: 'video_start',
+                params: {
+                    video_provider: 'html5',
+                    video_title: 'Product tour',
+                    video_url: 'https://cdn.example.com/v/tour.mp4',
+                    video_current_time: 0,
+                    video_duration: 100,
+                    video_percent: 0,
+                    visible: document.visibilityState !== 'hidden',
+                    page_location: 'https://example.com/here'
+                }
+            }]);
+        });
+
+        it('does not restart on pause and resume', () => {
+            fire('play');
+            at(30);
+            fire('play');
+            expect(sent.filter(e => e.name === 'video_start').length).toBe(1);
+        });
+
+        it('sends each progress milestone once, as playback passes it', () => {
+            fire('play');
+            for (const t of [5, 11, 12, 26, 51, 74, 76, 90]) {
+                at(t);
+            }
+            const progress = sent.filter(e => e.name === 'video_progress');
+            expect(progress.map(e => e.params['video_percent'])).toEqual([10, 25, 50, 75]);
+            expect(progress[0].params['video_current_time']).toBe(11);
+        });
+
+        it('sends only the furthest milestone after a seek past several', () => {
+            fire('play');
+            at(60);
+            at(80);
+            expect(sent.filter(e => e.name === 'video_progress').map(e => e.params['video_percent'])).toEqual([50, 75]);
+        });
+
+        it('sends video_complete on ended, once, and nothing after it', () => {
+            fire('play');
+            setMedia({ currentTime: 100.4 });
+            fire('ended');
+            fire('ended');
+            at(100);
+            expect(sent.map(e => e.name)).toEqual(['video_start', 'video_complete']);
+            expect(sent[1].params['video_percent']).toBe(100);
+        });
+
+        it('starts again on a replay after it ended', () => {
+            fire('play');
+            fire('ended');
+            setMedia({ currentTime: 0 });
+            fire('play');
+            at(11);
+            expect(sent.map(e => e.name)).toEqual(['video_start', 'video_complete', 'video_start', 'video_progress']);
+        });
+
+        it('starts again when the source changes', () => {
+            fire('play');
+            setMedia({ currentSrc: 'https://cdn.example.com/v/other.mp4' });
+            fire('play');
+            expect(sent.map(e => e.params['video_url'])).toEqual([
+                'https://cdn.example.com/v/tour.mp4',
+                'https://cdn.example.com/v/other.mp4'
+            ]);
+        });
+
+        it('starts again after the next page view', () => {
+            fire('play');
+            em!.pageViewed('/next');
+            fire('play');
+            expect(sent.filter(e => e.name === 'video_start').length).toBe(2);
+        });
+
+        it('ignores progress and completion for a video that never started', () => {
+            at(50);
+            fire('ended');
+            expect(sent).toEqual([]);
+        });
+
+        it('sends no progress or duration for a live stream', () => {
+            setMedia({ duration: Infinity });
+            fire('play');
+            at(500);
+            expect(sent.map(e => e.name)).toEqual(['video_start']);
+            expect('video_duration' in sent[0].params).toBe(false);
+        });
+
+        it('leaves video_url empty for a blob: source', () => {
+            setMedia({ currentSrc: 'blob:https://example.com/1234' });
+            fire('play');
+            expect(sent[0].params['video_url']).toBe('');
+        });
+
+        it('falls back to aria-label for the title', () => {
+            video.removeAttribute('title');
+            video.setAttribute('aria-label', 'Intro');
+            fire('play');
+            expect(sent[0].params['video_title']).toBe('Intro');
+        });
+
+        it('reports visible: false for a video outside the viewport', () => {
+            rect = { top: 900, left: 10, bottom: 1200, right: 500 };
+            fire('play');
+            expect(sent[0].params['visible']).toBe(false);
+        });
+
+        it('ignores <audio>', () => {
+            const audio = document.createElement('audio');
+            fixture.appendChild(audio);
+            audio.dispatchEvent(new Event('play'));
+            expect(sent).toEqual([]);
+        });
+
+        it('registers nothing when video is off', () => {
+            em!.stop();
+            create({ forms: true });
+            fire('play');
+            expect(sent).toEqual([]);
+        });
+    });
 });

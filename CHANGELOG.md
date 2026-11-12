@@ -10,10 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `enhancedMeasurement` config: opt-in `scroll`, outbound `click`, `file_download`,
-  `view_search_results`, `form_start` and `form_submit` events with `gtag.js`'s names
-  and parameters ([#28](https://github.com/streamvessel/ng-ga4/issues/28)). Everything
-  is off by default, so nothing you send changes on upgrade. Video events are not
-  included.
+  `view_search_results`, `form_start`, `form_submit`, `video_start`, `video_progress`
+  and `video_complete` events with `gtag.js`'s names and parameters
+  ([#28](https://github.com/streamvessel/ng-ga4/issues/28)). Everything is off by
+  default, so nothing you send changes on upgrade. Video tracking covers native
+  `<video>` elements, not embedded YouTube players.
 
 ## [0.2.2] - 2026-10-27
 

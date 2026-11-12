@@ -119,7 +119,7 @@ describe('NgGa4Service enhanced measurement wiring', () => {
     });
 
     it('registers no listeners on the server', async () => {
-        configure({ enhancedMeasurement: { outboundClicks: true, forms: true, scroll: true, siteSearch: true } }, 'server');
+        configure({ enhancedMeasurement: { outboundClicks: true, forms: true, scroll: true, siteSearch: true, video: true } }, 'server');
         await service.init();
         clickLink('https://other.test/');
         service.trackPageView('/search?q=x');
