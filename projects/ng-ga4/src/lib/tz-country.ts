@@ -11,7 +11,9 @@
 // are included. Zones without a country (UTC, Etc/*, GMT) intentionally have no
 // entry so the lookup returns undefined and we omit user_location.
 
-const TZ_TO_COUNTRY: Record<string, string> = {
+// A Map rather than a plain object, so inherited keys like 'constructor' are
+// never mistaken for a time zone.
+const TZ_TO_COUNTRY: ReadonlyMap<string, string> = new Map(Object.entries({
     // Africa
     'Africa/Abidjan': 'CI', 'Africa/Accra': 'GH', 'Africa/Addis_Ababa': 'ET',
     'Africa/Algiers': 'DZ', 'Africa/Asmara': 'ER', 'Africa/Bamako': 'ML',
@@ -181,13 +183,11 @@ const TZ_TO_COUNTRY: Record<string, string> = {
     'Pacific/Samoa': 'WS', 'Pacific/Ponape': 'FM',
     'US/Eastern': 'US', 'US/Central': 'US', 'US/Mountain': 'US',
     'US/Pacific': 'US', 'US/Alaska': 'US', 'US/Hawaii': 'US'
-};
+}));
 
 export function countryFromTimeZone(timeZone: string | null | undefined): string | undefined {
     if (!timeZone) {
         return undefined;
     }
-    // Own keys only: a plain object literal inherits 'constructor', 'toString'
-    // and '__proto__', which would otherwise come back as a function or object.
-    return Object.hasOwn(TZ_TO_COUNTRY, timeZone) ? TZ_TO_COUNTRY[timeZone] : undefined;
+    return TZ_TO_COUNTRY.get(timeZone);
 }

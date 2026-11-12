@@ -25,9 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The time-zone-to-country lookup no longer treats names inherited from
-  `Object.prototype` (`constructor`, `toString`, `__proto__`) as time zones. Browsers
-  never report such a zone, so this was not reachable in practice.
+- The time-zone-to-country lookup no longer returns `Object.prototype` members for
+  names such as `constructor`.
 
 ## [0.2.2] - 2026-10-27
 
