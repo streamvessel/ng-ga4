@@ -525,6 +525,25 @@ describe('EnhancedMeasurement', () => {
             expect(sent[0].params['visible']).toBe(false);
         });
 
+        it('sends nothing for a video marked data-ng-ga4-ignore', () => {
+            video.setAttribute('data-ng-ga4-ignore', '');
+            fire('play');
+            at(50);
+            fire('ended');
+            expect(sent).toEqual([]);
+        });
+
+        it('sends nothing for a video inside an element marked data-ng-ga4-ignore', () => {
+            const hero = document.createElement('section');
+            hero.setAttribute('data-ng-ga4-ignore', '');
+            fixture.appendChild(hero);
+            hero.appendChild(video);
+            fire('play');
+            at(50);
+            fire('ended');
+            expect(sent).toEqual([]);
+        });
+
         it('ignores <audio>', () => {
             const audio = document.createElement('audio');
             fixture.appendChild(audio);

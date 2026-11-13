@@ -21,7 +21,8 @@ export interface NgGa4EnhancedMeasurement {
      * `video_start`, `video_progress` (10/25/50/75%) and `video_complete` for
      * native `<video>` elements, with `video_provider: 'html5'`. gtag.js only
      * tracks embedded YouTube players; this covers the HTML5 player instead and
-     * loads nothing.
+     * loads nothing. A video with `data-ng-ga4-ignore` on it or an ancestor
+     * (a decorative background loop, say) sends nothing.
      */
     video?: boolean;
 }
@@ -46,6 +47,8 @@ const SITE_SEARCH_PARAMS = ['q', 's', 'search', 'query', 'keyword'];
 const SCROLL_THRESHOLD = 0.9;
 // gtag.js's video_progress milestones, in percent.
 const VIDEO_PROGRESS_MILESTONES = [10, 25, 50, 75];
+// On a <video> or any ancestor: that video sends no video events at all.
+const VIDEO_IGNORE_SELECTOR = '[data-ng-ga4-ignore]';
 // gtag.js truncates link text, button text and the search term to 100
 // characters, the Measurement Protocol's limit for a parameter value.
 const MAX_TEXT_LENGTH = 100;
@@ -230,7 +233,9 @@ export class EnhancedMeasurement {
     // ended. A pause and resume is the same view, so it doesn't count.
     private onVideoPlay(event: Event, win: Window): void {
         const video = event.target;
-        if (!(video instanceof HTMLVideoElement)) {
+        // Checked here only: a video that never starts is never tracked, so
+        // progress and completion need no check of their own.
+        if (!(video instanceof HTMLVideoElement) || video.closest(VIDEO_IGNORE_SELECTOR)) {
             return;
         }
         const state = this.videos.get(video);
