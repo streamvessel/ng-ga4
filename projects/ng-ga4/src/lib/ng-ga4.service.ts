@@ -9,6 +9,7 @@ import { regionFromCountry } from './country-region';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
+import { EnhancedMeasurement } from './enhanced-measurement';
 import { appOnlyEventNameProblem, eventNameProblem, validateEventParams } from './ga4-validation';
 import {
     applyUserPropertyUpdate,
@@ -72,6 +73,7 @@ export class NgGa4Service implements OnDestroy {
     // applied on top of what was stored. `null` once loaded.
     private pendingUserProperties: UserPropertyUpdate | null = emptyUserPropertyUpdate();
     private engagement: EngagementTimer | null = null;
+    private enhancedMeasurement: EnhancedMeasurement | null = null;
     // Resolved once, in init(), by resolveEngagementEventName() — validating on
     // every flush would warn on every window switch for a misconfigured name.
     private engagementEventName = 'page_engagement';
@@ -156,6 +158,17 @@ export class NgGa4Service implements OnDestroy {
         // for listeners to be live before clientId is ready.
         this.registerEngagementListeners();
         this.engagementEventName = this.resolveEngagementEventName();
+        // Before the awaits for the same reason, and so the landing page view —
+        // queued until clientId is ready — still reaches pageViewed() for site
+        // search. Events fired meanwhile queue like any other trackEvent() call.
+        // Outside Angular: the handlers only send hits (see registerEngagementListeners).
+        // With every flag off (the default) it registers nothing.
+        const enhanced = this.enhancedMeasurement ??= new EnhancedMeasurement(this.config.enhancedMeasurement ?? {}, {
+            track: (name, params) => this.trackEvent(name, params),
+            pageLocation: () => this.engagementPageLocation(),
+            siteUrl: this.config.siteUrl
+        });
+        this.zone.runOutsideAngular(() => enhanced.start());
 
         const clientId = await this.loadOrCreateClientId();
         if (!this.userIdSetByApp) {
@@ -448,6 +461,7 @@ export class NgGa4Service implements OnDestroy {
 
     ngOnDestroy(): void {
         this.routerSubscription?.unsubscribe();
+        this.enhancedMeasurement?.stop();
         if (this.visibilityListener && typeof document !== 'undefined') {
             document.removeEventListener('visibilitychange', this.visibilityListener);
         }
@@ -496,6 +510,7 @@ export class NgGa4Service implements OnDestroy {
         };
 
         this.sendToGA4([{ name: 'page_view', params }]);
+        this.enhancedMeasurement?.pageViewed(pagePath);
     }
 
     trackEvent(name: string, params?: Record<string, any>): void {

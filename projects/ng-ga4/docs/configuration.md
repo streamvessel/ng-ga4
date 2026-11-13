@@ -20,3 +20,4 @@
 - `sendEngagementOnHide` (`boolean`, default `true`): send the engagement time left over when the page is hidden or closed. See [Engagement time](engagement.md#engagement-time).
 - `engagementEventName` (`string`, default `'page_engagement'`): name of that event. An invalid or reserved name (such as `user_engagement`) logs a warning and falls back to the default.
 - `consent` (`NgGa4Consent`, default: storage granted): initial consent state. See [Consent](consent.md).
+- `enhancedMeasurement` (`NgGa4EnhancedMeasurement`, default: all off): automatic `scroll`, outbound `click`, `file_download`, `view_search_results`, `form_start`, `form_submit` and `<video>` events. See [Enhanced measurement](enhanced-measurement.md).
