@@ -2,7 +2,7 @@ import { Inject, Injectable, isDevMode, NgZone, OnDestroy, PLATFORM_ID } from '@
 import { HttpClient } from '@angular/common/http';
 import { isPlatformBrowser } from '@angular/common';
 import { NavigationEnd, Router } from '@angular/router';
-import { filter, Subscription } from 'rxjs';
+import { asapScheduler, filter, observeOn, Subscription } from 'rxjs';
 import { NG_GA4_CONFIG, NgGa4Config, NgGa4CookieOptions } from './ng-ga4.config';
 import { ConsentState, Ga4ConsentPayload, NgGa4Consent } from './consent';
 import { regionFromCountry } from './country-region';
@@ -173,7 +173,13 @@ export class NgGa4Service implements OnDestroy {
         this.drainPendingCalls();
 
         this.routerSubscription = this.router.events
-            .pipe(filter(event => event instanceof NavigationEnd))
+            .pipe(
+                filter(event => event instanceof NavigationEnd),
+                // The router emits NavigationEnd *before* TitleStrategy.updateTitle()
+                // sets the new route's title; reading document.title synchronously
+                // would report the previous page's. One microtask later it is set.
+                observeOn(asapScheduler)
+            )
             .subscribe((event: NavigationEnd) => {
                 this.trackPageView(event.urlAfterRedirects);
             });
@@ -488,7 +494,9 @@ export class NgGa4Service implements OnDestroy {
             page_location: this.config.siteUrl
                 ? this.joinSiteUrl(this.config.siteUrl, pagePath)
                 : window.location.href,
-            page_title: pageTitle,
+            // gtag.js defaults to document.title; without this, GA4 reports
+            // "(not set)" for every page view the router integration sends.
+            page_title: pageTitle ?? (this.getDocument()?.title || undefined),
             engagement_time_msec: this.consumeEngagementTime(),
             session_id: this.sessionId,
             session_number: this.sessionNumber,

@@ -44,6 +44,7 @@ describe('NgGa4Service', () => {
     let pageEngaged: boolean;
     // undefined: hidden exactly when not engaged, which is what most specs mean.
     let pageHidden: boolean | undefined;
+    let originalTitle: string;
 
     function configureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
         // Reset here, not just in the top-level beforeEach, so a reconfigureTestBed()
@@ -267,6 +268,8 @@ describe('NgGa4Service', () => {
 
         spyOn(crypto, 'randomUUID').and.returnValue(MOCK_UUID as `${string}-${string}-${string}-${string}-${string}`);
 
+        originalTitle = document.title;
+
         // Save original chrome.storage (if any) for restoration
         originalChromeStorage = (window as any).chrome?.storage;
 
@@ -285,6 +288,7 @@ describe('NgGa4Service', () => {
         httpMock.verify();
         jasmine.clock().uninstall();
         clearChromeMock();
+        document.title = originalTitle;
     });
 
     // --- init() ---
@@ -1872,6 +1876,48 @@ describe('NgGa4Service', () => {
             await service.init();
         });
 
+        describe('page_title', () => {
+            function sentTitle(): unknown {
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                const params = req.request.body.events[0].params;
+                req.flush('', { status: 204, statusText: 'No Content' });
+                return params.page_title;
+            }
+
+            it('defaults to document.title when the caller omits it', () => {
+                document.title = 'Dashboard | Acme';
+
+                service.trackPageView('/dashboard');
+
+                expect(sentTitle()).toBe('Dashboard | Acme');
+            });
+
+            it('prefers an explicit title over document.title', () => {
+                document.title = 'Dashboard | Acme';
+
+                service.trackPageView('/dashboard', 'Custom');
+
+                expect(sentTitle()).toBe('Custom');
+            });
+
+            it('omits page_title when there is no title to report', () => {
+                document.title = '';
+
+                service.trackPageView('/untitled');
+
+                // Left out (JSON drops undefined) rather than sent as "".
+                expect(sentTitle()).toBeUndefined();
+            });
+
+            it('falls back to no title when there is no document', () => {
+                spyOn(service as any, 'getDocument').and.returnValue(undefined);
+
+                service.trackPageView('/worker');
+
+                expect(sentTitle()).toBeUndefined();
+            });
+        });
+
         it('should POST page_view event with window.location.href', () => {
             service.trackPageView('/home');
 
@@ -2941,10 +2987,35 @@ describe('NgGa4Service', () => {
         it('should track page view on NavigationEnd', async () => {
             await service.init();
             routerEvents$.next(new NavigationEnd(1, '/test', '/test'));
+            await drainMicrotasks();
 
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.body.events[0].name).toBe('page_view');
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        // Retitling right after next() mirrors the real router's order.
+        it('reports the title set right after NavigationEnd, not the previous one', async () => {
+            document.title = 'Previous Page';
+            await service.init();
+
+            routerEvents$.next(new NavigationEnd(1, '/next', '/next'));
+            document.title = 'Next Page';
+            await drainMicrotasks();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.page_title).toBe('Next Page');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('drops a deferred page view when the service is destroyed first', async () => {
+            await service.init();
+
+            routerEvents$.next(new NavigationEnd(1, '/gone', '/gone'));
+            service.ngOnDestroy();
+            await drainMicrotasks();
+
+            httpMock.expectNone(() => true);
         });
 
         it('should ignore NavigationStart', async () => {
