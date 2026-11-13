@@ -2776,15 +2776,31 @@ describe('NgGa4Service', () => {
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
-        it('derives user_location.country_id from the browser time zone', async () => {
+        it('derives user_location from the browser time zone', async () => {
             spyOn<any>(service, 'getTimeZone').and.returnValue('Europe/Berlin');
 
             await service.init();
             service.trackPageView('/home');
 
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
-            expect(req.request.body.user_location).toEqual({ country_id: 'DE' });
+            expect(req.request.body.user_location).toEqual({
+                country_id: 'DE',
+                continent_id: '150',
+                subcontinent_id: '155'
+            });
             expect(req.request.body.events[0].params.user_location).toBeUndefined();
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('sends only country_id when the country has no M49 region', async () => {
+            spyOn<any>(service, 'getTimeZone').and.returnValue('Antarctica/Troll');
+            spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
+
+            await service.init();
+            service.trackEvent('x');
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.user_location).toEqual({ country_id: 'AQ' });
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 

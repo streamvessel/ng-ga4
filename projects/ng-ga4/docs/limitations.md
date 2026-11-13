@@ -60,6 +60,7 @@ Claims here are not all the same kind, and the difference matters:
 | Active users | Counted correctly from `client_id` | Measured |
 | Average engagement time | Real measured foreground time, not a constant | Measured |
 | Country | Approximated from the browser timezone, not from IP | By design |
+| Continent, subcontinent | Looked up from that country (UN M49), so exactly as accurate as it | By design |
 | Realtime, DebugView | Both populate normally | Measured |
 
 ## The three that surprised us

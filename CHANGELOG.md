@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   calls, go out as `user_properties` on every hit, and are stored next to the client
   ID so they survive a reload; denying `analyticsStorage` deletes them along with it.
   Names and values GA4 would reject are dropped, with a warning in dev mode.
+- `user_location` now carries `continent_id` and `subcontinent_id` (UN M49) next to
+  `country_id`, looked up from the country the time zone resolves to. GA4's Continent
+  and Subcontinent dimensions used to read `(not set)`
+  ([#22](https://github.com/streamvessel/ng-ga4/issues/22)).
 
 ### Changed
 
@@ -42,6 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is no longer included in the npm package. A short `LIMITATIONS.md` stays at the
   old path and points to the new one, so the link in the READMEs already published
   for 0.2.x keeps working.
+
+### Fixed
+
+- Visitors in 13 time zones sent no `user_location`, so GA4 showed their country as
+  `(not set)`. Chrome reports these zones under older names than the ones the
+  library knew, such as `America/Godthab` for Greenland and `America/Indianapolis`,
+  plus Chile's new `America/Coyhaique`.
 
 ## [0.2.2] - 2026-10-27
 
