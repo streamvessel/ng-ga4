@@ -31,6 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `engagementEventName` is validated against the same, fuller reserved-name
   list, and its warning now says which rule the name broke.
+- The README is now a short overview: the pitch, features, what you give up,
+  install, the required options, one usage example and the API table. The
+  reference material moved to topic docs under
+  [`projects/ng-ga4/docs/`](https://github.com/streamvessel/ng-ga4/tree/master/projects/ng-ga4/docs),
+  which the README links by absolute GitHub URL ([#84](https://github.com/streamvessel/ng-ga4/issues/84)).
+  The text is the same; the docs only gained a note on which version they describe,
+  section headings for the required and optional options, and links between files.
+  `LIMITATIONS.md` is now `docs/limitations.md`, and like the other topic docs it
+  is no longer included in the npm package.
 
 ## [0.2.2] - 2026-10-27
 
