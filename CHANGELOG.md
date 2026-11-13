@@ -39,7 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The text is the same; the docs only gained a note on which version they describe,
   section headings for the required and optional options, and links between files.
   `LIMITATIONS.md` is now `docs/limitations.md`, and like the other topic docs it
-  is no longer included in the npm package.
+  is no longer included in the npm package. A short `LIMITATIONS.md` stays at the
+  old path and points to the new one, so the link in the READMEs already published
+  for 0.2.x keeps working.
 
 ## [0.2.2] - 2026-10-27
 
