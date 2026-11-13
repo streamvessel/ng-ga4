@@ -117,7 +117,7 @@ export class MyComponent {
 
 | `NgGa4Service` method | Description |
 |---|---|
-| `trackEvent(name, params?)` | Send a custom event. |
+| `trackEvent(name, params?)` | Send a custom event. Checked against GA4's naming rules first; see [Event validation](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/event-validation.md). |
 | `trackPageView(path, title?)` | Send a page view. Called for you on navigation. |
 | `setUserId(userId)` | Send `user_id` on every hit from now on; `null` on sign-out. See [User ID](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-id). |
 | `setUserProperties(properties)` | Set user properties, sent with every later hit. See [User properties](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-properties). |
@@ -137,6 +137,7 @@ Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](https://github.com
 - [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md)
 - [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md): setup, service-worker teardown, sessions across tabs
 - [Engagement time and debug mode](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md)
+- [Event validation](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/event-validation.md): the event and parameter name rules `trackEvent()` checks
 - [Limitations](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/limitations.md): what the Measurement Protocol can't do, with measurements
 
 The topic docs are documented for the latest `master`, which can be ahead of the release on npm. Unreleased changes are listed under [Unreleased](https://github.com/streamvessel/ng-ga4/blob/master/CHANGELOG.md#unreleased) in the changelog.

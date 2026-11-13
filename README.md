@@ -32,7 +32,7 @@ import { NgGa4Module } from '@stream-vessel/ng-ga4';
 export class AppModule {}
 ```
 
-**[Full documentation](projects/ng-ga4/README.md)**: standalone setup and the API, with an index of the [topic docs](projects/ng-ga4/README.md#documentation) for every option, engagement time, `gtag.js` interop, consent, Chrome extensions and debug mode.
+**[Full documentation](projects/ng-ga4/README.md)**: standalone setup and the API, with an index of the [topic docs](projects/ng-ga4/README.md#documentation) for every option, engagement time, event validation, `gtag.js` interop, consent, Chrome extensions and debug mode.
 
 ## Repository layout
 
