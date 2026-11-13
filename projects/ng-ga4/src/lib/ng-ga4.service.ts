@@ -5,10 +5,12 @@ import { NavigationEnd, Router } from '@angular/router';
 import { filter, Subscription } from 'rxjs';
 import { NG_GA4_CONFIG, NgGa4Config, NgGa4CookieOptions } from './ng-ga4.config';
 import { ConsentState, Ga4ConsentPayload, NgGa4Consent } from './consent';
+import { regionFromCountry } from './country-region';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
 import { EnhancedMeasurement } from './enhanced-measurement';
+import { appOnlyEventNameProblem, eventNameProblem, validateEventParams } from './ga4-validation';
 import {
     applyUserPropertyUpdate,
     emptyUserPropertyUpdate,
@@ -35,6 +37,8 @@ interface Ga4Device {
 
 interface Ga4UserLocation {
     country_id?: string;
+    continent_id?: string;
+    subcontinent_id?: string;
 }
 
 @Injectable()
@@ -84,17 +88,12 @@ export class NgGa4Service implements OnDestroy {
     private readonly GA_COOKIE_MAX_AGE_SECONDS = 63072000;
     private readonly GA4_ENDPOINT = 'https://www.google-analytics.com/mp/collect';
     private readonly GA4_DEBUG_ENDPOINT = 'https://www.google-analytics.com/debug/mp/collect';
-    // Reserved automatically-collected/recommended event names — sending a custom
-    // event under one of these is accepted with 2xx and silently dropped.
-    private readonly RESERVED_MP_EVENT_NAMES = new Set([
-        'user_engagement', 'session_start', 'first_visit', 'first_open', 'error',
-        'in_app_purchase', 'os_update', 'app_remove', 'app_update', 'app_clear_data',
-        'ad_click', 'ad_impression', 'ad_query', 'ad_exposure', 'adunit_exposure',
-        'notification_dismiss', 'notification_foreground', 'notification_open',
-        'notification_receive', 'screen_view'
-    ]);
 
     private readonly isBrowser: boolean;
+    // Whether trackEvent() explains what it dropped. Validation itself runs in
+    // every build — sending a hit GA4 will discard helps nobody — but in
+    // production it stays silent, and a clean payload never builds a message.
+    private readonly warnOnInvalid: boolean;
     private readonly consent: ConsentState;
     private enabled: boolean;
     private initPromise: Promise<void> | null = null;
@@ -112,6 +111,7 @@ export class NgGa4Service implements OnDestroy {
         // config.enabled is only the *initial* value now: a consent banner has to be
         // able to turn collection on after the injector is built.
         this.enabled = config.enabled;
+        this.warnOnInvalid = !!config.debug || isDevMode();
     }
 
     init(): Promise<void> {
@@ -290,8 +290,8 @@ export class NgGa4Service implements OnDestroy {
      * `undefined` one is ignored, and `null` instead of an object removes all.
      * Sent as `user_properties` on every later hit and stored next to the client
      * ID. Anything GA4 would reject is dropped, with a warning in dev mode — see
-     * the README for the limits. Calls made before `init()` finishes are applied
-     * once it does.
+     * https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-properties
+     * for the limits. Calls made before `init()` finishes are applied once it does.
      */
     setUserProperties(properties: Record<string, NgGa4UserPropertyValue> | null): void {
         if (!this.isBrowser) {
@@ -525,23 +525,49 @@ export class NgGa4Service implements OnDestroy {
             return;
         }
 
+        // /mp/collect answers 204 for an event it is about to discard, so this is
+        // the only place a bad name can surface. Checked here, after the queue,
+        // so a call replayed by drainPendingCalls() is validated (and warned
+        // about) once, and before ensureSession(), since a dropped event is not
+        // activity.
+        const nameProblem = eventNameProblem(name);
+        if (nameProblem) {
+            this.reportProblems(name, [`${nameProblem}. The event was not sent`]);
+            return;
+        }
+
         this.ensureSession();
 
-        this.sendToGA4([{
-            name,
-            params: {
-                // Consumed unconditionally, even though ...params below may override what
-                // gets reported: a sent hit closes the interval regardless of the value it
-                // carries. Skipping this when the caller overrides engagement_time_msec
-                // would leave the accumulator open, so the *next* hit reports time since
-                // two hits ago instead of one.
-                engagement_time_msec: this.consumeEngagementTime(),
-                session_id: this.sessionId,
-                session_number: this.sessionNumber,
-                ...params,
-                ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
-            }
-        }]);
+        const validation = validateEventParams({
+            // Consumed unconditionally, even though ...params below may override what
+            // gets reported: a sent hit closes the interval regardless of the value it
+            // carries. Skipping this when the caller overrides engagement_time_msec
+            // would leave the accumulator open, so the *next* hit reports time since
+            // two hits ago instead of one.
+            engagement_time_msec: this.consumeEngagementTime(),
+            session_id: this.sessionId,
+            session_number: this.sessionNumber,
+            ...params,
+            ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
+        }, this.warnOnInvalid);
+        if (this.warnOnInvalid) {
+            const appOnly = appOnlyEventNameProblem(name);
+            this.reportProblems(name, appOnly ? [appOnly, ...validation.problems] : validation.problems);
+        }
+
+        this.sendToGA4([{ name, params: validation.params }]);
+    }
+
+    // The dev-only warning policy for trackEvent() validation. Not used by
+    // resolveEngagementEventName(): a bad engagementEventName is a config error
+    // caught once at startup, and stays a warning in every build.
+    private reportProblems(eventName: unknown, problems: string[]): void {
+        if (!this.warnOnInvalid || problems.length === 0) {
+            return;
+        }
+        for (const problem of problems) {
+            console.warn(`[ng-ga4] trackEvent("${eventName}"): ${problem}.`);
+        }
     }
 
     private drainPendingCalls(): void {
@@ -835,7 +861,7 @@ export class NgGa4Service implements OnDestroy {
 
     private collectUserLocation(): Ga4UserLocation | null {
         const country = countryFromTimeZone(this.getTimeZone());
-        return country ? { country_id: country } : null;
+        return country ? { country_id: country, ...regionFromCountry(country) } : null;
     }
 
     private async collectDevice(): Promise<Ga4Device | null> {
@@ -1051,22 +1077,14 @@ export class NgGa4Service implements OnDestroy {
         if (configured === undefined) {
             return 'page_engagement';
         }
-        if (this.isValidGa4EventName(configured)) {
+        // App-only names are only a warning for trackEvent(), but this name is
+        // the library's own choice to make, so it falls back rather than risk it.
+        const problem = eventNameProblem(configured) ?? appOnlyEventNameProblem(configured);
+        if (!problem) {
             return configured;
         }
-        console.warn(`[ng-ga4] Invalid engagementEventName "${configured}", falling back to "page_engagement".`);
+        console.warn(`[ng-ga4] Invalid engagementEventName "${configured}" (${problem}), falling back to "page_engagement".`);
         return 'page_engagement';
-    }
-
-    // Mirrors the Measurement Protocol's actual event-name naming rules.
-    private isValidGa4EventName(name: string): boolean {
-        if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(name)) {
-            return false;
-        }
-        if (/^(ga_|google_|firebase_)/.test(name)) {
-            return false;
-        }
-        return !this.RESERVED_MP_EVENT_NAMES.has(name);
     }
 
     private ensureSession(): void {
