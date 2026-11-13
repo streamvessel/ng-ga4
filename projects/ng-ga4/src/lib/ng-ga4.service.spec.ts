@@ -7,6 +7,7 @@ import { Subject } from 'rxjs';
 import { NgGa4Service } from './ng-ga4.service';
 import { NG_GA4_CONFIG, NgGa4Config } from './ng-ga4.config';
 import { isGtagClientId } from './ga-cookie';
+import { deviceFromUserAgent } from './ua-device';
 
 const MOCK_UUID = '12345678-1234-1234-1234-123456789abc';
 const MOCK_TIMESTAMP = 1700000000000;
@@ -2300,8 +2301,9 @@ describe('NgGa4Service', () => {
     // --- device & location enrichment ---
 
     describe('device & location enrichment', () => {
-        const fakeUaData = (overrides?: { mobile?: boolean; high?: any; reject?: boolean }) => ({
+        const fakeUaData = (overrides?: { mobile?: boolean; platform?: string; high?: any; reject?: boolean }) => ({
             mobile: overrides?.mobile ?? false,
+            platform: overrides?.platform ?? 'Windows',
             getHighEntropyValues: () => overrides?.reject
                 ? Promise.reject(new Error('blocked'))
                 : Promise.resolve(overrides?.high ?? {
@@ -2484,6 +2486,100 @@ describe('NgGa4Service', () => {
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect('model' in req.request.body.device).toBe(false);
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        describe('category from Client Hints', () => {
+            // What stock Chrome actually reports, per components/embedder_support/
+            // user_agent_utils.cc: formFactors is derived from the `mobile` bit, and on
+            // Android that bit is dropped at a smallest screen width of 600dp or more.
+            const ANDROID_TABLET_HIGH = {
+                platform: 'Android',
+                platformVersion: '14.0.0',
+                model: 'SM-X710',
+                formFactors: ['Desktop'],
+                fullVersionList: [{ brand: 'Google Chrome', version: '131.0.6778.81' }]
+            };
+
+            const categoryFor = async (uaData: { mobile: boolean; platform: string; high?: any; reject?: boolean }): Promise<string> => {
+                spyOn<any>(service, 'getUserAgentData').and.returnValue(fakeUaData(uaData));
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(CHROME_WINDOWS);
+
+                await service.init();
+                service.trackEvent('x');
+
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                const category = req.request.body.device.category;
+                req.flush('', { status: 204, statusText: 'No Content' });
+                return category;
+            };
+
+            it('requests formFactors in the same high-entropy call as model', async () => {
+                const uaData = fakeUaData();
+                const highSpy = spyOn(uaData, 'getHighEntropyValues').and.callThrough();
+                spyOn<any>(service, 'getUserAgentData').and.returnValue(uaData);
+
+                await service.init();
+
+                expect(highSpy).toHaveBeenCalledTimes(1);
+                expect((highSpy.calls.mostRecent().args as unknown[])[0]).toEqual(jasmine.arrayContaining(['model', 'formFactors']));
+                httpMock.expectNone(() => true);
+            });
+
+            // The inconsistency #37 is about: the UA path reads an Android UA without the
+            // "Mobile" token as a tablet, but Client Hints reported the same device as
+            // desktop. Chrome drops that token and the `mobile` bit by the same rule.
+            it('reports an Android tablet as tablet, although Chrome says formFactors ["Desktop"]', async () => {
+                expect(await categoryFor({ mobile: false, platform: 'Android', high: ANDROID_TABLET_HIGH })).toBe('tablet');
+            });
+
+            it('agrees with the UA-string path for the same Android tablet', async () => {
+                const ua = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+                expect(deviceFromUserAgent(ua).category).toBe('tablet');
+                expect(await categoryFor({ mobile: false, platform: 'Android', high: ANDROID_TABLET_HIGH })).toBe('tablet');
+            });
+
+            // `mobile` and `platform` are low-entropy, so neither old Chromium (no
+            // formFactors) nor withheld high-entropy hints lose the tablet.
+            it('reports the tablet without formFactors and when high-entropy hints fail', async () => {
+                const { formFactors, ...withoutFormFactors } = ANDROID_TABLET_HIGH;
+                expect(formFactors).toBeDefined();
+                expect(await categoryFor({ mobile: false, platform: 'Android', high: withoutFormFactors })).toBe('tablet');
+            });
+
+            it('reports the tablet when getHighEntropyValues rejects', async () => {
+                expect(await categoryFor({ mobile: false, platform: 'Android', reject: true })).toBe('tablet');
+            });
+
+            it('reports an Android phone as mobile', async () => {
+                expect(await categoryFor({ mobile: true, platform: 'Android', high: { ...ANDROID_TABLET_HIGH, formFactors: ['Mobile'] } })).toBe('mobile');
+            });
+
+            // "Request desktop site" on Android reports platform "Linux" and mobile false.
+            it('reports desktop for "Request desktop site", which claims Linux', async () => {
+                expect(await categoryFor({ mobile: false, platform: 'Linux', high: { platform: 'Linux', formFactors: ['Desktop'] } })).toBe('desktop');
+            });
+
+            // ChromeOS "Request tablet site" is the one place stock Chrome reports "Tablet".
+            it('honours an explicit Tablet form factor', async () => {
+                expect(await categoryFor({ mobile: true, platform: 'Android', high: { platform: 'Android', formFactors: ['Tablet'] } })).toBe('tablet');
+            });
+
+            // Android XR headsets run Android with `mobile` false and report ["Desktop","XR"].
+            it('does not call an Android XR headset a tablet', async () => {
+                expect(await categoryFor({ mobile: false, platform: 'Android', high: { platform: 'Android', formFactors: ['Desktop', 'XR'] } })).toBe('desktop');
+            });
+
+            it('ignores a malformed formFactors value', async () => {
+                expect(await categoryFor({ mobile: true, platform: 'Android', high: { platform: 'Android', formFactors: 'Tablet' } })).toBe('mobile');
+            });
+
+            // No touch-point heuristic on the Client Hints path: Chrome reports every
+            // Windows, Mac, Linux and ChromeOS device as desktop, convertibles included.
+            it('does not consult maxTouchPoints when Client Hints are present', async () => {
+                spyOnProperty(navigator, 'maxTouchPoints', 'get').and.returnValue(10);
+
+                expect(await categoryFor({ mobile: false, platform: 'Windows', high: { platform: 'Windows', formFactors: ['Desktop'] } })).toBe('desktop');
+            });
         });
 
         it('derives user_location.country_id from the browser time zone', async () => {

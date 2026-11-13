@@ -745,9 +745,10 @@ export class NgGa4Service implements OnDestroy {
 
         const uaData = this.getUserAgentData();
         if (uaData) {
-            device.category = uaData.mobile ? 'mobile' : 'desktop';
+            let formFactors: unknown;
             try {
-                const high = await uaData.getHighEntropyValues(['platform', 'platformVersion', 'fullVersionList', 'model']);
+                const high = await uaData.getHighEntropyValues(['platform', 'platformVersion', 'fullVersionList', 'model', 'formFactors']);
+                formFactors = high.formFactors;
                 if (high.platform) {
                     device.operating_system = high.platform;
                 }
@@ -769,6 +770,7 @@ export class NgGa4Service implements OnDestroy {
                 // High-entropy hints unavailable (blocked, or a permissions policy denies
                 // them) — the UA-string fallback below fills what we did not get.
             }
+            device.category = this.categoryFromClientHints(uaData, formFactors);
         }
 
         // Client Hints are authoritative where present; the UA string only fills gaps.
@@ -790,6 +792,32 @@ export class NgGa4Service implements OnDestroy {
                 device[key] = parsed[key];
             }
         }
+    }
+
+    // `mobile` alone can only say mobile or desktop, and `formFactors` does not fill the
+    // gap: stock Chrome derives it from the same bit, so an Android tablet reports
+    // ["Desktop"]. What Chrome does state is the rule behind the bit: on Android,
+    // `mobile` is dropped when the smallest screen width is 600dp or more — the same
+    // decision that drops the "Mobile" token from the UA string, which ua-device.ts
+    // reads as tablet. So Android + !mobile is the browser's own tablet signal, not a
+    // touch-point guess, and both paths now agree. Both inputs are low-entropy, so this
+    // holds on Chromium without formFactors and when high-entropy hints are withheld.
+    //
+    // formFactors only refines the edges: "Tablet" is reported for ChromeOS's "Request
+    // tablet site" (and by any browser that follows the spec more closely), and "XR"
+    // marks Android XR headsets, which also run Android with `mobile` false.
+    private categoryFromClientHints(uaData: { mobile?: boolean; platform?: string }, formFactors: unknown): string {
+        const factors = Array.isArray(formFactors) ? formFactors : [];
+        if (factors.includes('Tablet')) {
+            return 'tablet';
+        }
+        if (uaData.mobile) {
+            return 'mobile';
+        }
+        if (uaData.platform === 'Android' && !factors.includes('XR')) {
+            return 'tablet';
+        }
+        return 'desktop';
     }
 
     private pickBrowser(list: Array<{ brand: string; version: string }> | undefined): { brand: string; version: string } | null {
