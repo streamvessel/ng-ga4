@@ -4,10 +4,7 @@
 
 ## Required
 
-- `measurementId` (`string`): GA4 Measurement ID, e.g. `G-XXXXXXXXX`.
-- `apiSecret` (`string`): Measurement Protocol API secret.
-- `enabled` (`boolean`): whether collection starts on. `false` creates no client ID and writes nothing until `setEnabled(true)`. See [Consent](consent.md).
-- `isExtension` (`boolean`): `true` in a Chrome extension, so state goes to `chrome.storage` instead of `localStorage`.
+`measurementId`, `apiSecret`, `enabled` and `isExtension` are described under [Configuration](../README.md#configuration) in the README.
 
 ## Optional
 

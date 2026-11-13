@@ -132,14 +132,12 @@ Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](https://github.com
 
 ## Documentation
 
-| Topic | Covers |
-|---|---|
-| [Configuration](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/configuration.md) | every config option in full |
-| [Identity](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md) | client ID and `gtag.js`, user ID, user properties |
-| [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md) | consent |
-| [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md) | setup, service-worker teardown, sessions across tabs |
-| [Engagement time and debug mode](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md) | engagement time, debug mode |
-| [Limitations](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/limitations.md) | what the Measurement Protocol can't do, with measurements |
+- [Configuration](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/configuration.md): every option
+- [Identity](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md): client ID and `gtag.js`, user ID, user properties
+- [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md)
+- [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md): setup, service-worker teardown, sessions across tabs
+- [Engagement time and debug mode](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md)
+- [Limitations](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/limitations.md): what the Measurement Protocol can't do, with measurements
 
 The topic docs are documented for the latest `master`, which can be ahead of the release on npm. Unreleased changes are listed under [Unreleased](https://github.com/streamvessel/ng-ga4/blob/master/CHANGELOG.md#unreleased) in the changelog.
 

@@ -40,7 +40,12 @@ jobs:
       # 404s on npmjs.com (fixed once in 0.2.1). Topic docs live under docs/ on GitHub.
       - name: Library README links are absolute
         run: |
-          if grep -nP '\]\((?!https?://)' projects/ng-ga4/README.md; then
+          # Inline links, reference-style definitions, and HTML href/src attributes.
+          # grep exits 0 on a match, 1 on none, 2 on an error; only 1 passes.
+          rc=0
+          grep -nP '\]\((?!https?://)|^\s*\[[^\]]+\]:(?!\s*<?https?://)|(href|src)\s*=(?!\s*["\x27]?https?://)' \
+            projects/ng-ga4/README.md || rc=$?
+          if [ "$rc" -ne 1 ]; then
             echo "::error file=projects/ng-ga4/README.md::Use absolute https:// links; npm renders only this file."
             exit 1
           fi
