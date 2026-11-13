@@ -20,12 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- On Chromium 128+, `device.category` can now be `tablet`. The Client Hints path
-  derived category from `userAgentData.mobile` alone, so an Android tablet
-  reported `tablet` on Firefox but `desktop` on Chrome. It now requests
-  `formFactors` in the same `getHighEntropyValues` call and uses the browser's
-  own `Tablet`/`Mobile`/`Desktop` statement; older Chromium keeps the
-  `mobile`-derived value. No touch-point guessing on this path
+- Chromium on an Android tablet reported `device.category` as `desktop`, while
+  Firefox on the same tablet reported `tablet`. The Client Hints path derived
+  category from `userAgentData.mobile` alone. Chrome drops that bit on Android
+  at a 600dp smallest screen width, by the same rule that drops the `Mobile`
+  token the user-agent parser reads as tablet, so Android with `mobile` false
+  is now reported as `tablet`. `formFactors` is requested in the same
+  `getHighEntropyValues` call, for an explicit `Tablet` and to keep Android XR
+  headsets out. Stock Chrome reports `["Desktop"]` for tablets, so it cannot
+  be used on its own. No touch-point guessing on this path
   ([#37](https://github.com/streamvessel/ng-ga4/issues/37)).
 
 ## [0.2.2] - 2026-10-27
