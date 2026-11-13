@@ -65,36 +65,31 @@ describe('ga4-validation', () => {
         });
     });
 
+    // The shape rules (length, characters, empty) are shared with event names
+    // through nameProblem() and tested above; these cover what differs.
     describe('paramNameProblem', () => {
-        it('accepts ordinary names, up to 40 characters', () => {
-            expect(paramNameProblem('method')).toBeNull();
+        it('applies the 40-character limit', () => {
             expect(paramNameProblem('a'.repeat(40))).toBeNull();
+            expect(paramNameProblem('a'.repeat(41))).toMatch(/^parameter name .*41 characters/);
         });
 
-        it('rejects a name over 40 characters', () => {
-            expect(paramNameProblem('a'.repeat(41))).toMatch(/41 characters; the limit is 40/);
-        });
-
-        it('rejects firebase_conversion', () => {
+        it('rejects firebase_conversion and the reserved prefixes', () => {
             expect(paramNameProblem('firebase_conversion')).toMatch(/reserved by GA4/);
-        });
-
-        it('rejects the reserved prefixes', () => {
             for (const name of ['_x', 'firebase_x', 'ga_x', 'google_x', 'gtag.x']) {
                 expect(paramNameProblem(name)).withContext(name).toMatch(/reserved prefix/);
             }
         });
 
-        it('rejects invalid characters and empty names', () => {
-            expect(paramNameProblem('')).toMatch(/empty/);
-            expect(paramNameProblem('page-title')).toMatch(/must start with a letter/);
-            expect(paramNameProblem('1st')).toMatch(/must start with a letter/);
+        it('does not apply the event-only reserved names', () => {
+            expect(paramNameProblem('error')).toBeNull();
+            expect(paramNameProblem('session_start')).toBeNull();
         });
     });
 
     describe('paramValueProblem', () => {
-        it('allows strings up to 100 characters and ignores non-strings', () => {
+        it('allows strings up to 100 characters, flags longer ones, and ignores non-strings', () => {
             expect(paramValueProblem('x', 'a'.repeat(100))).toBeNull();
+            expect(paramValueProblem('x', 'a'.repeat(101))).toMatch(/101 characters; the limit is 100/);
             expect(paramValueProblem('x', 10 ** 120)).toBeNull();
             expect(paramValueProblem('items', [])).toBeNull();
         });
@@ -102,10 +97,6 @@ describe('ga4-validation', () => {
         it('does not look up Object.prototype members as limits', () => {
             expect(paramValueProblem('constructor', 'abc')).toBeNull();
             expect(paramValueProblem('toString', 'a'.repeat(101))).toMatch(/limit is 100/);
-        });
-
-        it('flags a string over 100 characters', () => {
-            expect(paramValueProblem('x', 'a'.repeat(101))).toMatch(/101 characters; the limit is 100/);
         });
 
         it('applies the larger documented limits for page parameters', () => {
