@@ -73,10 +73,10 @@ describe('initial navigation', () => {
         host.remove();
     });
 
-    async function bootstrap(blocking: boolean): Promise<void> {
+    async function bootstrap(blocking: boolean, appRoutes: Routes = routes): Promise<void> {
         appRef = await bootstrapApplication(RootComponent, {
             providers: [
-                provideRouter(...(blocking ? [routes, withEnabledBlockingInitialNavigation()] : [routes]) as [Routes]),
+                provideRouter(...(blocking ? [appRoutes, withEnabledBlockingInitialNavigation()] : [appRoutes]) as [Routes]),
                 provideHttpClient(withInterceptors([recorder])),
                 provideNgGa4({
                     measurementId: 'G-RACE',
@@ -150,9 +150,7 @@ describe('initial navigation', () => {
         });
     });
 
-    // NavigationEnd is emitted before the router's TitleStrategy applies the new
-    // route's title. Uses the real router and the default TitleStrategy, so a
-    // change in either ordering shows up here rather than in production reports.
+    // Real router and default TitleStrategy: guards the ordering the service relies on.
     describe('page_title from route titles', () => {
         let originalTitle: string;
 
@@ -170,20 +168,7 @@ describe('initial navigation', () => {
                 // Wildcard, like `routes` above: Karma's page URL is not '/'.
                 { path: '**', component: HomeComponent, title: 'Home Title' }
             ];
-            appRef = await bootstrapApplication(RootComponent, {
-                providers: [
-                    provideRouter(titled),
-                    provideHttpClient(withInterceptors([recorder])),
-                    provideNgGa4({
-                        measurementId: 'G-RACE',
-                        apiSecret: 'secret',
-                        enabled: true,
-                        isExtension: false,
-                        transport: 'xhr'
-                    })
-                ]
-            });
-            await appRef.whenStable();
+            await bootstrap(false, titled);
 
             await appRef.injector.get(Router).navigateByUrl('/about');
             await appRef.whenStable();

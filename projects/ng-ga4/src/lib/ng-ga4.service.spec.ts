@@ -44,6 +44,7 @@ describe('NgGa4Service', () => {
     let pageEngaged: boolean;
     // undefined: hidden exactly when not engaged, which is what most specs mean.
     let pageHidden: boolean | undefined;
+    let originalTitle: string;
 
     function configureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
         // Reset here, not just in the top-level beforeEach, so a reconfigureTestBed()
@@ -267,6 +268,8 @@ describe('NgGa4Service', () => {
 
         spyOn(crypto, 'randomUUID').and.returnValue(MOCK_UUID as `${string}-${string}-${string}-${string}-${string}`);
 
+        originalTitle = document.title;
+
         // Save original chrome.storage (if any) for restoration
         originalChromeStorage = (window as any).chrome?.storage;
 
@@ -285,6 +288,7 @@ describe('NgGa4Service', () => {
         httpMock.verify();
         jasmine.clock().uninstall();
         clearChromeMock();
+        document.title = originalTitle;
     });
 
     // --- init() ---
@@ -1873,16 +1877,6 @@ describe('NgGa4Service', () => {
         });
 
         describe('page_title', () => {
-            let originalTitle: string;
-
-            beforeEach(() => {
-                originalTitle = document.title;
-            });
-
-            afterEach(() => {
-                document.title = originalTitle;
-            });
-
             function sentTitle(): unknown {
                 const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
                 const params = req.request.body.events[0].params;
@@ -2977,34 +2971,25 @@ describe('NgGa4Service', () => {
         it('should track page view on NavigationEnd', async () => {
             await service.init();
             routerEvents$.next(new NavigationEnd(1, '/test', '/test'));
-            await Promise.resolve();
+            await drainMicrotasks();
 
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.body.events[0].name).toBe('page_view');
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
-        // The real router emits NavigationEnd and only then, synchronously, calls
-        // TitleStrategy.updateTitle(). Emitting and retitling back-to-back here
-        // reproduces that order; reading the title synchronously in the handler
-        // would ship the previous page's title.
+        // Retitling right after next() mirrors the real router's order.
         it('reports the title set right after NavigationEnd, not the previous one', async () => {
-            const originalTitle = document.title;
-            try {
-                document.title = 'Previous Page';
-                await service.init();
+            document.title = 'Previous Page';
+            await service.init();
 
-                routerEvents$.next(new NavigationEnd(1, '/next', '/next'));
-                document.title = 'Next Page';
-                httpMock.expectNone(() => true);
-                await Promise.resolve();
+            routerEvents$.next(new NavigationEnd(1, '/next', '/next'));
+            document.title = 'Next Page';
+            await drainMicrotasks();
 
-                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
-                expect(req.request.body.events[0].params.page_title).toBe('Next Page');
-                req.flush('', { status: 204, statusText: 'No Content' });
-            } finally {
-                document.title = originalTitle;
-            }
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.page_title).toBe('Next Page');
+            req.flush('', { status: 204, statusText: 'No Content' });
         });
 
         it('drops a deferred page view when the service is destroyed first', async () => {
@@ -3012,10 +2997,9 @@ describe('NgGa4Service', () => {
 
             routerEvents$.next(new NavigationEnd(1, '/gone', '/gone'));
             service.ngOnDestroy();
-            await Promise.resolve();
+            await drainMicrotasks();
 
-            httpMock.expectNone((r) => r.url.includes('mp/collect')
-                && r.body?.events?.some((e: any) => e.name === 'page_view'));
+            httpMock.expectNone(() => true);
         });
 
         it('should ignore NavigationStart', async () => {

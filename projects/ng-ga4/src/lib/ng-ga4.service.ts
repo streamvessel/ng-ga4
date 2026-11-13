@@ -2,7 +2,7 @@ import { Inject, Injectable, isDevMode, NgZone, OnDestroy, PLATFORM_ID } from '@
 import { HttpClient } from '@angular/common/http';
 import { isPlatformBrowser } from '@angular/common';
 import { NavigationEnd, Router } from '@angular/router';
-import { filter, Subscription } from 'rxjs';
+import { asapScheduler, filter, observeOn, Subscription } from 'rxjs';
 import { NG_GA4_CONFIG, NgGa4Config, NgGa4CookieOptions } from './ng-ga4.config';
 import { ConsentState, Ga4ConsentPayload, NgGa4Consent } from './consent';
 import { countryFromTimeZone } from './tz-country';
@@ -170,16 +170,15 @@ export class NgGa4Service implements OnDestroy {
         this.drainPendingCalls();
 
         this.routerSubscription = this.router.events
-            .pipe(filter(event => event instanceof NavigationEnd))
+            .pipe(
+                filter(event => event instanceof NavigationEnd),
+                // The router emits NavigationEnd *before* TitleStrategy.updateTitle()
+                // sets the new route's title; reading document.title synchronously
+                // would report the previous page's. One microtask later it is set.
+                observeOn(asapScheduler)
+            )
             .subscribe((event: NavigationEnd) => {
-                // Deferred one microtask: the router emits NavigationEnd *before*
-                // TitleStrategy.updateTitle() sets the new route's title, so reading
-                // document.title synchronously here would report the previous page's.
-                queueMicrotask(() => {
-                    if (!this.routerSubscription?.closed) {
-                        this.trackPageView(event.urlAfterRedirects);
-                    }
-                });
+                this.trackPageView(event.urlAfterRedirects);
             });
 
         this.registerSessionSyncListener();
