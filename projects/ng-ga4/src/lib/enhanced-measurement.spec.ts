@@ -485,11 +485,15 @@ describe('EnhancedMeasurement', () => {
             ]);
         });
 
-        it('starts again after the next page view', () => {
+        it('keeps tracking a video that plays on across a page view', () => {
             fire('play');
+            at(11);
             em!.pageViewed('/next');
+            at(30);
             fire('play');
-            expect(sent.filter(e => e.name === 'video_start').length).toBe(2);
+            fire('ended');
+            expect(sent.map(e => e.name)).toEqual(['video_start', 'video_progress', 'video_progress', 'video_complete']);
+            expect(sent.map(e => e.params['video_percent'])).toEqual([0, 10, 25, 100]);
         });
 
         it('ignores progress and completion for a video that never started', () => {

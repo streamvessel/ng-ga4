@@ -67,7 +67,11 @@ export class EnhancedMeasurement {
     private readonly siteHostname: string | null;
     private scrolled = false;
     private startedForms = new WeakSet<HTMLFormElement>();
-    private videos = new WeakMap<HTMLVideoElement, VideoState>();
+    // Not reset per page view, unlike the state above: a player outside the
+    // router outlet keeps playing across a navigation without a new `play`, and
+    // would otherwise send no more progress. A video on the new page is a new
+    // element, so it starts fresh anyway.
+    private readonly videos = new WeakMap<HTMLVideoElement, VideoState>();
 
     constructor(
         private readonly options: NgGa4EnhancedMeasurement,
@@ -134,7 +138,6 @@ export class EnhancedMeasurement {
     pageViewed(pagePath: string): void {
         this.scrolled = false;
         this.startedForms = new WeakSet();
-        this.videos = new WeakMap();
         if (!this.options.siteSearch) {
             return;
         }
