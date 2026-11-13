@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Subcontinent dimensions used to read `(not set)`
   ([#22](https://github.com/streamvessel/ng-ga4/issues/22)).
 
+### Fixed
+
+- Visitors in 13 time zones sent no `user_location`, so GA4 showed their country as
+  `(not set)`. Chrome reports these zones under older names than the ones the
+  library knew, such as `America/Godthab` for Greenland and `America/Indianapolis`,
+  plus Chile's new `America/Coyhaique`.
+
 ## [0.2.2] - 2026-10-27
 
 ### Fixed

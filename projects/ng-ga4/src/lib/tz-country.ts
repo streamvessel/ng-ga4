@@ -182,7 +182,18 @@ const TZ_TO_COUNTRY: ReadonlyMap<string, string> = new Map(Object.entries({
     'America/Buenos_Aires': 'AR', 'Asia/Ulan_Bator': 'MN', 'Asia/Macao': 'MO',
     'Pacific/Samoa': 'WS', 'Pacific/Ponape': 'FM',
     'US/Eastern': 'US', 'US/Central': 'US', 'US/Mountain': 'US',
-    'US/Pacific': 'US', 'US/Alaska': 'US', 'US/Hawaii': 'US'
+    'US/Pacific': 'US', 'US/Alaska': 'US', 'US/Hawaii': 'US',
+
+    // CLDR IDs that Chrome (via ICU) lists and reports: CLDR never renames a
+    // zone, so these keep names IANA has since changed or moved into a folder.
+    'Africa/Asmera': 'ER', 'America/Godthab': 'GL', 'Atlantic/Faeroe': 'FO',
+    'America/Indianapolis': 'US', 'America/Louisville': 'US',
+    'America/Catamarca': 'AR', 'America/Cordoba': 'AR', 'America/Jujuy': 'AR',
+    'America/Mendoza': 'AR', 'America/Coral_Harbour': 'CA',
+    'Pacific/Enderbury': 'KI', 'Pacific/Truk': 'FM',
+
+    // Added to the tz database after this table was first derived
+    'America/Coyhaique': 'CL'
 }));
 
 export function countryFromTimeZone(timeZone: string | null | undefined): string | undefined {
