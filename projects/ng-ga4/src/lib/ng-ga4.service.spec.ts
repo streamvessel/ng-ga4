@@ -1971,6 +1971,101 @@ describe('NgGa4Service', () => {
             service.trackEvent('test_event');
             httpMock.expectNone(() => true);
         });
+
+        // #29: /mp/collect answers 204 for a payload it will discard, so these
+        // rules are the only feedback a consumer ever gets.
+        describe('validation', () => {
+            beforeEach(() => {
+                spyOn(console, 'warn');
+            });
+
+            it('does not send an event with a reserved name, and warns naming the rule', () => {
+                service.trackEvent('session_start');
+
+                httpMock.expectNone((r) => r.url.includes('mp/collect'));
+                expect(console.warn).toHaveBeenCalledWith(
+                    jasmine.stringMatching(/^\[ng-ga4\] trackEvent\("session_start"\): .*"session_start" is reserved.*not sent/)
+                );
+            });
+
+            it('does not touch session state for a dropped event', () => {
+                const ensureSession = spyOn<any>(service, 'ensureSession').and.callThrough();
+
+                service.trackEvent('my-event');
+
+                expect(ensureSession).not.toHaveBeenCalled();
+                httpMock.expectNone((r) => r.url.includes('mp/collect'));
+            });
+
+            it('removes a reserved parameter but still sends the event', () => {
+                service.trackEvent('signup', { method: 'email', ga_source: 'x', firebase_conversion: 1 });
+
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                const params = req.request.body.events[0].params;
+                expect(params.method).toBe('email');
+                expect('ga_source' in params).toBeFalse();
+                expect('firebase_conversion' in params).toBeFalse();
+                expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/^\[ng-ga4\] trackEvent\("signup"\): .*"ga_source".*removed/));
+                expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/"firebase_conversion" is reserved.*removed/));
+                req.flush('', { status: 204, statusText: 'No Content' });
+            });
+
+            it('counts the parameters the library adds towards the 25 limit', () => {
+                // engagement_time_msec, session_id and session_number make 25.
+                const params: Record<string, number> = {};
+                for (let i = 0; i < 22; i++) {
+                    params[`p${i}`] = i;
+                }
+                service.trackEvent('many', params);
+
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                expect(console.warn).not.toHaveBeenCalled();
+                req.flush('', { status: 204, statusText: 'No Content' });
+
+                service.trackEvent('many', { ...params, p22: 22 });
+
+                const second = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                expect(Object.keys(second.request.body.events[0].params).length).toBe(26);
+                expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/26 parameters; the limit is 25/));
+                second.flush('', { status: 204, statusText: 'No Content' });
+            });
+
+            it('sends an App-stream-only event name, with a warning', () => {
+                service.trackEvent('ad_impression', { value: 0.02, currency: 'USD' });
+
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                expect(req.request.body.events[0].name).toBe('ad_impression');
+                expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/"ad_impression" is documented for App streams/));
+                req.flush('', { status: 204, statusText: 'No Content' });
+            });
+
+            it('does not warn for a valid event', () => {
+                service.trackEvent('file_download', { file_name: 'test.pdf', file_size: 1024 });
+
+                httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                    .flush('', { status: 204, statusText: 'No Content' });
+                expect(console.warn).not.toHaveBeenCalled();
+            });
+
+            // Production builds still keep junk off the wire, but say nothing.
+            it('drops silently when warnings are off', () => {
+                (service as any).warnOnInvalid = false;
+
+                service.trackEvent('session_start');
+                httpMock.expectNone((r) => r.url.includes('mp/collect'));
+
+                service.trackEvent('signup', { _private: 1, method: 'email', note: 'x'.repeat(101) });
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                expect('_private' in req.request.body.events[0].params).toBeFalse();
+                req.flush('', { status: 204, statusText: 'No Content' });
+
+                service.trackEvent('ad_impression');
+                httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                    .flush('', { status: 204, statusText: 'No Content' });
+
+                expect(console.warn).not.toHaveBeenCalled();
+            });
+        });
     });
 
     // --- user properties ---
@@ -2764,6 +2859,26 @@ describe('NgGa4Service', () => {
             expect(req.request.body.events[0].params.version).toBe('1.4.0');
             expect(req.request.body.client_id).toBeDefined();
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('validates a queued event once, when it is replayed', async () => {
+            spyOn(console, 'warn');
+            let resolveContext!: () => void;
+            const contextDeferred = new Promise<void>(r => { resolveContext = r; });
+            spyOn<any>(service, 'collectContext').and.returnValue(contextDeferred);
+
+            const initPromise = service.init();
+            await flushMicrotasks();
+            service.trackEvent('session_start');
+
+            resolveContext();
+            await initPromise;
+            await flushMicrotasks();
+
+            httpMock.expectNone((r) => r.url.includes('mp/collect'));
+            const warnings = (console.warn as jasmine.Spy).calls.allArgs()
+                .filter(args => /session_start/.test(String(args[0])));
+            expect(warnings.length).toBe(1);
         });
 
         it('queues trackPageView fired during init() and flushes after clientId is assigned', async () => {
