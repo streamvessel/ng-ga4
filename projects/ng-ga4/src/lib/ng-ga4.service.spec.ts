@@ -399,6 +399,15 @@ describe('NgGa4Service', () => {
             );
         });
 
+        it('reads a stored client ID without taking the lock', async () => {
+            setupChromeMock({ ga_client_id: 'stored-id' });
+
+            await service.init();
+
+            expect((service as any).clientId).toBe('stored-id');
+            expect(fakeLocks.requested).toEqual([]);
+        });
+
         it('gives two contexts starting cold together one client ID, minted once', async () => {
             const chromeLocal: Record<string, any> = {};
             setupChromeMock(chromeLocal);

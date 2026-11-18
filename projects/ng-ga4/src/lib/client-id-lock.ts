@@ -71,6 +71,8 @@ export async function readOrMintChromeClientId(persist: (clientId: string) => Pr
         if (existing) {
             return existing;
         }
+        // A UUID, not mintGtagClientId(): there is no _ga cookie on a
+        // chrome-extension:// origin to match.
         const clientId = crypto.randomUUID();
         await persist(clientId);
         return clientId;

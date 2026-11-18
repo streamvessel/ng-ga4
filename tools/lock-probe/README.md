@@ -20,9 +20,9 @@ Chromium 153 (Playwright 1.63.0, headless), Linux, 2026-11-18. A lock held in an
 
 | Race (200 runs each) | Lock off: more than one ID | Lock on |
 |---|---|---|
-| seed (worker) vs seed (page) | 199 | 0 |
-| seed (worker) vs service (page) | 200 | 0 |
+| seed (worker) vs seed (page) | 193 | 0 |
+| seed (worker) vs service (page) | 187 | 0 |
 | service (page) vs service (page) | 200 | 0 |
-| seed (worker) vs service vs service | 200 | 0 |
+| seed (worker) vs service vs service | 198 | 0 |
 
 Not covered: branded Chrome, other operating systems, a cold start from install, and the 3-second timeout (covered by unit tests). All callers start at once, so the lock-off counts are a worst case, not a real-world rate.
