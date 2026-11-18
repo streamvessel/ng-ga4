@@ -5,7 +5,7 @@ const HOUR = 60 * 60 * 1000;
 
 function body(names: string[], ageMs: number[], clientId = 'c1'): OutboxBody {
     const events = names.map((name, i) => ({ name, timestamp_micros: (NOW - ageMs[i]) * 1000 }));
-    return { client_id: clientId, timestamp_micros: Math.min(...events.map(e => e.timestamp_micros)), events };
+    return { client_id: clientId, events };
 }
 
 describe('outbox', () => {
@@ -34,8 +34,6 @@ describe('outbox', () => {
             const pruned = pruneOutbox([body(['old', 'fresh'], [73 * HOUR, HOUR])], NOW);
 
             expect(pruned[0].events.map(e => e.name)).toEqual(['fresh']);
-            // Re-derived from what is left, not the dropped event's time.
-            expect(pruned[0].timestamp_micros).toBe((NOW - HOUR) * 1000);
         });
 
         it('drops a body left with no events', () => {

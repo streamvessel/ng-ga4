@@ -13,15 +13,17 @@ export const MAX_BATCH_BYTES = 60 * 1024;
 
 /**
  * The shape the batcher needs from a request body. Everything other than
- * `events` and `timestamp_micros` is the request's *envelope* — `client_id`,
- * `device`, `user_location`, `consent`, and whatever request-level field is
- * added later — and two bodies are merged only when their envelopes match
- * exactly. That keeps an event under the consent and identity it was tracked
- * with, even if either changed before the flush.
+ * `events` is the request's *envelope* — `client_id`, `user_id`, `device`,
+ * `user_location`, `consent`, `user_properties`, and whatever request-level
+ * field is added later — and two bodies are merged only when their envelopes
+ * match exactly. That keeps an event under the consent and identity it was
+ * tracked with, even if either changed before the flush.
+ *
+ * Bodies carry no request-level `timestamp_micros`: each event has its own,
+ * and the service derives the request's when it sends.
  */
 export interface BatchableBody {
-    events: Array<{ timestamp_micros?: number }>;
-    timestamp_micros?: number;
+    events: unknown[];
 }
 
 /**
@@ -29,21 +31,16 @@ export interface BatchableBody {
  * Measurement Protocol allows, preserving order.
  *
  * Pure bookkeeping: no timers, no transport, no storage. The service decides
- * when to `take()`; the outbox (#25) persists and replays what it takes, so
- * a batch is always a complete, sendable request body.
+ * when to `drain()`; what it drains is always a complete, sendable request
+ * body, which is also what the outbox (#25) persists and replays.
  */
-export class EventBatcher<B extends BatchableBody, T = never> {
+export class EventBatcher<B extends BatchableBody, T> {
     private batches: Array<{ body: B; key: string; bytes: number; tickets: T[] }> = [];
 
     constructor(
         private readonly maxEvents = MP_MAX_EVENTS_PER_REQUEST,
         private readonly maxBytes = MAX_BATCH_BYTES
     ) {}
-
-    /** Number of events waiting, across all batches. */
-    get size(): number {
-        return this.batches.reduce((n, batch) => n + batch.body.events.length, 0);
-    }
 
     /**
      * Queue a body. Returns `true` when a batch is now full, which is the
@@ -53,10 +50,8 @@ export class EventBatcher<B extends BatchableBody, T = never> {
      * batch it lands in — the service uses it to settle each call's
      * `delivered` promise once its batch's request does.
      */
-    add(body: B, ticket?: T): boolean {
-        const tickets = ticket === undefined ? [] : [ticket];
+    add(body: B, ticket: T): boolean {
         const key = envelopeKey(body);
-        const bytes = jsonBytes(body);
         const eventBytes = jsonBytes(body.events);
         // Only the newest batch is a merge candidate: merging into an older one
         // would send a later event ahead of an earlier one with a different envelope.
@@ -68,25 +63,29 @@ export class EventBatcher<B extends BatchableBody, T = never> {
             // Envelope bytes are counted once; only the events are added.
             && last.bytes + eventBytes <= this.maxBytes
         ) {
-            last.body = merge(last.body, body);
+            // In place: the batch owns its events array (copied below).
+            last.body.events.push(...body.events);
             // An upper bound, not exact: the merged array saves the incoming
             // array's brackets. Re-stringifying the batch per add would be
             // quadratic over a burst.
             last.bytes += eventBytes;
-            last.tickets.push(...tickets);
+            last.tickets.push(ticket);
         } else {
-            this.batches.push({ body: { ...body, events: [...body.events] }, key, bytes, tickets });
+            this.batches.push({ body: { ...body, events: [...body.events] }, key, bytes: jsonBytes(body), tickets: [ticket] });
         }
         const newest = this.batches[this.batches.length - 1];
         return newest.body.events.length >= this.maxEvents;
     }
 
-    /** Remove and return every queued batch, oldest first. */
-    take(): B[] {
-        return this.drain().map(batch => batch.body);
+    /** True when nothing is queued. */
+    get isEmpty(): boolean {
+        return this.batches.length === 0;
     }
 
-    /** As `take()`, with the tickets of the calls merged into each batch. */
+    /**
+     * Remove and return every queued batch, oldest first, each with the
+     * tickets of the calls merged into it.
+     */
     drain(): Array<{ body: B; tickets: T[] }> {
         const drained = this.batches.map(({ body, tickets }) => ({ body, tickets }));
         this.batches = [];
@@ -94,19 +93,8 @@ export class EventBatcher<B extends BatchableBody, T = never> {
     }
 }
 
-function merge<B extends BatchableBody>(into: B, from: B): B {
-    const events = [...into.events, ...from.events];
-    const merged: B = { ...into, events };
-    // The request-level time is the earliest in the batch; each event keeps its own.
-    const times = [into.timestamp_micros, from.timestamp_micros].filter((t): t is number => typeof t === 'number');
-    if (times.length) {
-        merged.timestamp_micros = Math.min(...times);
-    }
-    return merged;
-}
-
 function envelopeKey(body: BatchableBody): string {
-    return stableStringify({ ...body, events: undefined, timestamp_micros: undefined });
+    return stableStringify({ ...body, events: undefined });
 }
 
 // Key order is not part of a body's meaning, so two envelopes built along

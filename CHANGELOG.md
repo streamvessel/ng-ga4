@@ -73,11 +73,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value are unaffected. New exported types: `NgGa4TrackResult`,
   `NgGa4TrackStatus`, `NgGa4Delivery`.
   ([#26](https://github.com/streamvessel/ng-ga4/issues/26))
-- Offline outbox. A request that cannot reach GA4 at all (offline, DNS failure,
-  connection reset) is saved whole to `chrome.storage.local` in an extension,
-  `localStorage` on the web, and replayed on the next `init()` and when the
-  browser fires `online`. A replay keeps the request's original client ID,
-  consent and `timestamp_micros`. Only network failures are retried. GA4
+- Offline outbox. A request that cannot reach GA4 at all (the browser reports
+  itself offline, or a DNS failure or connection reset) is saved whole to
+  `chrome.storage.local` in an extension, `localStorage` on the web. It is
+  replayed on the next `init()`, when the browser fires `online`, and after the
+  next request that does get through, merged back into full batches. A replay
+  keeps the request's original client ID, user ID, user properties, consent and
+  event times. Only network failures are retried. GA4
   answers 2xx to anything it receives, so a non-2xx (a proxy or blocker) is
   not retried. The outbox holds at most 500 events and evicts the oldest first.
   Events older than the 72-hour backdating window are dropped. With

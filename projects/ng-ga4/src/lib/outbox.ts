@@ -16,8 +16,7 @@ export const OUTBOX_MAX_EVENTS = 500;
 /** The fields of a request body the outbox looks at; the rest rides along. */
 export interface OutboxBody {
     client_id: string;
-    timestamp_micros?: number;
-    events: Array<{ name: string; timestamp_micros?: number }>;
+    events: Array<{ name: string; timestamp_micros: number }>;
 }
 
 /**
@@ -49,13 +48,11 @@ export function parseOutbox<B extends OutboxBody>(raw: unknown): B[] {
 
 /**
  * Drops events past the Measurement Protocol's 72-hour window, drops bodies
- * left empty, re-derives each request-level `timestamp_micros` from what
- * remains, then evicts oldest-first down to `maxEvents`. Order is kept.
+ * left empty, then evicts oldest-first down to `maxEvents`. Order is kept.
  */
 export function pruneOutbox<B extends OutboxBody>(bodies: B[], nowMs: number, maxEvents = OUTBOX_MAX_EVENTS): B[] {
     const fresh = bodies
-        .map(body => withEvents(body, body.events.filter(e =>
-            typeof e.timestamp_micros === 'number' && isWithinBackdateWindow(e.timestamp_micros, nowMs))))
+        .map(body => withEvents(body, body.events.filter(e => isWithinBackdateWindow(e.timestamp_micros, nowMs))))
         .filter(body => body.events.length > 0);
 
     let excess = fresh.reduce((n, body) => n + body.events.length, 0) - maxEvents;
@@ -74,13 +71,5 @@ export function pruneOutbox<B extends OutboxBody>(bodies: B[], nowMs: number, ma
 }
 
 function withEvents<B extends OutboxBody>(body: B, events: B['events']): B {
-    if (events.length === body.events.length) {
-        return body;
-    }
-    const times = events.map(e => e.timestamp_micros).filter((t): t is number => typeof t === 'number');
-    return {
-        ...body,
-        events,
-        ...(times.length ? { timestamp_micros: Math.min(...times) } : {})
-    };
+    return events.length === body.events.length ? body : { ...body, events };
 }

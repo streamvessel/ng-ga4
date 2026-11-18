@@ -38,7 +38,7 @@ console.log(status, await delivered);
 
 ## Offline outbox
 
-A request that can't reach GA4 at all (the browser reports itself offline, or a DNS failure or connection reset) is saved and sent again on the next `init()` and when the browser comes back `online`. Its `delivered` resolves to `'stored'`. A replay is the original request: same client ID, user ID, user properties, consent and event times.
+A request that can't reach GA4 at all (the browser reports itself offline, or a DNS failure or connection reset) is saved and sent again on the next `init()`, when the browser comes back `online`, and after the next request that does get through. Its `delivered` resolves to `'stored'`. A replay is the original request: same client ID, user ID, user properties, consent and event times. Stored requests are merged back into full batches when replayed, so a long outage doesn't turn into hundreds of requests.
 
 - It lives in `chrome.storage.local` in an extension and `localStorage` on the web, under `ga_outbox`.
 - It holds at most 500 events, dropping the oldest first. Events older than 72 hours are dropped, since GA4 would record them at the wrong time.

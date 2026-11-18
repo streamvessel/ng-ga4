@@ -3968,7 +3968,7 @@ describe('NgGa4Service', () => {
             service.trackEvent('x');
 
             expect((service as any).batchTimer).toBeNull();
-            expect((service as any).batcher.size).toBe(0);
+            expect((service as any).batcher.isEmpty).toBeTrue();
         });
     });
 
@@ -4289,7 +4289,7 @@ describe('NgGa4Service', () => {
 
         function storedBody(names: string[], ageMs: number, clientId = 'earlier-cid'): any {
             const ts = (MOCK_TIMESTAMP - ageMs) * 1000;
-            return { client_id: clientId, timestamp_micros: ts, events: names.map(name => ({ name, timestamp_micros: ts, params: { p: 1 } })) };
+            return { client_id: clientId, events: names.map(name => ({ name, timestamp_micros: ts, params: { p: 1 } })) };
         }
 
         beforeEach(() => {
@@ -4315,7 +4315,11 @@ describe('NgGa4Service', () => {
             expect(await result.delivered).toBe('stored');
             await service.flushStorage();
             const [stored] = storedOutbox();
-            expect(stored).toEqual(JSON.parse(JSON.stringify(req.request.body)));
+            // Everything but the request-level time, which is derived from the
+            // events again when the request is replayed.
+            const { timestamp_micros, ...sent } = JSON.parse(JSON.stringify(req.request.body));
+            expect(timestamp_micros).toBe((MOCK_TIMESTAMP + 1000) * 1000);
+            expect(stored).toEqual(sent);
             expect(stored.events[0].timestamp_micros).toBe((MOCK_TIMESTAMP + 1000) * 1000);
         });
 
@@ -4358,6 +4362,86 @@ describe('NgGa4Service', () => {
             expect(beacon).not.toHaveBeenCalled();
             await service.flushStorage();
             expect(storedOutbox()[0].events[0].name).toBe('offline_page_event');
+        });
+
+        it('writes failures that arrive together in one storage write', async () => {
+            await initAndDrain();
+            service.trackEvent('one');
+            service.setConsent({ adUserData: 'denied' });
+            service.trackEvent('two');
+            httpMock.match(isCollect).forEach(failOffline);
+            await service.flush();
+
+            expect(storedOutbox().map(b => b.events[0].name)).toEqual(['one', 'two']);
+            const outboxWrites = (localStorage.setItem as jasmine.Spy).calls.allArgs().filter(([key]) => key === 'ga_outbox');
+            expect(outboxWrites.length).toBe(1);
+        });
+
+        it('merges stored requests back into full batches when replaying', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([
+                storedBody(['a'], 3 * HOUR_MS),
+                storedBody(['b'], 2 * HOUR_MS),
+                storedBody(['c'], HOUR_MS)
+            ]);
+
+            await initAndDrain();
+
+            const req = httpMock.expectOne(isCollect);
+            expect(req.request.body.events.map((e: any) => e.name)).toEqual(['a', 'b', 'c']);
+            expect(req.request.body.timestamp_micros).toBe((MOCK_TIMESTAMP - 3 * HOUR_MS) * 1000);
+            req.flush('', ok);
+        });
+
+        it('leaves the outbox alone when init() runs offline', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['earlier'], HOUR_MS)]);
+            spyOn<any>(service, 'getNavigator').and.returnValue({ onLine: false });
+
+            await initAndDrain();
+
+            httpMock.expectNone(isCollect);
+            expect(storedOutbox().length).toBe(1);
+            expect(localStorage.setItem).not.toHaveBeenCalledWith('ga_outbox', jasmine.anything());
+        });
+
+        // A request stored while the browser still claimed to be online never
+        // gets an 'online' event; the next send that works is the signal.
+        it('replays after a later send succeeds', async () => {
+            await initAndDrain();
+            service.trackEvent('lost_then_found');
+            failOffline(httpMock.expectOne(isCollect));
+            await service.flush();
+
+            service.trackEvent('works_now');
+            httpMock.expectOne(isCollect).flush('', ok);
+            await service.flushStorage();
+            for (let i = 0; i < 10; i++) { await Promise.resolve(); }
+
+            const replay = httpMock.expectOne(isCollect);
+            expect(replay.request.body.events[0].name).toBe('lost_then_found');
+            replay.flush('', ok);
+            await service.flush();
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+        });
+
+        it('clamps a stored timestamp that is now in the future', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['ahead'], -HOUR_MS)]);
+
+            await initAndDrain();
+
+            const req = httpMock.expectOne(isCollect);
+            expect(req.request.body.events[0].timestamp_micros).toBe(MOCK_TIMESTAMP * 1000);
+            req.flush('', ok);
+        });
+
+        it('sends no validation request while offline in debug mode', async () => {
+            reconfigureTestBed({ debug: true });
+            spyOn<any>(service, 'getNavigator').and.returnValue({ onLine: false });
+            await initAndDrain();
+
+            const result = service.trackEvent('offline_debug');
+
+            expect(await result.delivered).toBe('stored');
+            httpMock.expectNone(() => true);
         });
 
         it('replays stored requests on init(), with their original identity and time', async () => {

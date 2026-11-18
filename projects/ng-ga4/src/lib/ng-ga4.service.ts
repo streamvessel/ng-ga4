@@ -35,6 +35,15 @@ import { OUTBOX_STORAGE_KEY, parseOutbox, pruneOutbox } from './outbox';
 // non-2xx, so there is no server-side signal to retry on (#25).
 type SendOutcome = Exclude<NgGa4Delivery, 'stored'> | 'unreachable';
 
+// Settles one call's `delivered`.
+type Settle = (outcome: NgGa4Delivery | Promise<NgGa4Delivery>) => void;
+
+function deferred(): { promise: Promise<NgGa4Delivery>; settle: Settle } {
+    let settle!: Settle;
+    const promise = new Promise<NgGa4Delivery>(resolve => { settle = resolve; });
+    return { promise, settle };
+}
+
 interface Ga4Device {
     language?: string;
     screen_resolution?: string;
@@ -60,14 +69,15 @@ interface Ga4Event {
     timestamp_micros?: number;
 }
 
-// One Measurement Protocol request. Everything except `events` and
-// `timestamp_micros` is the envelope EventBatcher groups by, so a new
+// One Measurement Protocol request as queued, stored and replayed. Everything
+// except `events` is the envelope EventBatcher groups by, so a new
 // request-level field added here is batched correctly with no other change.
+// The request-level `timestamp_micros` is not kept: dispatch() derives it
+// from the events, which always carry their own.
 interface Ga4RequestBody {
     client_id: string;
     user_id?: string;
-    timestamp_micros: number;
-    events: Ga4Event[];
+    events: Array<Ga4Event & { timestamp_micros: number }>;
     device?: Ga4Device;
     user_location?: Ga4UserLocation;
     consent?: Ga4ConsentPayload;
@@ -136,10 +146,16 @@ export class NgGa4Service implements OnDestroy {
     // Events waiting to go out together (#24). Only the 'beacon' transport
     // batches; 'xhr' sends each call as its own request, as it always has.
     // Each ticket settles one call's `delivered` with its batch's outcome.
-    private readonly batcher = new EventBatcher<Ga4RequestBody, (outcome: Promise<NgGa4Delivery>) => void>();
+    private readonly batcher = new EventBatcher<Ga4RequestBody, Settle>();
     // Requests on the wire, for flush() to wait on.
     private readonly inFlight = new Set<Promise<unknown>>();
     private onlineListener?: () => void;
+    // Requests waiting for the next outbox write, so a burst of failures costs
+    // one read-modify-write rather than one each.
+    private outboxAppends: Array<{ body: Ga4RequestBody; settle: Settle }> = [];
+    // Whether the stored outbox may hold anything, so a successful send knows
+    // to drain it. Starts true: an earlier lifetime may have left requests.
+    private outboxMayHaveItems = true;
     private batchTimer: ReturnType<typeof setTimeout> | null = null;
     private readonly DEFAULT_BATCH_DELAY_MS = 300;
 
@@ -699,10 +715,9 @@ export class NgGa4Service implements OnDestroy {
     // call does then — sent, or dropped if collection was disabled meanwhile,
     // or if the service is destroyed before init() finishes.
     private deferCall(call: () => NgGa4TrackResult): NgGa4TrackResult {
-        let settle!: (outcome: NgGa4Delivery | Promise<NgGa4Delivery>) => void;
-        const delivered = new Promise<NgGa4Delivery>(resolve => { settle = resolve; });
+        const { promise, settle } = deferred();
         this.pendingCalls.push({ replay: () => settle(call().delivered), drop: () => settle('dropped') });
-        return { status: 'deferred', delivered };
+        return { status: 'deferred', delivered: promise };
     }
 
     private drainPendingCalls(): void {
@@ -719,23 +734,11 @@ export class NgGa4Service implements OnDestroy {
     ): Promise<NgGa4Delivery> {
         // Without a timestamp GA4 stamps each event with its arrival time, which
         // is wrong for anything delayed between the call and the request.
-        const now = Date.now();
-        const stamp = toTimestampMicros(now);
-        const timed = events
-            .map(event => ({ ...event, timestamp_micros: clampToNow(event.timestamp_micros ?? stamp, now) }))
-            // GA4 re-stamps an event backdated past 72 hours to a time it did not
-            // happen at; better not sent at all.
-            .filter(event => isWithinBackdateWindow(event.timestamp_micros, now));
-        if (!timed.length) {
-            return Promise.resolve('dropped');
-        }
+        const stamp = toTimestampMicros(Date.now());
+        const timed = events.map(event => ({ ...event, timestamp_micros: event.timestamp_micros ?? stamp }));
 
         const body: Ga4RequestBody = {
             client_id: this.clientId,
-            // Request-level, for the whole batch. Each event also carries its own,
-            // which takes precedence, so a batch spanning time keeps each event's
-            // real time; the request takes the earliest.
-            timestamp_micros: Math.min(...timed.map(event => event.timestamp_micros)),
             // debug_mode has to ride on every event in the batch — DebugView only
             // surfaces the individual events that carry it, not the request.
             events: this.config.debug
@@ -781,15 +784,14 @@ export class NgGa4Service implements OnDestroy {
         // instead of one (plus a CORS preflight) each. A full batch, or a send as
         // the page goes away, goes immediately; anything else waits briefly for
         // company.
-        let ticket!: (outcome: Promise<NgGa4Delivery>) => void;
-        const delivered = new Promise<NgGa4Delivery>(resolve => { ticket = resolve; });
-        const full = this.batcher.add(body, ticket);
+        const { promise, settle } = deferred();
+        const full = this.batcher.add(body, settle);
         if (full || forceBeacon) {
             this.flushQueue();
         } else {
             this.scheduleFlush();
         }
-        return delivered;
+        return promise;
     }
 
     // Sends everything queued, now, over the unload-safe chain. Safe to call
@@ -831,11 +833,34 @@ export class NgGa4Service implements OnDestroy {
             : this.DEFAULT_BATCH_DELAY_MS;
     }
 
-    // One request on the wire: a single event under 'xhr', a batch otherwise.
-    // The promise never rejects, and is tracked until it settles for flush().
+    // One request on the wire: a single event under 'xhr', a batch or a
+    // replayed request otherwise. Every send, live or replayed, passes here,
+    // so the timestamp rules live here too. The promise never rejects, and is
+    // tracked until it settles for flush().
     private dispatch(body: Ga4RequestBody, transport: 'beacon' | 'xhr'): Promise<NgGa4Delivery> {
-        return this.trackInFlight(this.send(body, transport).then(outcome =>
-            outcome === 'unreachable' ? this.storeInOutbox(body) : outcome));
+        const now = Date.now();
+        const events = body.events
+            // A timestamp in the future (the clock moved back since) is clamped.
+            .map(event => ({ ...event, timestamp_micros: clampToNow(event.timestamp_micros, now) }))
+            // GA4 re-stamps an event backdated past 72 hours to a time it did not
+            // happen at; better not sent at all.
+            .filter(event => isWithinBackdateWindow(event.timestamp_micros, now));
+        if (!events.length) {
+            return Promise.resolve('dropped');
+        }
+        const ready: Ga4RequestBody = { ...body, events };
+        return this.trackInFlight(this.send(ready, transport).then(outcome => {
+            if (outcome === 'unreachable') {
+                return this.storeInOutbox(ready);
+            }
+            // The network works: a good moment to send what an earlier
+            // failure left behind. Cannot loop — only a success triggers it,
+            // and a drain that takes nothing clears the flag.
+            if (outcome === 'sent' && this.outboxMayHaveItems) {
+                this.trackInFlight(this.drainOutbox());
+            }
+            return outcome;
+        }));
     }
 
     // Registers work for flush() to wait on, until it settles.
@@ -845,8 +870,20 @@ export class NgGa4Service implements OnDestroy {
         return work;
     }
 
-    private send(body: Ga4RequestBody, transport: 'beacon' | 'xhr'): Promise<SendOutcome> {
+    private send(queued: Ga4RequestBody, transport: 'beacon' | 'xhr'): Promise<SendOutcome> {
+        // sendBeacon() returns true even offline — it only refuses on size —
+        // and the browser then drops the hit, so the outbox would never see an
+        // offline page. navigator.onLine is unreliable only in the other
+        // direction (true without a working network), which the transports
+        // below still catch.
+        if (this.getNavigator()?.onLine === false) {
+            return Promise.resolve('unreachable');
+        }
+
         const url = this.collectUrl(this.GA4_ENDPOINT);
+        // Request-level, the earliest in the request. Each event's own takes
+        // precedence, so a batch spanning time keeps each event's real time.
+        const body = { ...queued, timestamp_micros: Math.min(...queued.events.map(event => event.timestamp_micros)) };
 
         // The validation endpoint records nothing — "events sent to the validation
         // server don't show up in reports" — so it can only ever be a side channel.
@@ -855,15 +892,6 @@ export class NgGa4Service implements OnDestroy {
         // request, so a batch is validated as the batch GA4 actually receives.
         if (this.config.debug) {
             this.sendForValidation(body);
-        }
-
-        // sendBeacon() returns true even offline — it only refuses on size —
-        // and the browser then drops the hit, so the outbox would never see an
-        // offline page. navigator.onLine is unreliable only in the other
-        // direction (true without a working network), which the transports
-        // below still catch.
-        if (this.getNavigator()?.onLine === false) {
-            return Promise.resolve('unreachable');
         }
 
         if (transport === 'xhr') {
@@ -988,69 +1016,98 @@ export class NgGa4Service implements OnDestroy {
         if (!this.consent.storageAllowed) {
             return Promise.resolve('failed');
         }
-        return this.updateOutbox(stored => [...stored, body])
-            .then((): NgGa4Delivery => 'stored', (err: unknown): NgGa4Delivery => {
-                console.warn('[ng-ga4] could not store the request for retry', err);
-                return 'failed';
-            });
+        const { promise, settle } = deferred();
+        this.outboxAppends.push({ body, settle });
+        // One write takes every append that arrived before its turn on the
+        // storage chain; later ones queue the next.
+        if (this.outboxAppends.length === 1) {
+            // What this write took. Appends arriving after it took them start
+            // the next write, so on failure only these belong to this one —
+            // or, if it failed before taking any, everything still waiting.
+            let taken: typeof this.outboxAppends | null = null;
+            this.updateOutbox(stored => {
+                taken = this.outboxAppends.splice(0);
+                this.outboxMayHaveItems = true;
+                return { next: [...stored, ...taken.map(append => append.body)] };
+            }).then(
+                () => taken?.forEach(append => append.settle('stored')),
+                // enqueueStorageWrite has already logged the failure.
+                () => (taken ?? this.outboxAppends.splice(0)).forEach(append => append.settle('failed'))
+            );
+        }
+        return promise;
     }
 
-    // Sends what earlier lifetimes could not. Runs on init() and on 'online';
-    // never on a failure, so an unreachable network cannot spin it.
+    // Sends what earlier failures left behind. Runs on init(), on 'online', and
+    // after any successful send while something may be stored; never after a
+    // failure, so an unreachable network cannot spin it.
     private async drainOutbox(): Promise<void> {
-        if (!this.enabled || !this.isBrowser) {
+        // Offline, every replay would fail and be written straight back.
+        if (!this.enabled || !this.isBrowser || this.getNavigator()?.onLine === false) {
             return;
         }
-        let pending: Ga4RequestBody[] = [];
+        let pending: Ga4RequestBody[];
         try {
-            await this.updateOutbox(stored => {
-                pending = stored;
-                return [];
-            });
-        } catch (err) {
-            console.warn('[ng-ga4] could not read the outbox', err);
+            ({ result: pending } = await this.updateOutbox(stored => {
+                this.outboxMayHaveItems = false;
+                return { next: [], result: stored };
+            }));
+        } catch {
+            // Already logged by enqueueStorageWrite.
             return;
         }
-        // Each replayed request that fails again goes back in through dispatch().
+        // Stored requests are as small as the batches that failed. Merged back
+        // into full batches, a long outage replays in a few requests, not
+        // hundreds. Each one that fails again goes back in through dispatch().
         const transport = this.config.transport === 'xhr' ? 'xhr' : 'beacon';
-        await Promise.all(pending.map(body => this.dispatch(body, transport)));
+        const batcher = new EventBatcher<Ga4RequestBody, null>();
+        for (const body of pending) {
+            batcher.add(body, null);
+        }
+        await Promise.all(batcher.drain().map(({ body }) => this.dispatch(body, transport)));
     }
 
-    // The single read-modify-write for the outbox. Prunes on every write, so
-    // the stored size is bounded however it is reached. Rejects if storage does.
-    private updateOutbox(change: (stored: Ga4RequestBody[]) => Ga4RequestBody[]): Promise<void> {
-        const apply = (raw: unknown) =>
-            pruneOutbox(change(pruneOutbox(parseOutbox<Ga4RequestBody>(raw), Date.now())), Date.now());
-        // Nothing stored and nothing to store — the usual case on every init() —
-        // must not cost a write.
-        const absent = (raw: unknown) => raw === undefined || raw === null;
+    // The single read-modify-write for the outbox, on the storage chain so two
+    // in this context never interleave. `change` gets what is stored, already
+    // within the 72-hour window and the size cap, and returns what to store
+    // plus whatever the caller wants back. Rejects if storage does.
+    private async updateOutbox<R>(
+        change: (stored: Ga4RequestBody[]) => { next: Ga4RequestBody[] } & R
+    ): Promise<R> {
+        let outcome!: R;
+        const apply = (raw: unknown): Ga4RequestBody[] => {
+            const now = Date.now();
+            const { next, ...rest } = change(pruneOutbox(parseOutbox<Ga4RequestBody>(raw), now));
+            outcome = rest as unknown as R;
+            return pruneOutbox(next, now);
+        };
         if (this.config.isExtension && chrome?.storage) {
-            return this.enqueueStorageWrite('chrome.storage.local (outbox)', async () => {
+            await this.enqueueStorageWrite('chrome.storage.local (outbox)', async () => {
                 const raw = (await chrome.storage.local.get([OUTBOX_STORAGE_KEY]))[OUTBOX_STORAGE_KEY];
                 const next = apply(raw);
+                // Nothing stored and nothing to store — the usual case — costs no write.
                 if (next.length) {
                     await chrome.storage.local.set({ [OUTBOX_STORAGE_KEY]: next });
-                } else if (!absent(raw)) {
+                } else if (raw != null) {
                     await chrome.storage.local.remove([OUTBOX_STORAGE_KEY]);
                 }
             });
+            return outcome;
         }
         // Chained even though localStorage is synchronous, so its order against
         // a consent withdrawal's removal holds on this path too.
-        return this.enqueueStorageWrite('localStorage (outbox)', async () => {
+        await this.enqueueStorageWrite('localStorage (outbox)', async () => {
             const raw = localStorage.getItem(OUTBOX_STORAGE_KEY);
             const next = apply(raw);
-            if (absent(raw) && !next.length) {
-                return;
-            }
             if (next.length) {
                 // Throws on quota exhaustion or in Safari private mode; the
-                // caller reports it, and the request is lost as it was before.
+                // caller fails the requests, which are lost as they were before.
                 localStorage.setItem(OUTBOX_STORAGE_KEY, JSON.stringify(next));
-            } else {
+            } else if (raw != null) {
                 localStorage.removeItem(OUTBOX_STORAGE_KEY);
             }
         });
+        return outcome;
     }
 
     // 'online' fires on window in a page and on the global scope in a worker,
@@ -1346,11 +1403,7 @@ export class NgGa4Service implements OnDestroy {
                 // focus sits in a child frame is disengaged too, and must not send
                 // on the way back in.
                 if (this.isPageHidden()) {
-                    this.flushEngagement();
-                    // A hidden page may never run JavaScript again (bfcache,
-                    // discard, a mobile tab killed in the background), so the
-                    // batch timer cannot be relied on to fire.
-                    this.flushQueue();
+                    this.onPageLeave();
                 }
             };
             // blur stops the clock but deliberately does not flush: sending on every
@@ -1377,8 +1430,7 @@ export class NgGa4Service implements OnDestroy {
             // bfcache restore minutes later can't have that dead time recounted.
             this.pagehideListener = () => {
                 this.setEngagementActive(false);
-                this.flushEngagement();
-                this.flushQueue();
+                this.onPageLeave();
             };
             document.addEventListener('visibilitychange', this.visibilityListener);
             window.addEventListener('focus', this.focusListener);
@@ -1386,6 +1438,14 @@ export class NgGa4Service implements OnDestroy {
             window.addEventListener('pageshow', this.pageshowListener);
             window.addEventListener('pagehide', this.pagehideListener);
         });
+    }
+
+    // The page is hidden or going away and may never run JavaScript again
+    // (bfcache, discard, a mobile tab killed in the background), so neither
+    // the trailing engagement time nor the batch timer can wait.
+    private onPageLeave(): void {
+        this.flushEngagement();
+        this.flushQueue();
     }
 
     // Flushes the trailing chunk of foreground time a page_view-only visit
