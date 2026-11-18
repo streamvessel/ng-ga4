@@ -1,0 +1,12 @@
+{
+  "name": "ng-ga4-lock-probe",
+  "private": true,
+  "description": "Manual two-context MV3 test for the client-ID Web Lock (issue #51). Not part of CI or the published package.",
+  "scripts": {
+    "probe": "node run.js"
+  },
+  "devDependencies": {
+    "esbuild": "0.23.1",
+    "playwright": "1.63.0"
+  }
+}

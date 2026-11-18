@@ -9,6 +9,7 @@ import { regionFromCountry } from './country-region';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
+import { Ga4UserDataPayload, hashUserData, NgGa4UserData } from './user-data';
 import { EnhancedMeasurement } from './enhanced-measurement';
 import { appOnlyEventNameProblem, eventNameProblem, validateEventParams } from './ga4-validation';
 import {
@@ -23,6 +24,7 @@ import {
     UserProperties,
     UserPropertyUpdate
 } from './user-properties';
+import { readOrMintChromeClientId } from './client-id-lock';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 
 interface Ga4Device {
@@ -73,6 +75,8 @@ export class NgGa4Service implements OnDestroy {
     // applied on top of what was stored. `null` once loaded.
     private pendingUserProperties: UserPropertyUpdate | null = emptyUserPropertyUpdate();
     private engagement: EngagementTimer | null = null;
+    private userData: Ga4UserDataPayload | null = null;
+    private userDataGeneration = 0;
     private enhancedMeasurement: EnhancedMeasurement | null = null;
     // Resolved once, in init(), by resolveEngagementEventName() — validating on
     // every flush would warn on every window switch for a misconfigured name.
@@ -257,6 +261,23 @@ export class NgGa4Service implements OnDestroy {
         }
         if (!wasAllowed && isAllowed && this.clientId) {
             this.repersistIdentity(this.clientId);
+        }
+    }
+
+    /**
+     * Attach hashed email/phone/address (`user_data`) to later hits, or clear it
+     * with `null`. Kept in memory only. Resolves once hashed; hits sent before
+     * that go without it. A later call wins over one still hashing. Never rejects.
+     */
+    async setUserData(userData: NgGa4UserData | null): Promise<void> {
+        const generation = ++this.userDataGeneration;
+        this.userData = null;
+        if (!userData || !this.isBrowser) {
+            return;
+        }
+        const hashed = await hashUserData(userData, globalThis.crypto?.subtle);
+        if (generation === this.userDataGeneration) {
+            this.userData = hashed;
         }
     }
 
@@ -604,6 +625,7 @@ export class NgGa4Service implements OnDestroy {
             device?: Ga4Device;
             user_location?: Ga4UserLocation;
             consent?: Ga4ConsentPayload;
+            user_data?: Ga4UserDataPayload;
             user_properties?: Ga4UserPropertiesPayload;
         } = {
             client_id: this.clientId,
@@ -633,6 +655,9 @@ export class NgGa4Service implements OnDestroy {
         const consentPayload = this.consent.toPayload();
         if (consentPayload) {
             body.consent = consentPayload;
+        }
+        if (this.userData && this.consent.userDataAllowed) {
+            body.user_data = this.userData;
         }
         // Omitted when empty, for the same byte-identical reason as `consent`.
         const userPropertiesPayload = toUserPropertiesPayload(this.userProperties);
@@ -681,7 +706,9 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private sendForValidation(body: object): void {
-        this.http.post<{ validationMessages?: unknown[] }>(this.collectUrl(this.GA4_DEBUG_ENDPOINT), body).subscribe({
+        // Validation copy only: on real hits it would make GA4 drop data RELAXED keeps.
+        const validationBody = { ...body, validation_behavior: 'ENFORCE_RECOMMENDATIONS' };
+        this.http.post<{ validationMessages?: unknown[] }>(this.collectUrl(this.GA4_DEBUG_ENDPOINT), validationBody).subscribe({
             next: (response) => {
                 // Only speak up when something is actually wrong. Logging the whole
                 // envelope either way made a clean payload and a rejected one look
@@ -1787,12 +1814,11 @@ export class NgGa4Service implements OnDestroy {
             return this.loadOrCreateClientIdFromLocalStorage();
         }
         try {
-            const result = await chrome.storage.local.get(['ga_client_id']);
-            if (result['ga_client_id']) {
-                return result['ga_client_id'];
-            }
-            const clientId = crypto.randomUUID();
-            if (this.consent.storageAllowed) {
+            // Minted under a lock shared with other extension contexts (#51).
+            return await readOrMintChromeClientId(async (clientId) => {
+                if (!this.consent.storageAllowed) {
+                    return;
+                }
                 // Enqueued like every other write so a write issued later cannot
                 // overtake it, and awaited so a failure reaches the catch below —
                 // falling back to localStorage rather than returning an ID that was
@@ -1809,8 +1835,7 @@ export class NgGa4Service implements OnDestroy {
                     'chrome.storage.local.set (mint client id)',
                     () => chrome.storage.local.set({ ga_client_id: clientId })
                 );
-            }
-            return clientId;
+            });
         } catch (err) {
             console.warn('[ng-ga4] chrome.storage.local failed, falling back to localStorage', err);
             return this.loadOrCreateClientIdFromLocalStorage();

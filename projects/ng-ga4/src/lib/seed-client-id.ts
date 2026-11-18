@@ -1,3 +1,5 @@
+import { readOrMintChromeClientId } from './client-id-lock';
+
 /**
  * Write a client ID into `chrome.storage.local` if one is not there already.
  *
@@ -17,10 +19,10 @@
  * issue #32. Without a seed, the first context to run has to mint an ID and
  * persist it — and an MV3 service worker can be terminated between those two
  * steps, so the next wake mints a *second* ID and the user is counted twice.
- * Two contexts starting cold at the same moment (worker plus popup) can also
- * both miss and both mint. Neither is preventable from inside the service:
- * awaiting the write makes our code wait, not Chrome. Seeding at install time
- * removes the mint path entirely, so there is nothing left to lose or race.
+ * That is not preventable from inside the service: awaiting the write makes
+ * our code wait, not Chrome. Seeding at install time removes the mint path
+ * entirely, so there is nothing left to lose. (Contexts starting together are
+ * handled separately, by the client-ID lock — see #51.)
  *
  * Deliberately standalone — no Angular imports — so it can be called at worker
  * top level, before any injector exists.
@@ -47,19 +49,11 @@ export async function seedNgGa4ClientId(): Promise<string | null> {
             console.warn('[ng-ga4] seedNgGa4ClientId: chrome.storage.local is unavailable.');
             return null;
         }
-        const result = await chrome.storage.local.get(['ga_client_id']);
-        const existing = result['ga_client_id'];
         // Idempotent by contract: onInstalled fires on update as well as install,
         // and overwriting here would re-identify every existing user on upgrade.
-        if (typeof existing === 'string' && existing) {
-            return existing;
-        }
-        // Matches what the service's own extension path mints, so a seeded ID and
-        // a service-minted one are interchangeable. Not mintGtagClientId(): there
-        // is no _ga cookie on a chrome-extension:// origin to align the shape with.
-        const clientId = crypto.randomUUID();
-        await chrome.storage.local.set({ ga_client_id: clientId });
-        return clientId;
+        // Same mint path and lock as the service (#51), so their IDs are
+        // interchangeable.
+        return await readOrMintChromeClientId((clientId) => chrome.storage.local.set({ ga_client_id: clientId }));
     } catch (err) {
         console.warn('[ng-ga4] seedNgGa4ClientId failed', err);
         return null;

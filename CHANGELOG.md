@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `setUserData()` sends opt-in, SHA-256-hashed email, phone and address as
+  `user_data` for Google Ads enhanced conversions, only while `adUserData` is
+  granted. Needs user-provided data collection turned on in GA4. See
+  [User-provided data](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-provided-data).
+  ([#23](https://github.com/streamvessel/ng-ga4/issues/23))
+- In debug mode, the validation request uses
+  `validation_behavior: 'ENFORCE_RECOMMENDATIONS'`; real hits are unchanged.
 - `trackEvent()` checks event and parameter names against the Measurement
   Protocol's rules ([#29](https://github.com/streamvessel/ng-ga4/issues/29)).
   `/mp/collect` returns 204 for a payload it discards, so a bad name used to be
@@ -67,6 +74,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts from the user's last visit, as gtag.js's does. Before, it lapsed two years
   after it was first written, however active the user was. A `_ga` adopted from
   gtag.js is still never written back ([#40](https://github.com/streamvessel/ng-ga4/issues/40)).
+- An extension's service worker and a popup that start together with no client
+  ID stored no longer each create their own: `NgGa4Service` and
+  `seedNgGa4ClientId()` now share a Web Lock around creating it. Falls back to
+  the old behaviour without Web Locks or after a 3-second wait. Measured on
+  Chromium 153 under Linux with `tools/lock-probe`.
+  ([#51](https://github.com/streamvessel/ng-ga4/issues/51))
 - `measurement_id` and `api_secret` are URL-encoded in the collect URL, so a
   secret containing `&`, `#`, `+` or similar no longer corrupts the request.
 - `measurementId` is uppercased before sending, so `g-abc123` is sent as

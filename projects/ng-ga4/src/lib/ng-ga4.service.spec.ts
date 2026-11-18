@@ -7,6 +7,8 @@ import { Subject } from 'rxjs';
 import { NgGa4Service } from './ng-ga4.service';
 import { NG_GA4_CONFIG, NgGa4Config } from './ng-ga4.config';
 import { isGtagClientId } from './ga-cookie';
+import { CLIENT_ID_LOCK_NAME } from './client-id-lock';
+import { FakeLockManager, installLockManager } from './testing/fake-lock-manager';
 
 const MOCK_UUID = '12345678-1234-1234-1234-123456789abc';
 const MOCK_TIMESTAMP = 1700000000000;
@@ -45,6 +47,8 @@ describe('NgGa4Service', () => {
     // undefined: hidden exactly when not engaged, which is what most specs mean.
     let pageHidden: boolean | undefined;
     let originalTitle: string;
+    let fakeLocks: FakeLockManager;
+    let restoreLocks: () => void;
 
     function configureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
         // Reset here, not just in the top-level beforeEach, so a reconfigureTestBed()
@@ -273,6 +277,10 @@ describe('NgGa4Service', () => {
         // Save original chrome.storage (if any) for restoration
         originalChromeStorage = (window as any).chrome?.storage;
 
+        // Real lock grants land on a task, which microtask-only specs never reach.
+        fakeLocks = new FakeLockManager();
+        restoreLocks = installLockManager(fakeLocks);
+
         configureTestBed();
     });
 
@@ -289,6 +297,7 @@ describe('NgGa4Service', () => {
         jasmine.clock().uninstall();
         clearChromeMock();
         document.title = originalTitle;
+        restoreLocks();
     });
 
     // --- init() ---
@@ -361,6 +370,88 @@ describe('NgGa4Service', () => {
             // The localStorage fallback mints in gtag's shape same as the direct web
             // path, not a UUID — see loadOrCreateClientIdFromLocalStorage.
             expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_MINTED_CLIENT_ID);
+        });
+    });
+
+    // --- client ID lock (#51) ---
+
+    describe('client ID lock across extension contexts', () => {
+        // A second context sharing the same mocked chrome.storage.
+        function secondExtensionService(): NgGa4Service {
+            return Injector.create({
+                providers: [
+                    NgGa4Service,
+                    { provide: HttpClient, useValue: TestBed.inject(HttpClient) },
+                    { provide: Router, useValue: { events: new Subject<any>().asObservable() } },
+                    { provide: NG_GA4_CONFIG, useValue: { ...defaultConfig, isExtension: true } },
+                    { provide: PLATFORM_ID, useValue: 'browser' },
+                    { provide: NgZone, useValue: TestBed.inject(NgZone) }
+                ]
+            }).get(NgGa4Service);
+        }
+
+        beforeEach(() => {
+            reconfigureTestBed({ isExtension: true });
+            // Distinct IDs per mint, so a double mint is visible.
+            (crypto.randomUUID as jasmine.Spy).and.returnValues(
+                'aaaaaaaa-0000-4000-8000-000000000001' as any,
+                'bbbbbbbb-0000-4000-8000-000000000002' as any
+            );
+        });
+
+        it('reads a stored client ID without taking the lock', async () => {
+            setupChromeMock({ ga_client_id: 'stored-id' });
+
+            await service.init();
+
+            expect((service as any).clientId).toBe('stored-id');
+            expect(fakeLocks.requested).toEqual([]);
+        });
+
+        it('gives two contexts starting cold together one client ID, minted once', async () => {
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal);
+            const second = secondExtensionService();
+
+            await Promise.all([service.init(), second.init()]);
+
+            expect((service as any).clientId).toBe('aaaaaaaa-0000-4000-8000-000000000001');
+            expect((second as any).clientId).toBe((service as any).clientId);
+            expect(chromeLocal['ga_client_id']).toBe((service as any).clientId);
+            expect(crypto.randomUUID).toHaveBeenCalledTimes(1);
+            expect(fakeLocks.maxHeld).toBe(1);
+
+            second.ngOnDestroy();
+        });
+
+        // Control: proves the mock reproduces the race the lock prevents.
+        it('falls back to unlocked minting where navigator.locks is unavailable', async () => {
+            restoreLocks();
+            restoreLocks = installLockManager(undefined);
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal);
+            const second = secondExtensionService();
+
+            await Promise.all([service.init(), second.init()]);
+
+            expect((service as any).clientId).toBeTruthy();
+            expect((second as any).clientId).toBeTruthy();
+            expect((second as any).clientId).not.toBe((service as any).clientId);
+            expect(crypto.randomUUID).toHaveBeenCalledTimes(2);
+
+            second.ngOnDestroy();
+        });
+
+        it('still falls back to localStorage when chrome.storage fails inside the lock', async () => {
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
+            setupChromeMock({});
+            (window as any).chrome.storage.local.set = () => Promise.reject(new Error('quota exceeded'));
+            spyOn(console, 'warn');
+
+            await service.init();
+
+            expect((service as any).clientId).toBe(MOCK_MINTED_CLIENT_ID);
+            expect(fakeLocks.requested).toEqual([CLIENT_ID_LOCK_NAME]);
         });
     });
 
@@ -2721,7 +2812,20 @@ describe('NgGa4Service', () => {
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.url).not.toContain('debug/mp/collect');
             expect(req.request.body.events[0].params.debug_mode).toBeUndefined();
+            expect(req.request.body.validation_behavior).toBeUndefined();
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('asks the validation endpoint to ENFORCE_RECOMMENDATIONS but leaves the real hit RELAXED', async () => {
+            reconfigureTestBed({ debug: true });
+            await service.init();
+            service.trackEvent('custom_event');
+
+            const { real, validation } = expectDebugPair();
+            expect(validation.request.body['validation_behavior']).toBe('ENFORCE_RECOMMENDATIONS');
+            expect(real.request.body['validation_behavior']).toBeUndefined();
+            real.flush('', { status: 204, statusText: 'No Content' });
+            validation.flush({ validationMessages: [] });
         });
     });
 
@@ -4482,6 +4586,80 @@ describe('NgGa4Service', () => {
             const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
             expect(req.request.body.client_id).toBe(mockLocalStorage['ga_client_id']);
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+    });
+
+    describe('user_data', () => {
+        const JOHNSMITH_GMAIL = '3586de92bb3636d0885a12eff961429a32e4ebd764b96f50d85d016f9338d586';
+        const PHONE_US = '910a625c4ba147b544e6bd2f267e130ae14c591b6ba9c25cb8573322dedbebd0';
+
+        function sentUserData(event = 'probe'): unknown {
+            service.trackEvent(event);
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            req.flush({});
+            return req.request.body['user_data'];
+        }
+
+        beforeEach(async () => {
+            reconfigureTestBed({ consent: { adUserData: 'granted' } });
+            await service.init();
+        });
+
+        it('is never sent unless the app calls setUserData()', () => {
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('sends hashed email and phone, never the raw values', async () => {
+            await service.setUserData({ email: 'John.Smith@gmail.com', phone: '+1 (555) 555-5555' });
+            const userData = sentUserData();
+
+            expect(userData).toEqual({ sha256_email_address: [JOHNSMITH_GMAIL], sha256_phone_number: [PHONE_US] });
+            expect(JSON.stringify(userData)).not.toContain('gmail');
+        });
+
+        it('passes addresses and pre-hashed values through', async () => {
+            await service.setUserData({ sha256EmailAddress: JOHNSMITH_GMAIL, address: { country: 'US' } });
+            expect(sentUserData()).toEqual({ sha256_email_address: [JOHNSMITH_GMAIL], address: [{ country: 'US' }] });
+        });
+
+        it('stops sending after setUserData(null)', async () => {
+            await service.setUserData({ email: 'a@x.com' });
+            await service.setUserData(null);
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('lets a later clear win over an earlier call that is still hashing', async () => {
+            const pending = service.setUserData({ email: 'a@x.com' });
+            await service.setUserData(null);
+            await pending;
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('is withheld until ad_user_data consent is explicitly granted', async () => {
+            reconfigureTestBed();
+            await service.init();
+            await service.setUserData({ email: 'a@x.com' });
+
+            expect(sentUserData('unset')).toBeUndefined();
+            service.setConsent({ adUserData: 'denied' });
+            expect(sentUserData('denied')).toBeUndefined();
+            service.setConsent({ adUserData: 'granted' });
+            expect(sentUserData('granted')).toBeDefined();
+        });
+
+        it('warns instead of rejecting when hashing fails', async () => {
+            spyOn(crypto.subtle, 'digest').and.returnValue(Promise.reject(new Error('boom')));
+            spyOn(console, 'warn');
+
+            await expectAsync(service.setUserData({ email: 'a@x.com' })).toBeResolved();
+            expect(console.warn).toHaveBeenCalled();
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('is never written to storage', async () => {
+            const before = JSON.stringify(mockLocalStorage);
+            await service.setUserData({ email: 'a@x.com' });
+            expect(JSON.stringify(mockLocalStorage)).toBe(before);
         });
     });
 });
