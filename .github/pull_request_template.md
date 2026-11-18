@@ -13,4 +13,4 @@
 - [ ] `pnpm run build` passes
 - [ ] Tests cover the change
 - [ ] `CHANGELOG.md` updated under `## [Unreleased]`
-- [ ] Public API changes are reflected in `src/public-api.ts` and the README
+- [ ] Public API changes are reflected in `src/public-api.ts`, the README's API table and the topic doc under `projects/ng-ga4/docs/`

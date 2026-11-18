@@ -33,7 +33,10 @@ cannot be observed by a test is usually a change that cannot be relied on.
 
 - One logical change per pull request.
 - Update `CHANGELOG.md` under an `## [Unreleased]` heading.
-- Public API changes must update `src/public-api.ts` and the README.
+- Public API changes must update `src/public-api.ts` and the docs: a row in the API table
+  of `projects/ng-ga4/README.md`, and the details in the matching topic doc under
+  `projects/ng-ga4/docs/`. Keep the README short; it is the only doc npm shows, so its
+  links to `docs/` must be absolute GitHub URLs.
 
 ## Releases
 
