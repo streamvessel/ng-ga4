@@ -62,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An extension's service worker and a popup that start together with no client
+  ID stored no longer each create their own: `NgGa4Service` and
+  `seedNgGa4ClientId()` now share a Web Lock around creating it. Falls back to
+  the old behaviour without Web Locks or after a 3-second wait. Measured on
+  Chromium 153 under Linux with `tools/lock-probe`.
+  ([#51](https://github.com/streamvessel/ng-ga4/issues/51))
 - `measurement_id` and `api_secret` are URL-encoded in the collect URL, so a
   secret containing `&`, `#`, `+` or similar no longer corrupts the request.
 - `measurementId` is uppercased before sending, so `g-abc123` is sent as
