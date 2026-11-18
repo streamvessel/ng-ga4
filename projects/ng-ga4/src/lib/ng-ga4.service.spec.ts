@@ -4559,6 +4559,9 @@ describe('NgGa4Service', () => {
             await service.setUserData({ email: 'a@x.com' });
 
             expect(sentUserData('unset')).toBeUndefined();
+            service.setConsent({ adUserData: 'denied' });
+            expect(sentUserData('denied')).toBeUndefined();
+            service.setConsent({ adUserData: 'denied' });
             service.setConsent({ adUserData: 'granted' });
             expect(sentUserData('granted')).toBeDefined();
         });
@@ -4576,15 +4579,30 @@ describe('NgGa4Service', () => {
             expect(sentUserData()).toBeUndefined();
         });
 
-        it('is cleared on sign-out via setUserId(null), but not by setting a user ID', async () => {
+        it('is kept when signing in or repeating the same user ID', async () => {
             await service.setUserData({ email: 'a@x.com' });
-            service.setUserId('u1');
-            expect(sentUserData('signed_in')).toBeDefined();
             service.setUserId(null);
-            expect(sentUserData('signed_out')).toBeUndefined();
+            service.setUserId('u1');
+            service.setUserId('u1');
+            expect(sentUserData()).toBeDefined();
+        });
+
+        it('is cleared on sign-out via setUserId(null)', async () => {
+            service.setUserId('u1');
+            await service.setUserData({ email: 'a@x.com' });
+            service.setUserId(null);
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('is cleared when switching to another user ID', async () => {
+            service.setUserId('u1');
+            await service.setUserData({ email: 'a@x.com' });
+            service.setUserId('u2');
+            expect(sentUserData()).toBeUndefined();
         });
 
         it('discards hashing still in flight when cleared', async () => {
+            service.setUserId('u1');
             const pending = service.setUserData({ email: 'a@x.com' });
             service.setUserId(null);
             await pending;

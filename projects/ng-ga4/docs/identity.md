@@ -104,7 +104,7 @@ await this.analytics.setUserData(null);
 - **Already hashed:** `sha256EmailAddress`, `sha256PhoneNumber`, and `sha256FirstName`, `sha256LastName` and `sha256Street` on an address take hex SHA-256 digests of the normalised value and replace their raw counterparts. Any 64-character hex value is sent as-is; anything else is normalised and hashed, so raw data is never sent unhashed.
 - Google recommends sending a [user ID](#user-id) alongside it.
 - Kept in memory only: call it again on every start-up and in every tab or extension context.
-- Cleared automatically on sign-out (`setUserId(null)`) and when `adUserData` or `analyticsStorage` is denied; call `setUserData()` again after a new grant.
+- Cleared automatically on sign-out or a switch to another user ID (`setUserId()`), and when a granted `adUserData` or `analyticsStorage` is withdrawn; call `setUserData()` again after a new grant.
 - Hits sent before the returned promise resolves go without `user_data`, even when replacing earlier data.
 - Needs `crypto.subtle` (HTTPS or `localhost`); elsewhere it logs a warning and sends nothing. The promise never rejects.
 
@@ -113,4 +113,4 @@ await this.analytics.setUserData(null);
 - have the user's consent to share it with Google for advertising, and set `adUserData` from that choice, not a default;
 - disclose it in your privacy policy;
 - follow Google's [customer data policies](https://support.google.com/adspolicy/answer/7475709) and, in the EEA/UK, the [EU user consent policy](https://www.google.com/about/company/user-consent-policy/);
-- clear it with `setUserData(null)` when the user signs out or withdraws consent, unless `setUserId(null)` or a denial already did.
+- clear it with `setUserData(null)` when the user signs out or withdraws consent, unless `setUserId()` or a withdrawal already did.

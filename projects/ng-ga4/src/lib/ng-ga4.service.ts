@@ -229,7 +229,8 @@ export class NgGa4Service implements OnDestroy {
     /**
      * Set the signed-in user's ID, sent as the top-level `user_id` of every hit
      * from here on — the equivalent of `gtag('config', id, { user_id })`. Pass
-     * `null` on sign-out to stop sending it; that also clears `setUserData()`.
+     * `null` on sign-out to stop sending it. Signing out or switching to another
+     * ID also clears `setUserData()`.
      *
      * Persisted alongside the client ID, so it survives reloads, and subject to
      * the same `analyticsStorage` consent: while that is denied it is held in
@@ -237,7 +238,7 @@ export class NgGa4Service implements OnDestroy {
      */
     setUserId(userId: string | null): void {
         const next = this.normaliseUserId(userId);
-        if (next === null) {
+        if (this.userId !== null && next !== this.userId) {
             this.clearUserData();
         }
         this.userId = next;
@@ -252,18 +253,18 @@ export class NgGa4Service implements OnDestroy {
     /**
      * Update consent at runtime. Merges into the current state — keys you omit are
      * left alone. Call this on every app boot from your own consent store; this
-     * library deliberately does not persist consent itself. Denying `adUserData`
-     * or `analyticsStorage` also clears `setUserData()`.
+     * library deliberately does not persist consent itself. Withdrawing a granted
+     * `adUserData` or `analyticsStorage` also clears `setUserData()`.
      */
     setConsent(consent: NgGa4Consent): void {
         const wasAllowed = this.consent.storageAllowed;
+        const wasUserDataAllowed = this.consent.userDataAllowed;
         this.consent.merge(consent);
         const isAllowed = this.consent.storageAllowed;
-        if (consent.adUserData !== undefined && !this.consent.userDataAllowed) {
+        if ((wasUserDataAllowed && !this.consent.userDataAllowed) || (wasAllowed && !isAllowed)) {
             this.clearUserData();
         }
         if (wasAllowed && !isAllowed) {
-            this.clearUserData();
             this.clearPersistedIdentity();
             return;
         }
