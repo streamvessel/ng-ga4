@@ -1,10 +1,10 @@
 import {
     hashUserData,
-    normalizeCountry,
     normalizeEmail,
-    normalizeNameOrPlace,
+    normalizeName,
     normalizePhone,
-    normalizePostalCode,
+    normalizePlace,
+    normalizePostalCodeOrCountry,
     normalizeStreet,
     sha256Hex
 } from './user-data';
@@ -17,6 +17,8 @@ const JANE = '81f8f6dde88365f3928796ec7aa53f72820b06db8664f5fe76a7eb13e24546a2';
 const DOE = '799ef92a11af918e3fb741df42934f3b568ed2d93ac1df74f1b8d41a27932a6f';
 const STREET = '22b7e2d69b91e0ef4a88e81a73d897b92fd9c93ccfbe0a860f77db16c26f662e'; // 1600 amphitheatre pkwy
 const MULLER = '2dbd218072117713f2d5996a726a9b216ed791ffd0783b6ba4ab6d61b8333192'; // müller
+const MARYANN = '16b3f07f0ec2f9dd127b71dc2e6c791b7d93116a1c3bc99d057eaa7a8a077e73'; // maryann
+const OBRIEN = '65b87174be3b1b122e2b0929f0b84888637d31a4a83bb96a860bcff411f5e668'; // o'brien
 
 describe('user-data', () => {
     const subtle = crypto.subtle;
@@ -88,51 +90,54 @@ describe('user-data', () => {
     });
 
     describe('address normalisation', () => {
-        it('names, city and region lose digits and symbols, keep letters of any script', () => {
-            expect(normalizeNameOrPlace('  Jane-3! ')).toBe('jane');
-            expect(normalizeNameOrPlace('MÜLLER')).toBe('müller');
-            expect(normalizeNameOrPlace('São Paulo')).toBe('são paulo');
-            expect(normalizeNameOrPlace('123')).toBeNull();
+        // Same results as gtag.js's own normaliser, including its quirks.
+        it('names lose all whitespace, digits and gtag.js\'s symbol list, but keep apostrophes', () => {
+            expect(normalizeName('  Jane-3! ')).toBe('jane');
+            expect(normalizeName('Mary Ann')).toBe('maryann');
+            expect(normalizeName("O'Brien")).toBe("o'brien");
+            expect(normalizeName('MÜLLER')).toBe('müller');
+            expect(normalizeName('123')).toBeNull();
+        });
+
+        it('city and region lose digits and symbols but keep inner spaces', () => {
+            expect(normalizePlace(' São Paulo-2 ')).toBe('são paulo');
+            expect(normalizePlace('CA')).toBe('ca');
         });
 
         it('street loses symbols but keeps digits', () => {
             expect(normalizeStreet(' 1600 Amphitheatre Pkwy. ')).toBe('1600 amphitheatre pkwy');
         });
 
-        it('postal code loses only . and ~', () => {
-            expect(normalizePostalCode(' 94043~1351. ')).toBe('940431351');
-            expect(normalizePostalCode('SW1A 1AA')).toBe('SW1A 1AA');
-        });
-
-        it('country must be an ISO 3166-1 alpha-2 code', () => {
-            expect(normalizeCountry(' us ')).toBe('US');
-            expect(normalizeCountry('USA')).toBeNull();
+        it('postal code and country lose only . and ~, case untouched', () => {
+            expect(normalizePostalCodeOrCountry(' 94043~1351. ')).toBe('940431351');
+            expect(normalizePostalCodeOrCountry('SW1A 1AA')).toBe('SW1A 1AA');
+            expect(normalizePostalCodeOrCountry(' u.s. ')).toBe('us');
         });
     });
 
     describe('pre-hashed values', () => {
-        it('sends a supplied digest as-is (lowercased) and merges it with hashed raw values', async () => {
+        it('sends a supplied digest as-is (lowercased), replacing the raw field', async () => {
             const payload = await hashUserData({
                 email: 'jane.doe@example.com',
-                sha256EmailAddress: [JOHNSMITH_GMAIL.toUpperCase(), JANE_DOE_EXAMPLE]
+                sha256EmailAddress: [JOHNSMITH_GMAIL.toUpperCase(), JANE]
             }, subtle);
-            expect(payload).toEqual({ sha256_email_address: [JANE_DOE_EXAMPLE, JOHNSMITH_GMAIL] });
+            expect(payload).toEqual({ sha256_email_address: [JOHNSMITH_GMAIL, JANE] });
         });
 
-        it('drops anything that is not a digest, without logging the value', async () => {
-            const warn = spyOn(console, 'warn');
-            const payload = await hashUserData({ sha256PhoneNumber: '+15555555555', sha256EmailAddress: 'jane@example.com' }, subtle);
-            expect(payload).toBeNull();
-            expect(warn).toHaveBeenCalledTimes(2);
-            const logged = JSON.stringify(warn.calls.allArgs());
-            expect(logged).not.toContain('5555');
-            expect(logged).not.toContain('jane');
+        it('hashes a raw value passed in a sha256 field instead of sending it', async () => {
+            const payload = await hashUserData({ sha256PhoneNumber: '+1 555-555-5555', sha256EmailAddress: 'John.Smith@gmail.com' }, subtle);
+            expect(payload).toEqual({ sha256_email_address: [JOHNSMITH_GMAIL], sha256_phone_number: [PHONE_US] });
         });
 
-        it('caps raw and pre-hashed values together at 3', async () => {
+        it('treats a raw field that already holds a digest as pre-hashed', async () => {
+            const payload = await hashUserData({ email: JANE_DOE_EXAMPLE.toUpperCase() }, subtle);
+            expect(payload).toEqual({ sha256_email_address: [JANE_DOE_EXAMPLE] });
+        });
+
+        it('caps pre-hashed values at 3', async () => {
             spyOn(console, 'warn');
-            const payload = await hashUserData({ phone: ['+11', '+12'], sha256PhoneNumber: [JANE, DOE] }, subtle);
-            expect(payload!.sha256_phone_number!.length).toBe(3);
+            const payload = await hashUserData({ sha256PhoneNumber: [JANE, DOE, STREET, MULLER] }, subtle);
+            expect(payload!.sha256_phone_number).toEqual([JANE, DOE, STREET]);
         });
     });
 
@@ -152,7 +157,7 @@ describe('user-data', () => {
                     city: 'mountain view',
                     region: 'ca',
                     postal_code: '94043',
-                    country: 'US'
+                    country: 'us'
                 }]
             });
             expect(JSON.stringify(payload)).not.toContain('Jane');
@@ -162,6 +167,11 @@ describe('user-data', () => {
         it('hashes non-ASCII names as UTF-8', async () => {
             const payload = await hashUserData({ address: { lastName: 'Müller' } }, subtle);
             expect(payload).toEqual({ address: [{ sha256_last_name: MULLER }] });
+        });
+
+        it('hashes names the way gtag.js does', async () => {
+            const payload = await hashUserData({ address: { firstName: 'Mary Ann', lastName: "O'Brien" } }, subtle);
+            expect(payload).toEqual({ address: [{ sha256_first_name: MARYANN, sha256_last_name: OBRIEN }] });
         });
 
         it('prefers a supplied digest over a raw value for the same field', async () => {

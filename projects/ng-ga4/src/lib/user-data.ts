@@ -1,13 +1,15 @@
 // User-provided data (`user_data`) for Google Ads enhanced conversions.
-// Normalisation follows the Measurement Protocol "user-provided data" reference
-// (https://developers.google.com/analytics/devguides/collection/ga4/uid-data):
-// GA4 matches on the hash, so any drift from these rules silently breaks matching.
+// GA4 matches on the hash, so any drift in normalisation silently breaks matching.
+// Email, phone and street follow the Measurement Protocol "user-provided data"
+// reference (https://developers.google.com/analytics/devguides/collection/ga4/uid-data).
+// Names, city, region, country and pre-hashed input follow what gtag.js itself
+// does, since the reference leaves "symbol characters" undefined.
 
 /**
  * A postal address. Name and street are hashed before they are sent; city,
  * region, postal code and country are sent as-is (normalised), as the
- * Measurement Protocol requires. The `sha256*` fields take values you have
- * already normalised and hashed yourself.
+ * Measurement Protocol requires. A `sha256*` field takes a value you have
+ * already normalised and hashed yourself, and replaces the raw field.
  */
 export interface NgGa4UserAddress {
     firstName?: string;
@@ -25,17 +27,18 @@ export interface NgGa4UserAddress {
 
 /**
  * User-provided data. Raw values are normalised and hashed with SHA-256 before
- * they are sent; `sha256*` fields take hex digests you computed yourself and
- * are sent as they are, after a check that they are digests.
+ * they are sent. A `sha256*` field takes hex digests you computed yourself and
+ * replaces its raw counterpart, as in gtag.js. Any value that already is a
+ * 64-character hex digest is sent as-is; any other is normalised and hashed.
  */
 export interface NgGa4UserData {
-    /** One address, or up to 3 together with `sha256EmailAddress`. */
+    /** One address, or up to 3. */
     email?: string | string[];
-    /** One number, or up to 3 together with `sha256PhoneNumber`. Include the country code (E.164), e.g. `+15555555555`. */
+    /** One number, or up to 3. Include the country code (E.164), e.g. `+15555555555`. */
     phone?: string | string[];
-    /** Already normalised and hashed: lowercase hex SHA-256. */
+    /** Already normalised and hashed: hex SHA-256. Replaces `email`. */
     sha256EmailAddress?: string | string[];
-    /** Already normalised (E.164) and hashed: lowercase hex SHA-256. */
+    /** Already normalised (E.164) and hashed: hex SHA-256. Replaces `phone`. */
     sha256PhoneNumber?: string | string[];
     /** One address, or up to 2. */
     address?: NgGa4UserAddress | NgGa4UserAddress[];
@@ -92,9 +95,18 @@ export function normalizePhone(phone: string): string | null {
     return digits ? `+${digits}` : null;
 }
 
-/** First name, last name, city and region: remove digits and symbols, lowercase, trim. */
-export function normalizeNameOrPlace(value: string): string | null {
-    return value.replace(/[^\p{L}\p{M}\s]/gu, '').trim().toLowerCase() || null;
+// gtag.js's own list of what it strips from names, city and region: digits and
+// these ASCII symbols. Notably not `'`, so "O'Brien" keeps its apostrophe.
+const GTAG_STRIPPED = /[0-9`~!@#$%^&*()_\-+=:;<>,.?|/\\[\]]/g;
+
+/** First and last name, as gtag.js: remove all whitespace, digits and symbols, lowercase. */
+export function normalizeName(value: string): string | null {
+    return value.replace(/\s/g, '').replace(GTAG_STRIPPED, '').toLowerCase() || null;
+}
+
+/** City and region, as gtag.js: remove digits and symbols, lowercase, trim. */
+export function normalizePlace(value: string): string | null {
+    return value.replace(GTAG_STRIPPED, '').toLowerCase().trim() || null;
 }
 
 /** Street: remove symbols (digits stay), lowercase, trim. */
@@ -102,15 +114,9 @@ export function normalizeStreet(value: string): string | null {
     return value.replace(/[^\p{L}\p{M}\p{N}\s]/gu, '').trim().toLowerCase() || null;
 }
 
-/** Postal code: remove `.` and `~`, trim. */
-export function normalizePostalCode(value: string): string | null {
+/** Postal code and country, as gtag.js: remove `.` and `~`, trim. Case is left alone. */
+export function normalizePostalCodeOrCountry(value: string): string | null {
     return value.replace(/[.~]/g, '').trim() || null;
-}
-
-/** Country: an ISO 3166-1 alpha-2 code, uppercased. Anything else is dropped. */
-export function normalizeCountry(value: string): string | null {
-    const code = value.trim().toUpperCase();
-    return /^[A-Z]{2}$/.test(code) ? code : null;
 }
 
 /** Lowercase hex SHA-256 of the UTF-8 bytes of `value`. */
@@ -146,25 +152,40 @@ async function hashList(
     normalize: (value: string) => string | null,
     subtle: SubtleCrypto
 ): Promise<string[]> {
-    const normalized = toList(raw).map(v => normalizeIfString(v, normalize));
-    const digests = await Promise.all(
-        unique(normalized).map(v => sha256Hex(v, subtle))
-    );
-    const checked = toList(preHashed).map(v => checkDigest(`sha256 ${field}`, v));
-    return cap(field, unique([...digests, ...checked]), MAX_EMAILS_OR_PHONES);
+    const source = toList(preHashed).length ? preHashed : raw;
+    const digests = await Promise.all(toList(source).map(v => digestOf(v, normalize, subtle)));
+    return cap(field, unique(digests), MAX_EMAILS_OR_PHONES);
+}
+
+/**
+ * A value that already is a hex SHA-256 digest is taken as-is (lowercased);
+ * anything else is normalised and hashed, so even a raw value passed in a
+ * `sha256*` field never goes out unhashed. This is what gtag.js does.
+ */
+async function digestOf(value: unknown, normalize: (value: string) => string | null, subtle: SubtleCrypto): Promise<string | null> {
+    if (typeof value !== 'string') {
+        // Untyped callers can pass anything; skip rather than throw.
+        return null;
+    }
+    const trimmed = value.trim();
+    if (SHA256_HEX.test(trimmed)) {
+        return trimmed.toLowerCase();
+    }
+    const normalized = normalize(trimmed);
+    return normalized ? sha256Hex(normalized, subtle) : null;
 }
 
 const HASHED_ADDRESS_FIELDS = [
-    ['firstName', 'sha256FirstName', 'sha256_first_name', normalizeNameOrPlace],
-    ['lastName', 'sha256LastName', 'sha256_last_name', normalizeNameOrPlace],
+    ['firstName', 'sha256FirstName', 'sha256_first_name', normalizeName],
+    ['lastName', 'sha256LastName', 'sha256_last_name', normalizeName],
     ['street', 'sha256Street', 'sha256_street', normalizeStreet]
 ] as const;
 
 const PLAIN_ADDRESS_FIELDS = [
-    ['city', 'city', normalizeNameOrPlace],
-    ['region', 'region', normalizeNameOrPlace],
-    ['postalCode', 'postal_code', normalizePostalCode],
-    ['country', 'country', normalizeCountry]
+    ['city', 'city', normalizePlace],
+    ['region', 'region', normalizePlace],
+    ['postalCode', 'postal_code', normalizePostalCodeOrCountry],
+    ['country', 'country', normalizePostalCodeOrCountry]
 ] as const;
 
 async function hashAddress(address: NgGa4UserAddress, subtle: SubtleCrypto): Promise<Ga4UserAddressPayload | null> {
@@ -173,10 +194,8 @@ async function hashAddress(address: NgGa4UserAddress, subtle: SubtleCrypto): Pro
     }
     const payload: Ga4UserAddressPayload = {};
     for (const [rawKey, hashedKey, payloadKey, normalize] of HASHED_ADDRESS_FIELDS) {
-        // A digest the caller supplied wins over a raw value for the same field.
-        const digest = checkDigest(`address ${hashedKey}`, address[hashedKey]);
-        const raw = normalizeIfString(address[rawKey], normalize);
-        const value = digest ?? (raw ? await sha256Hex(raw, subtle) : null);
+        // A `sha256*` field replaces the raw one, as in gtag.js.
+        const value = await digestOf(address[hashedKey] || address[rawKey], normalize, subtle);
         if (value) {
             payload[payloadKey] = value;
         }
@@ -188,23 +207,6 @@ async function hashAddress(address: NgGa4UserAddress, subtle: SubtleCrypto): Pro
         }
     }
     return Object.keys(payload).length ? payload : null;
-}
-
-/**
- * A caller-supplied digest, lowercased, or `null`. Anything that isn't 64 hex
- * characters is dropped with a warning that never includes the value: a raw
- * email passed in a `sha256*` field must not reach the request or the console.
- */
-function checkDigest(field: string, value: unknown): string | null {
-    if (value === undefined || value === null || value === '') {
-        return null;
-    }
-    const trimmed = typeof value === 'string' ? value.trim() : '';
-    if (SHA256_HEX.test(trimmed)) {
-        return trimmed.toLowerCase();
-    }
-    console.warn(`[ng-ga4] user_data ${field} is not a hex SHA-256 digest; skipped.`);
-    return null;
 }
 
 // Untyped callers can pass anything; skip rather than throw.
