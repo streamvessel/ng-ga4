@@ -139,7 +139,7 @@ Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](https://github.com
 - [Configuration](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/configuration.md): every option
 - [Identity](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md): client ID and `gtag.js`, user ID, user properties
 - [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md)
-- [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md): setup, service-worker teardown, sessions across tabs
+- [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md): setup, service-worker teardown, contexts starting together, sessions across tabs
 - [Engagement time and debug mode](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md)
 - [Enhanced measurement](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/enhanced-measurement.md): opt-in scroll, outbound click, file download, site search, form and video events
 - [Delivery](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/delivery.md): batching, `flush()`, track results, offline outbox

@@ -23,6 +23,7 @@ import {
     UserProperties,
     UserPropertyUpdate
 } from './user-properties';
+import { readOrMintChromeClientId } from './client-id-lock';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 import { clampToNow, isWithinBackdateWindow, toTimestampMicros } from './timestamp';
 import { EventBatcher } from './event-batcher';
@@ -2221,12 +2222,11 @@ export class NgGa4Service implements OnDestroy {
             return this.loadOrCreateClientIdFromLocalStorage();
         }
         try {
-            const result = await chrome.storage.local.get(['ga_client_id']);
-            if (result['ga_client_id']) {
-                return result['ga_client_id'];
-            }
-            const clientId = crypto.randomUUID();
-            if (this.consent.storageAllowed) {
+            // Minted under a lock shared with other extension contexts (#51).
+            return await readOrMintChromeClientId(async (clientId) => {
+                if (!this.consent.storageAllowed) {
+                    return;
+                }
                 // Enqueued like every other write so a write issued later cannot
                 // overtake it, and awaited so a failure reaches the catch below —
                 // falling back to localStorage rather than returning an ID that was
@@ -2243,8 +2243,7 @@ export class NgGa4Service implements OnDestroy {
                     'chrome.storage.local.set (mint client id)',
                     () => chrome.storage.local.set({ ga_client_id: clientId })
                 );
-            }
-            return clientId;
+            });
         } catch (err) {
             console.warn('[ng-ga4] chrome.storage.local failed, falling back to localStorage', err);
             return this.loadOrCreateClientIdFromLocalStorage();
