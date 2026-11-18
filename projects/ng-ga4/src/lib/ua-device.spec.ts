@@ -229,7 +229,9 @@ describe('deviceFromUserAgent', () => {
             ['a multi-word model intact', 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36', 'Pixel 8'],
             ['the token without Samsung Internet\'s maker prefix', 'Mozilla/5.0 (Linux; Android 13; SAMSUNG SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/23.0 Chrome/115.0.0.0 Mobile Safari/537.36', 'SM-S918B'],
             ['the token without the firmware build or WebView marker', 'Mozilla/5.0 (Linux; Android 10; SM-G975F Build/QP1A.190711.020; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.6099.230 Mobile Safari/537.36', 'SM-G975F'],
-            ['the token past a pre-KitKat locale', 'Mozilla/5.0 (Linux; U; Android 4.0.4; en-us; GT-I9300 Build/IMM76D) AppleWebKit/534.30 (KHTML, like Gecko) Version/4.0 Mobile Safari/534.30', 'GT-I9300']
+            ['the token past a pre-KitKat locale', 'Mozilla/5.0 (Linux; U; Android 4.0.4; en-us; GT-I9300 Build/IMM76D) AppleWebKit/534.30 (KHTML, like Gecko) Version/4.0 Mobile Safari/534.30', 'GT-I9300'],
+            ['a model with parentheses whole', 'Mozilla/5.0 (Linux; Android 11; moto g(30)) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.104 Mobile Safari/537.36', 'moto g(30)'],
+            ['the token past HarmonyOS', 'Mozilla/5.0 (Linux; Android 10; HarmonyOS; NOH-AN00; HMSCore 6.1.0.313) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.93 HuaweiBrowser/12.0.1.300 Mobile Safari/537.36', 'NOH-AN00']
         ];
         for (const [label, ua, model] of android) {
             it(`reports ${label} on Android, with no brand`, () => {
@@ -241,6 +243,7 @@ describe('deviceFromUserAgent', () => {
 
         const noModel: Array<[string, string]> = [
             ['the reduced-UA placeholder "K"', 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36'],
+            ['a bare build token', 'Mozilla/5.0 (Linux; Android 6.0; Build/MRA58K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.93 Mobile Safari/537.36'],
             ['Firefox on Android, which omits it', 'Mozilla/5.0 (Android 14; Mobile; rv:125.0) Gecko/125.0 Firefox/125.0'],
             ['Windows', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'],
             ['Linux', 'Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0']

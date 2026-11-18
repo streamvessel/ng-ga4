@@ -3325,21 +3325,28 @@ describe('NgGa4Service', () => {
                 });
             }
 
-            const UA_512 = 'Mozilla/5.0 ' + 'x'.repeat(500);
-            for (const [label, raw] of [['trims whitespace', `  ${UA_512}\n`], ['caps at 512 characters', UA_512 + 'y']]) {
-                it(`${label}, and parses the same string it sends`, async () => {
-                    spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
-                    spyOn<any>(service, 'getUserAgentString').and.returnValue(raw);
-                    const parse = spyOn<any>(service, 'fillDeviceGapsFromUserAgent').and.callThrough();
+            it('trims surrounding whitespace', async () => {
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(`  ${CHROME_WINDOWS}\n`);
 
-                    await service.init();
-                    service.trackEvent('x');
+                await service.init();
+                service.trackEvent('x');
 
-                    expect(parse).toHaveBeenCalled();
-                    expect((service as any).userAgent).toBe(UA_512);
-                    expect(takeBody().user_agent).toBe(UA_512);
-                });
-            }
+                expect(takeBody().user_agent).toBe(CHROME_WINDOWS);
+            });
+
+            it('caps the sent string at 512 characters but parses the whole one', async () => {
+                // In-app browsers append long app tokens; the browser token can sit past 512.
+                const ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' + 'x'.repeat(600) + ' Version/17.4 Safari/605.1.15';
+                spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(ua);
+
+                await service.init();
+                service.trackEvent('x');
+
+                const body = takeBody();
+                expect(body.user_agent).toBe(ua.slice(0, 512));
+                expect(body.device.browser).toBe('Safari');
+            });
 
             it('rides on events queued while init() is still collecting context', async () => {
                 let releaseHints!: () => void;

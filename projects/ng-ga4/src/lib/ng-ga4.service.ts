@@ -1365,8 +1365,9 @@ export class NgGa4Service implements OnDestroy {
     // --- Device & location context (request-level GA4 fields) ---
 
     private async collectContext(): Promise<void> {
-        // First: collectDevice() parses it.
-        this.userAgent = this.getUserAgentString()?.trim().slice(0, MAX_USER_AGENT_LENGTH) || null;
+        // The parser gets the whole string; only the field sent to GA4 is capped.
+        const ua = this.getUserAgentString()?.trim() || null;
+        this.userAgent = ua?.slice(0, MAX_USER_AGENT_LENGTH) ?? null;
         try {
             this.userLocation = this.collectUserLocation();
         } catch (err) {
@@ -1374,7 +1375,7 @@ export class NgGa4Service implements OnDestroy {
             this.userLocation = null;
         }
         try {
-            this.device = await this.collectDevice();
+            this.device = await this.collectDevice(ua);
         } catch (err) {
             console.warn('[ng-ga4] device collection failed', err);
             this.device = null;
@@ -1386,7 +1387,7 @@ export class NgGa4Service implements OnDestroy {
         return country ? { country_id: country, ...regionFromCountry(country) } : null;
     }
 
-    private async collectDevice(): Promise<Ga4Device | null> {
+    private async collectDevice(ua: string | null): Promise<Ga4Device | null> {
         if (typeof navigator === 'undefined') {
             return null;
         }
@@ -1431,16 +1432,16 @@ export class NgGa4Service implements OnDestroy {
         // Client Hints are authoritative where present; the UA string only fills gaps.
         // That covers both browsers with no userAgentData at all (Safari, Firefox) and
         // Chromium whose high-entropy hints were refused above.
-        this.fillDeviceGapsFromUserAgent(device);
+        this.fillDeviceGapsFromUserAgent(device, ua);
 
         return Object.keys(device).length ? device : null;
     }
 
-    private fillDeviceGapsFromUserAgent(device: Ga4Device): void {
-        if (!this.userAgent) {
+    private fillDeviceGapsFromUserAgent(device: Ga4Device, ua: string | null): void {
+        if (!ua) {
             return;
         }
-        const parsed = deviceFromUserAgent(this.userAgent, navigator.maxTouchPoints ?? 0);
+        const parsed = deviceFromUserAgent(ua, navigator.maxTouchPoints ?? 0);
         for (const key of Object.keys(parsed) as Array<keyof UaDeviceInfo>) {
             if (device[key] === undefined && parsed[key] !== undefined) {
                 device[key] = parsed[key];

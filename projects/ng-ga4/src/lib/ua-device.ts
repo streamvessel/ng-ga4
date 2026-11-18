@@ -109,7 +109,7 @@ export function deviceCategory(mobile: boolean, platform: string | undefined, fo
 
 // "K": since Chrome 110 every Android UA says "Android 10; K" whatever the device; the
 // real model is only in Client Hints.
-const NON_MODEL_ANDROID_TOKENS = /^(?:K|wv|Mobile|Tablet|rv:.*)$/;
+const NON_MODEL_ANDROID_TOKENS = /^(?:K|wv|Mobile|Tablet|HarmonyOS|HMSCore.*|rv:.*)$/;
 // Pre-KitKat locale ("en-us"). Lower-case only, so short model names survive.
 const LOCALE_TOKEN = /^[a-z]{2}(?:[-_][a-zA-Z]{2,4})?$/;
 
@@ -129,8 +129,9 @@ function detectHardware(ua: string, os: string | undefined, desktopModeIPad: boo
 }
 
 function androidModel(ua: string): string | undefined {
-    // e.g. "(Linux; Android 13; SAMSUNG SM-S918B Build/TP1A.220624.014; wv)"
-    const segment = /Android[^;)]*;([^)]*)\)/.exec(ua);
+    // e.g. "(Linux; Android 13; SAMSUNG SM-S918B Build/TP1A.220624.014; wv)". One level
+    // of nested parentheses is allowed for models like "moto g(30)".
+    const segment = /Android[^;)]*;((?:[^()]|\([^()]*\))*)\)/.exec(ua);
     if (!segment) {
         return undefined;
     }
