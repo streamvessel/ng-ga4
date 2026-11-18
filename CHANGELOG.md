@@ -44,7 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured `appVersion` instead of being silently overwritten. Every library
   default (`engagement_time_msec`, `session_id`, `session_number`, `app_version`)
   now follows the same rule: defaults first, caller wins
-  ([#31](https://github.com/streamvessel/ng-ga4/issues/31)).
+  ([#31](https://github.com/streamvessel/ng-ga4/issues/31)). A param passed as
+  `undefined` keeps the default instead of removing it from the event.
 - `engagementEventName` is validated against the same, fuller reserved-name
   list, and its warning now says which rule the name broke.
 - The README is now a short overview: the pitch, features, what you give up,
@@ -73,9 +74,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `(not set)`. Chrome reports these zones under older names than the ones the
   library knew, such as `America/Godthab` for Greenland and `America/Indianapolis`,
   plus Chile's new `America/Coyhaique`.
-
-### Fixed
-
 - Page views now default `page_title` to `document.title` when no title is passed,
   as `gtag.js` does, instead of leaving it unset — every automatic router page view
   used to show up as `(not set)` in GA4's Pages and screens report. The router

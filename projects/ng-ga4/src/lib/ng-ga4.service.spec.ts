@@ -3107,6 +3107,25 @@ describe('NgGa4Service', () => {
             expect(JSON.stringify((console.warn as jasmine.Spy).calls.allArgs())).not.toContain('top-secret-value');
         });
 
+        it('should stay silent in production builds without debug', async () => {
+            reconfigureTestBed({ measurementId: 'bogus', apiSecret: '' });
+            (service as any).warnOnInvalid = false;
+            await service.init();
+
+            expect(configWarnings()).toEqual([]);
+        });
+
+        it('should not throw on non-string measurementId or apiSecret from untyped config', async () => {
+            reconfigureTestBed({ measurementId: undefined as any, apiSecret: 12345 as any });
+            await service.init();
+
+            service.trackEvent('button_click');
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(new URL(req.request.url).searchParams.get('api_secret')).toBe('12345');
+            req.flush('', { status: 204, statusText: 'No Content' });
+            expect(configWarnings().length).toBe(1);
+        });
+
         it('should still send hits when the config looks malformed', async () => {
             reconfigureTestBed({ measurementId: 'UA-12345-1' });
             await service.init();
@@ -3203,6 +3222,20 @@ describe('NgGa4Service', () => {
             const params = req.request.body.events[0].params;
             expect(params.app_version).toBe('2.0.0-beta');
             expect(params.connection_type).toBe('S3');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('should keep library defaults when a caller param is undefined', async () => {
+            reconfigureTestBed({ appVersion: '1.0.4' });
+            await service.init();
+
+            service.trackEvent('button_click', { app_version: undefined, session_id: undefined, x: 1 });
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const params = req.request.body.events[0].params;
+            expect(params.app_version).toBe('1.0.4');
+            expect(params.session_id).toBeDefined();
+            expect(params.x).toBe(1);
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 

@@ -557,9 +557,11 @@ export class NgGa4Service implements OnDestroy {
             session_id: this.sessionId,
             session_number: this.sessionNumber,
             // Library defaults first, caller wins: like engagement_time_msec,
-            // a caller-supplied app_version replaces the configured one.
+            // a caller-supplied app_version replaces the configured one. An
+            // `undefined` value does not count as supplied — validateEventParams
+            // would drop the key, losing the default along with it.
             ...(this.config.appVersion ? { app_version: this.config.appVersion } : {}),
-            ...params
+            ...Object.fromEntries(Object.entries(params ?? {}).filter(([, value]) => value !== undefined))
         }, this.warnOnInvalid);
         if (this.warnOnInvalid) {
             const appOnly = appOnlyEventNameProblem(name);
@@ -672,10 +674,10 @@ export class NgGa4Service implements OnDestroy {
     }
 
     // Uppercase, as GA4 Admin shows it: Google doesn't document whether a
-    // lowercase ID reaches the same property. `?? ''` survives a JS caller
-    // that omits it, so init() can still warn instead of throwing.
+    // lowercase ID reaches the same property. String(... ?? '') survives a JS
+    // caller that omits it or passes a non-string, so nothing here can throw.
     private measurementId(): string {
-        return (this.config.measurementId ?? '').toUpperCase();
+        return String(this.config.measurementId ?? '').toUpperCase();
     }
 
     private sendForValidation(body: object): void {
@@ -1099,7 +1101,7 @@ export class NgGa4Service implements OnDestroy {
                 + `GA4 accepts hits for an unknown ID and records nothing.`
             );
         }
-        if (!this.config.apiSecret?.trim()) {
+        if (!String(this.config.apiSecret ?? '').trim()) {
             console.warn(
                 '[ng-ga4] apiSecret is empty. GA4 accepts hits without a valid secret and records nothing.'
             );
