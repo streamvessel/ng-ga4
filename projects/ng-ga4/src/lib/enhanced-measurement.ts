@@ -176,8 +176,11 @@ export class EnhancedMeasurement {
     }
 
     private onClick(event: MouseEvent, win: Window): void {
-        // auxclick also fires for right-click, which opens a context menu, not the link.
-        if (event.type === 'auxclick' && event.button !== 1) {
+        // Middle-click arrives as auxclick, never as click: some browsers also
+        // dispatched a document-level click for other buttons, which would count
+        // a middle-click twice. auxclick also fires for right-click, which opens a
+        // context menu, not the link. A keyboard-activated click reports button 0.
+        if (event.button !== (event.type === 'auxclick' ? 1 : 0)) {
             return;
         }
         const link = findLink(event);
@@ -236,8 +239,6 @@ export class EnhancedMeasurement {
     // ended. A pause and resume is the same view, so it doesn't count.
     private onVideoPlay(event: Event, win: Window): void {
         const video = event.target;
-        // Checked here only: a video that never starts is never tracked, so
-        // progress and completion need no check of their own.
         if (!(video instanceof HTMLVideoElement) || video.closest(VIDEO_IGNORE_SELECTOR)) {
             return;
         }
@@ -273,12 +274,17 @@ export class EnhancedMeasurement {
         }
     }
 
-    // A video already started and not yet ended; progress and completion only
-    // count for those.
+    // A video already started, not yet ended and not since marked ignored;
+    // progress and completion only count for those. The ignore check repeats
+    // here because an app can add the attribute after an autoplaying video has
+    // already fired play, e.g. once its component finishes rendering.
     private trackedVideo(event: Event): { video: HTMLVideoElement; state: VideoState } | null {
         const video = event.target;
-        const state = video instanceof HTMLVideoElement ? this.videos.get(video) : undefined;
-        return video instanceof HTMLVideoElement && state && !state.ended ? { video, state } : null;
+        if (!(video instanceof HTMLVideoElement) || video.closest(VIDEO_IGNORE_SELECTOR)) {
+            return null;
+        }
+        const state = this.videos.get(video);
+        return state && !state.ended ? { video, state } : null;
     }
 }
 

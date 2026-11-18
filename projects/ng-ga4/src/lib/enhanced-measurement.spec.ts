@@ -175,6 +175,11 @@ describe('EnhancedMeasurement', () => {
             expect(sent).toEqual([]);
         });
 
+        it('ignores a document-level click from a non-primary button', () => {
+            click(addLink('https://other.test/'), 'click', 1);
+            expect(sent).toEqual([]);
+        });
+
         it('counts middle-click but not right-click', () => {
             const a = addLink('https://other.test/');
             click(a, 'auxclick', 2);
@@ -546,6 +551,14 @@ describe('EnhancedMeasurement', () => {
             at(50);
             fire('ended');
             expect(sent).toEqual([]);
+        });
+
+        it('stops sending once a playing video is marked data-ng-ga4-ignore', () => {
+            fire('play');
+            video.setAttribute('data-ng-ga4-ignore', '');
+            at(50);
+            fire('ended');
+            expect(sent.map(e => e.name)).toEqual(['video_start']);
         });
 
         it('ignores <audio>', () => {

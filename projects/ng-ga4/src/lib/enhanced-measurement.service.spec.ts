@@ -88,6 +88,29 @@ describe('NgGa4Service enhanced measurement wiring', () => {
         expect(sentEvents().map(e => e.name)).toEqual(['page_view', 'view_search_results']);
     });
 
+    it('sends form and video events with the session and the last reported page', async () => {
+        configure({ siteUrl: 'https://www.mysite.test', enhancedMeasurement: { forms: true, video: true } });
+        await service.init();
+        service.trackPageView('/checkout');
+
+        const form = document.createElement('form');
+        const input = document.createElement('input');
+        form.appendChild(input);
+        fixture.appendChild(form);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+
+        const video = document.createElement('video');
+        fixture.appendChild(video);
+        video.dispatchEvent(new Event('play'));
+
+        const [pageView, formStart, videoStart] = sentEvents();
+        expect([pageView.name, formStart.name, videoStart.name]).toEqual(['page_view', 'form_start', 'video_start']);
+        for (const event of [formStart, videoStart]) {
+            expect(event.params['page_location']).toBe('https://www.mysite.test/checkout');
+            expect(event.params['session_id']).toBe(pageView.params['session_id']);
+        }
+    });
+
     it('sends outbound clicks, treating the siteUrl host as internal', async () => {
         configure({ siteUrl: 'https://www.mysite.test', enhancedMeasurement: { outboundClicks: true } });
         await service.init();
