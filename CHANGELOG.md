@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A caller-supplied `app_version` in `trackEvent()` params now replaces the
+  configured `appVersion` instead of being silently overwritten. Every library
+  default (`engagement_time_msec`, `session_id`, `session_number`, `app_version`)
+  now follows the same rule: defaults first, caller wins
+  ([#31](https://github.com/streamvessel/ng-ga4/issues/31)). A param passed as
+  `undefined` keeps the default instead of removing it from the event.
 - `engagementEventName` is validated against the same, fuller reserved-name
   list, and its warning now says which rule the name broke.
 - The README is now a short overview: the pitch, features, what you give up,
@@ -61,14 +67,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts from the user's last visit, as gtag.js's does. Before, it lapsed two years
   after it was first written, however active the user was. A `_ga` adopted from
   gtag.js is still never written back ([#40](https://github.com/streamvessel/ng-ga4/issues/40)).
-
+- `measurement_id` and `api_secret` are URL-encoded in the collect URL, so a
+  secret containing `&`, `#`, `+` or similar no longer corrupts the request.
+- `measurementId` is uppercased before sending, so `g-abc123` is sent as
+  `G-ABC123`, the form GA4 shows in Admin → Data Streams.
+- In dev mode (and whenever `debug` is on), `init()` logs a warning when the
+  uppercased `measurementId` does not look like `G-` followed by letters and
+  digits, or when `apiSecret` is empty. GA4 answers both with a normal 2xx and
+  records nothing. Hits are still sent.
 - Visitors in 13 time zones sent no `user_location`, so GA4 showed their country as
   `(not set)`. Chrome reports these zones under older names than the ones the
   library knew, such as `America/Godthab` for Greenland and `America/Indianapolis`,
   plus Chile's new `America/Coyhaique`.
-
-### Fixed
-
 - Page views now default `page_title` to `document.title` when no title is passed,
   as `gtag.js` does, instead of leaving it unset — every automatic router page view
   used to show up as `(not set)` in GA4's Pages and screens report. The router
