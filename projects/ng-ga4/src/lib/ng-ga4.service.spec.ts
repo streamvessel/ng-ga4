@@ -4283,6 +4283,22 @@ describe('NgGa4Service', () => {
             req.flush({});
         });
 
+        it('sends addresses and pre-hashed values', async () => {
+            await service.init();
+            await service.setUserData({
+                sha256EmailAddress: JOHNSMITH_GMAIL,
+                address: { lastName: 'Doe', country: 'US' }
+            });
+            service.trackEvent('purchase');
+
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(req.request.body['user_data']).toEqual({
+                sha256_email_address: [JOHNSMITH_GMAIL],
+                address: [{ sha256_last_name: '799ef92a11af918e3fb741df42934f3b568ed2d93ac1df74f1b8d41a27932a6f', country: 'US' }]
+            });
+            req.flush({});
+        });
+
         it('stops sending after setUserData(null)', async () => {
             await service.init();
             await service.setUserData({ email: 'a@x.com' });

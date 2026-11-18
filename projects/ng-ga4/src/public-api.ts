@@ -1,6 +1,6 @@
 export { NgGa4Config, NgGa4CookieOptions, NG_GA4_CONFIG } from './lib/ng-ga4.config';
 export { NgGa4Consent, NgGa4ConsentState } from './lib/consent';
-export { NgGa4UserData } from './lib/user-data';
+export { NgGa4UserAddress, NgGa4UserData } from './lib/user-data';
 export { NgGa4EnhancedMeasurement } from './lib/enhanced-measurement';
 export { NgGa4UserPropertyValue } from './lib/user-properties';
 export { NgGa4Service } from './lib/ng-ga4.service';

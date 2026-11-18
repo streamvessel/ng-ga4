@@ -264,7 +264,7 @@ export class NgGa4Service implements OnDestroy {
     }
 
     /**
-     * Attach user-provided data (email / phone) for Google Ads enhanced
+     * Attach user-provided data (email, phone, address) for Google Ads enhanced
      * conversions to every following hit, or clear it with `null`. Strictly
      * opt-in: the library never collects these itself. Values are normalised and
      * SHA-256 hashed in memory; the raw values are not kept and nothing is

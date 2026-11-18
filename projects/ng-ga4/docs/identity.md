@@ -69,14 +69,44 @@ Two things are needed before anything is sent and used:
 
 ```typescript
 // After the user signs in, with data you already hold:
-await this.analytics.setUserData({ email: user.email, phone: user.phone }); // phone in E.164, e.g. '+15555555555'
+await this.analytics.setUserData({
+    email: user.email,
+    phone: user.phone, // E.164, e.g. '+15555555555'
+    address: {
+        firstName: user.firstName,
+        lastName: user.lastName,
+        street: user.street,
+        city: user.city,
+        region: user.region,
+        postalCode: user.postalCode,
+        country: user.country, // ISO 3166-1 alpha-2, e.g. 'US'
+    },
+});
+
+// Or with values you have already normalised and hashed on your server:
+await this.analytics.setUserData({ sha256EmailAddress: user.emailHash });
 
 // On sign-out:
 await this.analytics.setUserData(null);
 ```
 
-- Values are normalised the way Google requires and SHA-256 hashed in the browser. Emails are lowercased, spaces are removed, and dots before the `@` are dropped for `gmail.com` and `googlemail.com`. Phones keep only their digits, with `+` added in front. Only the hex digests go into the request, as `user_data.sha256_email_address` and `user_data.sha256_phone_number`. Each takes up to 3 values; more are cut with a warning.
-- Include the country code in phone numbers (a leading `00` is accepted in place of `+`). The library can't guess it, and a number without one never matches. Values that aren't email addresses (no `@`) are skipped.
+Fields and how each is sent:
+
+| Field | Sent as | Normalised before hashing |
+|---|---|---|
+| `email` | `sha256_email_address` | lowercased, spaces removed, dots before the `@` dropped for `gmail.com` and `googlemail.com`; values without an `@` and a domain are skipped |
+| `phone` | `sha256_phone_number` | digits only, with `+` in front; a leading `00` is accepted in place of `+` |
+| `address.firstName`, `address.lastName` | `sha256_first_name`, `sha256_last_name` | digits and symbols removed, lowercased, trimmed |
+| `address.street` | `sha256_street` | symbols removed, lowercased, trimmed |
+| `address.city`, `address.region` | `city`, `region`, **not hashed** | digits and symbols removed, lowercased, trimmed |
+| `address.postalCode` | `postal_code`, **not hashed** | `.` and `~` removed, trimmed |
+| `address.country` | `country`, **not hashed** | must be a two-letter code; sent uppercased, anything else is dropped |
+
+- Raw values are SHA-256 hashed in the browser, and only the hex digests of email, phone, name and street go into the request. City, region, postal code and country go as they are, because the Measurement Protocol expects them that way.
+- Up to 3 emails, 3 phones and 2 addresses; more are cut with a warning. Empty values and duplicates are skipped.
+- Include the country code in phone numbers. The library can't guess it, and a number without one never matches.
+- For an address to be useful for matching, Google Ads asks for at least first name, last name, postal code and country.
+- **Already hashed:** `sha256EmailAddress`, `sha256PhoneNumber`, and `sha256FirstName`, `sha256LastName` and `sha256Street` on an address take hex SHA-256 digests you computed yourself, after applying the same normalisation. They are sent as they are, together with any raw values (counting towards the same limits); on an address, a digest wins over the raw value for the same field. A value that isn't a 64-character hex digest is dropped with a warning that doesn't include it, so a raw address passed by mistake never goes out.
 - Google recommends sending a [user ID](#user-id) alongside it.
 - Nothing is stored, unlike the user ID. The hashes live in memory only, so call `setUserData()` again on every start-up and in every tab or extension context.
 - Hits sent before the returned promise resolves go without `user_data`, including while replacing earlier data, so one user's hashes never go out on another user's hits.
@@ -84,7 +114,7 @@ await this.analytics.setUserData(null);
 - With `debug: true`, the copy posted to the validation endpoint carries the same hashes.
 - It needs `crypto.subtle`, which only exists in a secure context (HTTPS or `localhost`). Elsewhere the call does nothing and logs a warning; raw values are never sent. The returned promise never rejects.
 
-**Your obligations.** A hashed email address is still personal data. Before you send it you must:
+**Your obligations.** A hashed email address is still personal data, and city, region and postal code go unhashed. Before you send it you must:
 
 - have the user's consent to share it with Google for advertising (the `adUserData: 'granted'` the library requires should reflect a real choice, not a default);
 - disclose it in your privacy policy;

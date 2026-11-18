@@ -10,9 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `setUserData()` sends user-provided data (`user_data`) for Google Ads enhanced
-  conversions. It is opt-in only and never collected automatically. Email and phone
-  are normalised and SHA-256 hashed in the browser; only the digests are sent, and
-  they are kept in memory only. They are only sent while `adUserData` consent is
+  conversions. It is opt-in only and never collected automatically. Email, phone and
+  up to 2 addresses are normalised and SHA-256 hashed in the browser (city, region,
+  postal code and country go unhashed, as the Measurement Protocol expects), or
+  you can pass digests you computed yourself. They are kept in memory only. They are only sent while `adUserData` consent is
   granted, and the GA4 property must have user-provided data collection turned on.
   See [User-provided data](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-provided-data)
   for setup and the privacy obligations.
