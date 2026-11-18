@@ -1025,12 +1025,20 @@ export class NgGa4Service implements OnDestroy {
             // the next write, so on failure only these belong to this one —
             // or, if it failed before taking any, everything still waiting.
             let taken: typeof this.outboxAppends | null = null;
+            let allowed = true;
             this.updateOutbox(stored => {
                 taken = this.outboxAppends.splice(0);
+                // Rechecked here, when the write finally runs: consent withdrawn
+                // since the request failed has already removed the outbox, and
+                // this write must not recreate it with the client ID in it.
+                allowed = this.consent.storageAllowed;
+                if (!allowed) {
+                    return { next: stored };
+                }
                 this.outboxMayHaveItems = true;
                 return { next: [...stored, ...taken.map(append => append.body)] };
             }).then(
-                () => taken?.forEach(append => append.settle('stored')),
+                () => taken?.forEach(append => append.settle(allowed ? 'stored' : 'failed')),
                 // enqueueStorageWrite has already logged the failure.
                 () => (taken ?? this.outboxAppends.splice(0)).forEach(append => append.settle('failed'))
             );
@@ -1049,6 +1057,11 @@ export class NgGa4Service implements OnDestroy {
         let pending: Ga4RequestBody[];
         try {
             ({ result: pending } = await this.updateOutbox(stored => {
+                // Rechecked here, after the wait for storage: setEnabled(false)
+                // in the meantime leaves the backlog stored for a later drain.
+                if (!this.enabled) {
+                    return { next: stored, result: [] };
+                }
                 this.outboxMayHaveItems = false;
                 return { next: [], result: stored };
             }));

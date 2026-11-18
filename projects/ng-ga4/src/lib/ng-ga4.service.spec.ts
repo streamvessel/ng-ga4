@@ -4633,6 +4633,38 @@ describe('NgGa4Service', () => {
             expect(mockLocalStorage['ga_outbox']).toBeUndefined();
         });
 
+        // The write runs later on the storage chain than the failure that
+        // queued it; consent can be withdrawn in between.
+        it('does not recreate the outbox when consent is withdrawn before the write runs', async () => {
+            await initAndDrain();
+            const result = service.trackEvent('x');
+            failOffline(httpMock.expectOne(isCollect));
+            // Synchronously after the failure, before the chained write's turn.
+            service.setConsent({ analyticsStorage: 'denied' });
+
+            expect(await result.delivered).toBe('failed');
+            await service.flushStorage();
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+        });
+
+        it('keeps the backlog when collection is disabled while the drain waits for storage', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const chromeLocal: Record<string, any> = { ga_client_id: 'ext-cid' };
+            setupChromeMock(chromeLocal);
+            await service.init();
+            await service.flush();
+            chromeLocal['ga_outbox'] = [storedBody(['backlog'], HOUR_MS)];
+
+            // The drain's read is queued on the storage chain; the switch is
+            // turned off before that read gets its turn.
+            window.dispatchEvent(new Event('online'));
+            service.setEnabled(false);
+            await service.flush();
+
+            httpMock.expectNone(isCollect);
+            expect(chromeLocal['ga_outbox'][0].events[0].name).toBe('backlog');
+        });
+
         it('costs no storage write on init() when empty', async () => {
             await initAndDrain();
 
