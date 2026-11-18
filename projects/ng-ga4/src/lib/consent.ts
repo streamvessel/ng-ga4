@@ -2,8 +2,8 @@
 //
 // Note the asymmetry, which the whole design turns on: `adUserData` and
 // `adPersonalization` are *declarative* — we put them in the request body and GA4
-// acts on them. (The one local effect: a denied `adUserData` also withholds
-// `user_data`, see userDataAllowed.) `analyticsStorage` is never sent anywhere; it governs whether
+// acts on them. (The one local effect: `user_data` is only sent once `adUserData`
+// is granted, see userDataAllowed.) `analyticsStorage` is never sent anywhere; it governs whether
 // *we* are allowed to persist identifiers locally. gtag.js treats all three as
 // one concept because it owns both sides; we only own one.
 //
@@ -49,11 +49,12 @@ export class ConsentState {
     }
 
     /**
-     * Whether `user_data` may be sent. Like storageAllowed, only an explicit
-     * denial blocks it: the data is already opt-in via setUserData().
+     * Whether `user_data` may be sent. Unlike storageAllowed this needs an
+     * explicit grant: the hashes are personal data shared for advertising, and
+     * Google Ads only processes them when `ad_user_data` is granted.
      */
     get userDataAllowed(): boolean {
-        return this.state.adUserData !== 'denied';
+        return this.state.adUserData === 'granted';
     }
 
     merge(partial: NgGa4Consent): void {

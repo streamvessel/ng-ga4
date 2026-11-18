@@ -672,7 +672,8 @@ export class NgGa4Service implements OnDestroy {
         if (consentPayload) {
             body.consent = consentPayload;
         }
-        // Withheld, not just flagged: the hashes are personal data.
+        // Withheld, not just flagged, until ad_user_data is granted: the hashes are
+        // personal data.
         if (this.userData && this.consent.userDataAllowed) {
             body.user_data = this.userData;
         }

@@ -60,7 +60,12 @@ this.analytics.setUserProperties(null);             // remove all
 
 ## User-provided data
 
-Off unless you call `setUserData()`. The library never reads an email address or phone number on its own. Use this only if you import GA4 conversions into Google Ads and want [enhanced conversions](https://developers.google.com/analytics/devguides/collection/ga4/uid-data).
+Off unless you call `setUserData()`. The library never reads an email address or phone number on its own, and never detects one on the page the way `gtag.js`'s automatic collection can. Google uses the hashes for [enhanced conversions](https://developers.google.com/analytics/devguides/collection/ga4/uid-data) in Google Ads, and GA4 uses them for conversion modelling and other "enhanced Analytics capabilities".
+
+Two things are needed before anything is sent and used:
+
+- **In GA4:** link the property to Google Ads, then turn on **Admin → Data collection → User-provided data collection** and accept the policy. Without that, GA4 drops the data. It isn't available for properties in the Health industry category, and Google still calls the feature a beta. See [Google's setup guide](https://support.google.com/analytics/answer/14077171).
+- **In your app:** grant `adUserData` consent, through the `consent` option or `setConsent({ adUserData: 'granted' })`. Until it is granted, `user_data` is held back. That includes when you never set consent at all.
 
 ```typescript
 // After the user signs in, with data you already hold:
@@ -75,13 +80,13 @@ await this.analytics.setUserData(null);
 - Google recommends sending a [user ID](#user-id) alongside it.
 - Nothing is stored, unlike the user ID. The hashes live in memory only, so call `setUserData()` again on every start-up and in every tab or extension context.
 - Hits sent before the returned promise resolves go without `user_data`, including while replacing earlier data, so one user's hashes never go out on another user's hits.
-- `user_data` is left out while `adUserData` consent is `'denied'` (see [Consent](consent.md)), and it comes back once consent is granted.
+- `user_data` goes out only while `adUserData` is `'granted'` (see [Consent](consent.md)). Data set before consent is granted is kept in memory and sent once it is. Denying consent again holds it back from the next hit on.
 - With `debug: true`, the copy posted to the validation endpoint carries the same hashes.
 - It needs `crypto.subtle`, which only exists in a secure context (HTTPS or `localhost`). Elsewhere the call does nothing and logs a warning; raw values are never sent. The returned promise never rejects.
 
 **Your obligations.** A hashed email address is still personal data. Before you send it you must:
 
-- have the user's consent to share it with Google for advertising, and send `adUserData: 'granted'` to match;
+- have the user's consent to share it with Google for advertising (the `adUserData: 'granted'` the library requires should reflect a real choice, not a default);
 - disclose it in your privacy policy;
 - follow Google's [customer data policies](https://support.google.com/adspolicy/answer/7475709) and, in the EEA/UK, the [EU user consent policy](https://www.google.com/about/company/user-consent-policy/).
 

@@ -4255,6 +4255,10 @@ describe('NgGa4Service', () => {
         const JOHNSMITH_GMAIL = '3586de92bb3636d0885a12eff961429a32e4ebd764b96f50d85d016f9338d586';
         const PHONE_US = '910a625c4ba147b544e6bd2f267e130ae14c591b6ba9c25cb8573322dedbebd0';
 
+        beforeEach(() => {
+            reconfigureTestBed({ consent: { adUserData: 'granted' } });
+        });
+
         it('is never sent unless the app calls setUserData()', async () => {
             await service.init();
             service.trackEvent('test_event');
@@ -4302,17 +4306,21 @@ describe('NgGa4Service', () => {
             req.flush({});
         });
 
-        it('is withheld while ad_user_data consent is denied', async () => {
+        it('is withheld until ad_user_data consent is explicitly granted', async () => {
+            reconfigureTestBed();
             await service.init();
             await service.setUserData({ email: 'a@x.com' });
+            service.trackEvent('unset');
             service.setConsent({ adUserData: 'denied' });
             service.trackEvent('denied');
             service.setConsent({ adUserData: 'granted' });
             service.trackEvent('granted');
 
-            const [denied, granted] = httpMock.match(r => r.url.includes('/mp/collect'));
+            const [unset, denied, granted] = httpMock.match(r => r.url.includes('/mp/collect'));
+            expect(unset.request.body['user_data']).toBeUndefined();
             expect(denied.request.body['user_data']).toBeUndefined();
             expect(granted.request.body['user_data']).toBeDefined();
+            unset.flush({});
             denied.flush({});
             granted.flush({});
         });
