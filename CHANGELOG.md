@@ -19,8 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `measurement_id` and `api_secret` are URL-encoded in the collect URL, so a
   secret containing `&`, `#`, `+` or similar no longer corrupts the request.
+- `measurementId` is uppercased before sending, so `g-abc123` is sent as
+  `G-ABC123`, the form GA4 shows in Admin → Data Streams.
 - In dev mode (and whenever `debug` is on), `init()` logs a one-time warning when
-  `measurementId` does not look like `G-` followed by letters and digits, or when
+  `measurementId` (after uppercasing) does not look like `G-` followed by letters and digits, or when
   `apiSecret` is empty. GA4 answers both with a normal 2xx and records nothing.
   Hits are still sent.
 

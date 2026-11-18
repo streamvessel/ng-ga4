@@ -1923,6 +1923,29 @@ describe('NgGa4Service', () => {
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
+        it('should uppercase measurement_id on the collect URL', async () => {
+            reconfigureTestBed({ measurementId: 'g-abc123xyz9' });
+            await service.init();
+
+            service.trackPageView('/test');
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(new URL(req.request.url).searchParams.get('measurement_id')).toBe('G-ABC123XYZ9');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('should uppercase measurement_id on the debug validation URL', async () => {
+            reconfigureTestBed({ measurementId: 'g-abc123xyz9', debug: true });
+            await service.init();
+
+            service.trackPageView('/test');
+            const debugReq = httpMock.expectOne((r) => r.url.includes('/debug/mp/collect'));
+            expect(new URL(debugReq.request.url).searchParams.get('measurement_id')).toBe('G-ABC123XYZ9');
+            debugReq.flush({ validationMessages: [] });
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect') && !r.url.includes('/debug/'));
+            expect(new URL(req.request.url).searchParams.get('measurement_id')).toBe('G-ABC123XYZ9');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
         it('should URL-encode measurement_id and api_secret', async () => {
             reconfigureTestBed({ apiSecret: 'a&b=c d+/?#%', measurementId: 'G-TEST123' });
             await service.init();
@@ -2589,7 +2612,7 @@ describe('NgGa4Service', () => {
             expect(configWarnings()).toEqual([]);
         });
 
-        for (const bad of ['UA-12345-1', 'g-abc123', 'G-', ' G-ABC123', 'G-ABC123 ', '123456789', '']) {
+        for (const bad of ['UA-12345-1', 'G-', 'g-', 'g_abc123', ' G-ABC123', 'G-ABC123 ', '123456789', '']) {
             it(`should warn once for measurementId ${JSON.stringify(bad)}`, async () => {
                 reconfigureTestBed({ measurementId: bad });
                 await service.init();
@@ -2618,6 +2641,13 @@ describe('NgGa4Service', () => {
             await service.init();
 
             expect(JSON.stringify((console.warn as jasmine.Spy).calls.allArgs())).not.toContain('top-secret-value');
+        });
+
+        it('should not warn for a lowercase measurementId, since it is sent uppercased', async () => {
+            reconfigureTestBed({ measurementId: 'g-abc123xyz9' });
+            await service.init();
+
+            expect(configWarnings()).toEqual([]);
         });
 
         it('should still send hits when the config looks malformed', async () => {

@@ -523,8 +523,16 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private collectUrl(endpoint: string): string {
-        return `${endpoint}?measurement_id=${encodeURIComponent(this.config.measurementId)}`
+        return `${endpoint}?measurement_id=${encodeURIComponent(this.measurementId())}`
             + `&api_secret=${encodeURIComponent(this.config.apiSecret)}`;
+    }
+
+    // Uppercased on every use: Measurement IDs are shown in uppercase in the GA4
+    // admin, Google does not say whether a lowercase one reaches the same
+    // property, and a hit for an unknown ID is silently dropped.
+    private measurementId(): string {
+        const id = this.config.measurementId;
+        return typeof id === 'string' ? id.toUpperCase() : id;
     }
 
     private sendForValidation(body: object): void {
@@ -947,7 +955,9 @@ export class NgGa4Service implements OnDestroy {
             return;
         }
         const { measurementId, apiSecret } = this.config;
-        if (typeof measurementId !== 'string' || !/^G-[A-Z0-9]+$/.test(measurementId)) {
+        // Checked after uppercasing, since that is what gets sent: a lowercase
+        // ID is fixed silently rather than warned about.
+        if (typeof measurementId !== 'string' || !/^G-[A-Z0-9]+$/.test(this.measurementId())) {
             console.warn(
                 `[ng-ga4] measurementId "${measurementId}" does not look like a GA4 Measurement ID `
                 + `(expected "G-" followed by letters and digits, e.g. "G-XXXXXXXXXX"). `
