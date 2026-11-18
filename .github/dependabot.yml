@@ -15,6 +15,17 @@ updates:
           - "eslint*"
           - "@typescript-eslint/*"
           - "@angular-eslint/*"
+    # Major Angular and ESLint upgrades wait on the supported-range
+    # decision in #91. Remove these rules when that lands.
+    ignore:
+      - dependency-name: "@angular*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "ng-packagr"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "eslint*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@typescript-eslint/*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"
