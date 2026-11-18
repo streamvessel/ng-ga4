@@ -113,4 +113,4 @@ await this.analytics.setUserData(null);
 - have the user's consent to share it with Google for advertising, and set `adUserData` from that choice, not a default;
 - disclose it in your privacy policy;
 - follow Google's [customer data policies](https://support.google.com/adspolicy/answer/7475709) and, in the EEA/UK, the [EU user consent policy](https://www.google.com/about/company/user-consent-policy/);
-- clear it when the user signs out or withdraws consent: `setUserId(null)` and a denial do that for you, otherwise call `setUserData(null)`.
+- clear it with `setUserData(null)` when the user signs out or withdraws consent, unless `setUserId(null)` or a denial already did.

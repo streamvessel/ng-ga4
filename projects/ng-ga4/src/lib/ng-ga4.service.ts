@@ -259,10 +259,11 @@ export class NgGa4Service implements OnDestroy {
         const wasAllowed = this.consent.storageAllowed;
         this.consent.merge(consent);
         const isAllowed = this.consent.storageAllowed;
-        if ((consent.adUserData !== undefined && !this.consent.userDataAllowed) || !isAllowed) {
+        if (consent.adUserData !== undefined && !this.consent.userDataAllowed) {
             this.clearUserData();
         }
         if (wasAllowed && !isAllowed) {
+            this.clearUserData();
             this.clearPersistedIdentity();
             return;
         }
