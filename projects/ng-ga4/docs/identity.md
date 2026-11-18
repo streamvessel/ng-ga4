@@ -65,7 +65,7 @@ Off unless you call `setUserData()`; nothing is collected automatically. Google 
 Two things are needed before anything is sent and used:
 
 - **In GA4:** link the property to Google Ads, then turn on **Admin → Data collection → User-provided data collection** and accept the policy. Without that, GA4 drops the data. It isn't available for properties in the Health industry category. See [Google's setup guide](https://support.google.com/analytics/answer/14077171).
-- **In your app:** grant `adUserData` consent, through the `consent` option or `setConsent({ adUserData: 'granted' })`. Until then, including when consent is never set, `user_data` is not sent. Data set before the grant goes out once it comes; denying again stops it from the next hit.
+- **In your app:** grant `adUserData` consent, through the `consent` option or `setConsent({ adUserData: 'granted' })`. Until then, including when consent is never set, `user_data` is not sent. Data set before the grant goes out once it comes.
 
 ```typescript
 // After the user signs in, with data you already hold:
@@ -104,6 +104,7 @@ await this.analytics.setUserData(null);
 - **Already hashed:** `sha256EmailAddress`, `sha256PhoneNumber`, and `sha256FirstName`, `sha256LastName` and `sha256Street` on an address take hex SHA-256 digests of the normalised value and replace their raw counterparts. Any 64-character hex value is sent as-is; anything else is normalised and hashed, so raw data is never sent unhashed.
 - Google recommends sending a [user ID](#user-id) alongside it.
 - Kept in memory only: call it again on every start-up and in every tab or extension context.
+- Cleared automatically on sign-out or a switch to another user ID (`setUserId()`), and when a granted `adUserData` or `analyticsStorage` is withdrawn; call `setUserData()` again after a new grant.
 - Hits sent before the returned promise resolves go without `user_data`, even when replacing earlier data.
 - Needs `crypto.subtle` (HTTPS or `localhost`); elsewhere it logs a warning and sends nothing. The promise never rejects.
 
@@ -112,4 +113,4 @@ await this.analytics.setUserData(null);
 - have the user's consent to share it with Google for advertising, and set `adUserData` from that choice, not a default;
 - disclose it in your privacy policy;
 - follow Google's [customer data policies](https://support.google.com/adspolicy/answer/7475709) and, in the EEA/UK, the [EU user consent policy](https://www.google.com/about/company/user-consent-policy/);
-- clear it with `setUserData(null)` when the user signs out or withdraws consent.
+- clear it with `setUserData(null)` when the user signs out or withdraws consent, unless `setUserId()` or a withdrawal already did.

@@ -23,9 +23,9 @@ Events fired while disabled are dropped, not queued, so the first page view befo
 
 | Signal | Sent to GA4 | Effect |
 |---|---|---|
-| `adUserData` | as `consent.ad_user_data` | GA4 acts on it; [user-provided data](identity.md#user-provided-data) is only sent while it is `'granted'` |
+| `adUserData` | as `consent.ad_user_data` | GA4 acts on it; [user-provided data](identity.md#user-provided-data) is only sent while it is `'granted'`, and withdrawing it clears that data |
 | `adPersonalization` | as `consent.ad_personalization` | GA4 acts on it |
-| `analyticsStorage` | no | Whether this library stores identifiers |
+| `analyticsStorage` | no | Whether this library stores identifiers; withdrawing it also clears [user-provided data](identity.md#user-provided-data) |
 
 Denying `analyticsStorage` stops every write to `localStorage`, `chrome.storage` and `_ga`, and deletes what is already stored (the user ID too), also on a start-up that begins denied. Collection continues with an ID held in memory, so each page load is a new user and session. Under [`'storage'`](identity.md#client-id-and-gtagjs) the cookie is left alone; where `gtag.js` also runs, it writes `_ga` again on its next hit.
 
