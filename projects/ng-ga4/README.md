@@ -88,8 +88,8 @@ bootstrapApplication(AppComponent, {
 
 **Required**
 
-- `measurementId` (`string`): GA4 Measurement ID, e.g. `G-XXXXXXXXX`.
-- `apiSecret` (`string`): Measurement Protocol API secret.
+- `measurementId` (`string`): GA4 Measurement ID, e.g. `G-XXXXXXXXX`. It is uppercased before sending. In dev mode or with `debug` on, an ID that isn't `G-` followed by letters and digits logs a warning, since GA4 accepts hits for it and records nothing.
+- `apiSecret` (`string`): Measurement Protocol API secret. An empty one logs the same warning.
 - `enabled` (`boolean`): whether collection starts on. `false` creates no client ID and writes nothing until `setEnabled(true)`. See [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md).
 - `isExtension` (`boolean`): `true` in a Chrome extension, so state goes to `chrome.storage` instead of `localStorage`.
 

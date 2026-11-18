@@ -2059,6 +2059,33 @@ describe('NgGa4Service', () => {
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
+        it('should uppercase measurement_id on both the collect and debug validation URLs', async () => {
+            reconfigureTestBed({ measurementId: 'g-abc123xyz9', debug: true });
+            await service.init();
+
+            service.trackPageView('/test');
+            const debugReq = httpMock.expectOne((r) => r.url.includes('/debug/mp/collect'));
+            expect(new URL(debugReq.request.url).searchParams.get('measurement_id')).toBe('G-ABC123XYZ9');
+            debugReq.flush({ validationMessages: [] });
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect') && !r.url.includes('/debug/'));
+            expect(new URL(req.request.url).searchParams.get('measurement_id')).toBe('G-ABC123XYZ9');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('should URL-encode measurement_id and api_secret', async () => {
+            reconfigureTestBed({ apiSecret: 'a&b=c d+/?#%', measurementId: 'G-TEST123' });
+            await service.init();
+
+            service.trackPageView('/test');
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const url = new URL(req.request.url);
+            expect(url.searchParams.get('api_secret')).toBe('a&b=c d+/?#%');
+            expect(url.searchParams.get('measurement_id')).toBe('G-TEST123');
+            expect(url.hash).toBe('');
+            expect(req.request.url).toContain('api_secret=a%26b%3Dc%20d%2B%2F%3F%23%25');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
         it('should not track when disabled', () => {
             reconfigureTestBed({ enabled: false });
 
@@ -3116,6 +3143,100 @@ describe('NgGa4Service', () => {
         });
     });
 
+    // --- config shape warnings ---
+
+    describe('config shape warnings', () => {
+        function configWarnings(): string[] {
+            return (console.warn as jasmine.Spy).calls.allArgs()
+                .map(args => String(args[0]))
+                .filter(msg => msg.includes('measurementId') || msg.includes('apiSecret'));
+        }
+
+        beforeEach(() => {
+            spyOn(console, 'warn');
+        });
+
+        // Lowercase is fine: it is uppercased before sending.
+        for (const good of ['G-ABC123XYZ9', 'g-abc123xyz9']) {
+            it(`should not warn for measurementId ${JSON.stringify(good)}`, async () => {
+                reconfigureTestBed({ measurementId: good, apiSecret: 'secret' });
+                await service.init();
+
+                expect(configWarnings()).toEqual([]);
+            });
+        }
+
+        for (const bad of ['UA-12345-1', 'G-', 'g-', 'g_abc123', ' G-ABC123', 'G-ABC123 ', '123456789', '']) {
+            it(`should warn once for measurementId ${JSON.stringify(bad)}`, async () => {
+                reconfigureTestBed({ measurementId: bad });
+                await service.init();
+                await service.init();
+
+                const warnings = configWarnings();
+                expect(warnings.length).toBe(1);
+                expect(warnings[0]).toContain('measurementId');
+                expect(warnings[0]).toContain(`"${bad}"`);
+            });
+        }
+
+        for (const bad of ['', '   ']) {
+            it(`should warn for apiSecret ${JSON.stringify(bad)} without echoing it`, async () => {
+                reconfigureTestBed({ apiSecret: bad });
+                await service.init();
+
+                const warnings = configWarnings();
+                expect(warnings.length).toBe(1);
+                expect(warnings[0]).toContain('apiSecret is empty');
+            });
+        }
+
+        it('should never include the apiSecret value in a warning', async () => {
+            reconfigureTestBed({ measurementId: 'bogus', apiSecret: 'top-secret-value' });
+            await service.init();
+
+            expect(JSON.stringify((console.warn as jasmine.Spy).calls.allArgs())).not.toContain('top-secret-value');
+        });
+
+        it('should stay silent in production builds without debug', async () => {
+            reconfigureTestBed({ measurementId: 'bogus', apiSecret: '' });
+            (service as any).warnOnInvalid = false;
+            await service.init();
+
+            expect(configWarnings()).toEqual([]);
+        });
+
+        it('should not throw on non-string measurementId or apiSecret from untyped config', async () => {
+            reconfigureTestBed({ measurementId: undefined as any, apiSecret: 12345 as any });
+            await service.init();
+
+            service.trackEvent('button_click');
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(new URL(req.request.url).searchParams.get('api_secret')).toBe('12345');
+            req.flush('', { status: 204, statusText: 'No Content' });
+            expect(configWarnings().length).toBe(1);
+        });
+
+        it('should still send hits when the config looks malformed', async () => {
+            reconfigureTestBed({ measurementId: 'UA-12345-1' });
+            await service.init();
+
+            service.trackEvent('button_click');
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.url).toContain('measurement_id=UA-12345-1');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('should not warn until a disabled service is enabled', async () => {
+            reconfigureTestBed({ enabled: false, measurementId: 'bogus' });
+            await service.init();
+            expect(configWarnings()).toEqual([]);
+
+            service.setEnabled(true);
+            await service.init();
+            expect(configWarnings().length).toBe(1);
+        });
+    });
+
     // --- app_version stamping ---
 
     describe('app_version stamping', () => {
@@ -3179,16 +3300,60 @@ describe('NgGa4Service', () => {
             req2.flush('', { status: 204, statusText: 'No Content' });
         });
 
-        it('should override caller-supplied app_version with config value', async () => {
+        // Library defaults first, caller wins (#31) — the same rule engagement_time_msec
+        // already followed.
+        it('should let a caller-supplied app_version override the config value', async () => {
             reconfigureTestBed({ appVersion: '1.0.4' });
             await service.init();
 
-            service.trackEvent('s3_connection_create', { app_version: 'spoofed', connection_type: 'S3' });
+            service.trackEvent('s3_connection_create', { app_version: '2.0.0-beta', connection_type: 'S3' });
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const params = req.request.body.events[0].params;
+            expect(params.app_version).toBe('2.0.0-beta');
+            expect(params.connection_type).toBe('S3');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('should keep library defaults when a caller param is undefined', async () => {
+            reconfigureTestBed({ appVersion: '1.0.4' });
+            await service.init();
+
+            service.trackEvent('button_click', { app_version: undefined, session_id: undefined, x: 1 });
 
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             const params = req.request.body.events[0].params;
             expect(params.app_version).toBe('1.0.4');
-            expect(params.connection_type).toBe('S3');
+            expect(params.session_id).toBeDefined();
+            expect(params.x).toBe(1);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('should send a caller-supplied app_version when config.appVersion is unset', async () => {
+            reconfigureTestBed({});
+            await service.init();
+
+            service.trackEvent('button_click', { app_version: '3.1.0' });
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.app_version).toBe('3.1.0');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('should let caller params override every library default in trackEvent', async () => {
+            reconfigureTestBed({ appVersion: '1.0.4' });
+            await service.init();
+
+            service.trackEvent('button_click', {
+                app_version: 'a', engagement_time_msec: 7, session_id: 's', session_number: 9
+            });
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const params = req.request.body.events[0].params;
+            expect(params.app_version).toBe('a');
+            expect(params.engagement_time_msec).toBe(7);
+            expect(params.session_id).toBe('s');
+            expect(params.session_number).toBe(9);
             req.flush('', { status: 204, statusText: 'No Content' });
         });
     });

@@ -159,6 +159,7 @@ export class NgGa4Service implements OnDestroy {
         // for listeners to be live before clientId is ready.
         this.registerEngagementListeners();
         this.engagementEventName = this.resolveEngagementEventName();
+        this.warnOnMalformedConfig();
         // Before the awaits for the same reason, and so the landing page view —
         // queued until clientId is ready — still reaches pageViewed() for site
         // search. Events fired meanwhile queue like any other trackEvent() call.
@@ -556,8 +557,12 @@ export class NgGa4Service implements OnDestroy {
             engagement_time_msec: this.consumeEngagementTime(),
             session_id: this.sessionId,
             session_number: this.sessionNumber,
-            ...params,
-            ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
+            // Library defaults first, caller wins: like engagement_time_msec,
+            // a caller-supplied app_version replaces the configured one. An
+            // `undefined` value does not count as supplied — validateEventParams
+            // would drop the key, losing the default along with it.
+            ...(this.config.appVersion ? { app_version: this.config.appVersion } : {}),
+            ...Object.fromEntries(Object.entries(params ?? {}).filter(([, value]) => value !== undefined))
         }, this.warnOnInvalid);
         if (this.warnOnInvalid) {
             const appOnly = appOnlyEventNameProblem(name);
@@ -665,7 +670,15 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private collectUrl(endpoint: string): string {
-        return `${endpoint}?measurement_id=${this.config.measurementId}&api_secret=${this.config.apiSecret}`;
+        return `${endpoint}?measurement_id=${encodeURIComponent(this.measurementId())}`
+            + `&api_secret=${encodeURIComponent(this.config.apiSecret)}`;
+    }
+
+    // Uppercase, as GA4 Admin shows it: Google doesn't document whether a
+    // lowercase ID reaches the same property. String(... ?? '') survives a JS
+    // caller that omits it or passes a non-string, so nothing here can throw.
+    private measurementId(): string {
+        return String(this.config.measurementId ?? '').toUpperCase();
     }
 
     private sendForValidation(body: object): void {
@@ -1075,6 +1088,25 @@ export class NgGa4Service implements OnDestroy {
                 ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
             }
         }], true);
+    }
+
+    // Called from init(); dev/debug only. Warns, never blocks sending.
+    private warnOnMalformedConfig(): void {
+        if (!this.warnOnInvalid) {
+            return;
+        }
+        if (!/^G-[A-Z0-9]+$/.test(this.measurementId())) {
+            console.warn(
+                `[ng-ga4] measurementId "${this.config.measurementId}" does not look like a GA4 Measurement ID `
+                + `(expected "G-" followed by letters and digits, e.g. "G-XXXXXXXXXX"). `
+                + `GA4 accepts hits for an unknown ID and records nothing.`
+            );
+        }
+        if (!String(this.config.apiSecret ?? '').trim()) {
+            console.warn(
+                '[ng-ga4] apiSecret is empty. GA4 accepts hits without a valid secret and records nothing.'
+            );
+        }
     }
 
     // Validated once here, in init(), not in flushEngagement(): a misconfigured
