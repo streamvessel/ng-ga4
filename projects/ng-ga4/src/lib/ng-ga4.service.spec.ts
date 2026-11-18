@@ -899,6 +899,18 @@ describe('NgGa4Service', () => {
             httpMock.expectNone(() => true);
         });
 
+        it('carries user_agent on the hide-time engagement flush', async () => {
+            observeFlushViaXhr();
+            await service.init();
+            jasmine.clock().tick(3000);
+
+            (service as any).flushEngagement();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.user_agent).toBe(navigator.userAgent);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
         it('sends nothing when no time has accrued at all', async () => {
             await service.init();
 
@@ -1856,6 +1868,17 @@ describe('NgGa4Service', () => {
             httpMock.expectNone(() => true);
         });
 
+        it('should not read the user agent on the server', async () => {
+            reconfigureTestBed({}, 'server');
+            const uaSpy = spyOn<any>(service, 'getUserAgentString').and.callThrough();
+
+            await service.init();
+            service.trackEvent('ssr_event');
+
+            expect(uaSpy).not.toHaveBeenCalled();
+            httpMock.expectNone(() => true);
+        });
+
         it('should not subscribe to router navigation on the server', async () => {
             reconfigureTestBed({}, 'server');
             await service.init();
@@ -2137,6 +2160,19 @@ describe('NgGa4Service', () => {
             const { real, validation } = expectDebugPair();
             expect(real).toBeDefined();
             expect(real.request.url).not.toContain('debug/mp/collect');
+            real.flush('', { status: 204, statusText: 'No Content' });
+            validation.flush({ validationMessages: [] });
+        });
+
+        it('posts the same body, user_agent included, to production and to validation', async () => {
+            reconfigureTestBed({ debug: true });
+
+            await service.init();
+            service.trackEvent('custom_event');
+
+            const { real, validation } = expectDebugPair();
+            expect(real.request.body.user_agent).toBe(navigator.userAgent);
+            expect(validation.request.body).toEqual(real.request.body);
             real.flush('', { status: 204, statusText: 'No Content' });
             validation.flush({ validationMessages: [] });
         });
@@ -2582,6 +2618,142 @@ describe('NgGa4Service', () => {
             });
         });
 
+        describe('user_agent', () => {
+            // Google's MP reference: user_agent "is ignored if the request also includes
+            // device". We send both anyway (#89 checks the precedence against a real
+            // property), so these specs pin that both are always present.
+            const sentBody = (): any => {
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                const body = req.request.body;
+                req.flush('', { status: 204, statusText: 'No Content' });
+                return body;
+            };
+
+            it('sends the user-agent string as a request-level field, next to device', async () => {
+                spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(SAFARI_IPHONE);
+
+                await service.init();
+                service.trackEvent('x');
+
+                const body = sentBody();
+                expect(body.user_agent).toBe(SAFARI_IPHONE);
+                expect(body.device).toBeDefined();
+                expect(body.device.model).toBe('iPhone');
+                expect(body.events[0].params.user_agent).toBeUndefined();
+            });
+
+            it('sends it on page views as well as events', async () => {
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(CHROME_WINDOWS);
+
+                await service.init();
+                service.trackPageView('/home');
+
+                const body = sentBody();
+                expect(body.events[0].name).toBe('page_view');
+                expect(body.user_agent).toBe(CHROME_WINDOWS);
+            });
+
+            it('sends the same string the device parser read', async () => {
+                const parseSpy = spyOn<any>(service, 'fillDeviceGapsFromUserAgent').and.callThrough();
+                spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(SAFARI_MACOS);
+
+                await service.init();
+                service.trackEvent('x');
+
+                expect(parseSpy).toHaveBeenCalled();
+                const body = sentBody();
+                expect(body.user_agent).toBe(SAFARI_MACOS);
+                expect(body.device.browser).toBe('Safari');
+            });
+
+            // In a real browser collectDevice() always returns at least `language`, so
+            // this state is only reachable by forcing it. It is the one case where GA4
+            // would actually use user_agent, so the wiring is pinned here.
+            it('still sends user_agent when device collection fails', async () => {
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(CHROME_WINDOWS);
+                spyOn<any>(service, 'collectDevice').and.returnValue(Promise.reject(new Error('boom')));
+                spyOn(console, 'warn');
+
+                await service.init();
+                service.trackEvent('x');
+
+                const body = sentBody();
+                expect('device' in body).toBe(false);
+                expect(body.user_agent).toBe(CHROME_WINDOWS);
+            });
+
+            it('keeps device and user_location when reading the user agent fails', async () => {
+                spyOn<any>(service, 'collectUserAgent').and.throwError('denied');
+                spyOn<any>(service, 'getTimeZone').and.returnValue('Europe/Berlin');
+                const warn = spyOn(console, 'warn');
+
+                await expectAsync(service.init()).toBeResolved();
+                service.trackEvent('x');
+
+                const body = sentBody();
+                expect('user_agent' in body).toBe(false);
+                expect(body.device).toBeDefined();
+                expect(body.user_location).toEqual({ country_id: 'DE' });
+                expect(warn).toHaveBeenCalledWith('[ng-ga4] user_agent collection failed', jasmine.any(Error));
+            });
+
+            for (const [label, value] of [['empty', ''], ['whitespace-only', '   '], ['missing', undefined], ['non-string', 42]] as const) {
+                it(`omits user_agent when the string is ${label}`, async () => {
+                    spyOn<any>(service, 'getUserAgentString').and.returnValue(value);
+
+                    await service.init();
+                    service.trackEvent('x');
+
+                    expect('user_agent' in sentBody()).toBe(false);
+                });
+            }
+
+            it('trims surrounding whitespace', async () => {
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(`  ${CHROME_WINDOWS}\n`);
+
+                await service.init();
+                service.trackEvent('x');
+
+                expect(sentBody().user_agent).toBe(CHROME_WINDOWS);
+            });
+
+            it('keeps a 512-character user agent whole and caps a longer one at 512', async () => {
+                const ua512 = 'Mozilla/5.0 ' + 'x'.repeat(500);
+                expect(ua512.length).toBe(512);
+                const uaSpy = spyOn<any>(service, 'getUserAgentString').and.returnValue(ua512);
+
+                await service.init();
+                service.trackEvent('x');
+                expect(sentBody().user_agent).toBe(ua512);
+
+                // Context is collected once per init, so read the cap directly.
+                uaSpy.and.returnValue(ua512 + 'y');
+                expect((service as any).collectUserAgent()).toBe(ua512);
+            });
+
+            it('rides on events queued while init() is still collecting context', async () => {
+                let releaseHints!: () => void;
+                const hints = new Promise<any>((resolve) => {
+                    releaseHints = () => resolve({ platform: 'Windows', fullVersionList: [] });
+                });
+                spyOn<any>(service, 'getUserAgentData').and.returnValue({ mobile: false, platform: 'Windows', getHighEntropyValues: () => hints });
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(CHROME_WINDOWS);
+
+                const initPromise = service.init();
+                service.trackEvent('early');
+                httpMock.expectNone(() => true);
+
+                releaseHints();
+                await initPromise;
+
+                const body = sentBody();
+                expect(body.events[0].name).toBe('early');
+                expect(body.user_agent).toBe(CHROME_WINDOWS);
+            });
+        });
+
         it('derives user_location.country_id from the browser time zone', async () => {
             spyOn<any>(service, 'getTimeZone').and.returnValue('Europe/Berlin');
 
@@ -2850,6 +3022,7 @@ describe('NgGa4Service', () => {
             expect(body.events[0].name).toBe('extension_installed');
             expect(body.events[0].params.version).toBe('1.4.0');
             expect(body.client_id).toBeDefined();
+            expect(body.user_agent).toBe(navigator.userAgent);
         });
 
         it('is the transport when none is configured (beacon is the default)', async () => {
@@ -2881,6 +3054,7 @@ describe('NgGa4Service', () => {
             expect(init.keepalive).toBe(true);
             expect(init.headers['Content-Type']).toBe('application/json');
             expect(JSON.parse(init.body).events[0].name).toBe('file_download');
+            expect(JSON.parse(init.body).user_agent).toBe(navigator.userAgent);
         });
 
         it('falls back to fetch(keepalive) when sendBeacon throws synchronously', async () => {
@@ -2919,6 +3093,7 @@ describe('NgGa4Service', () => {
 
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.body.events[0].name).toBe('file_delete');
+            expect(req.request.body.user_agent).toBe(navigator.userAgent);
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 

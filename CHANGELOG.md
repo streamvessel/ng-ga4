@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   property. Brand is only sent where the user agent is unambiguous: `Apple` for
   iPhone, iPad and iPod. Chrome's reduced-UA placeholder model `K` is never
   reported ([#36](https://github.com/streamvessel/ng-ga4/issues/36)).
+- Every hit also carries the browser's user-agent string as `user_agent`.
+  Google documents that GA4 ignores it whenever `device` is present, and the
+  library always sends `device`, so today it changes nothing in reports. It is
+  sent so a hit without `device` still has device data, and in case GA4's
+  precedence differs in practice; that is being checked in
+  [#89](https://github.com/streamvessel/ng-ga4/issues/89).
 
 ### Fixed
 

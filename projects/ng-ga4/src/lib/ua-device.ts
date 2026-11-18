@@ -1,10 +1,12 @@
 // User-agent string parsing, used only where `navigator.userAgentData` is missing.
 //
-// GA4's /mp/collect does not infer anything from the User-Agent request header — that
-// inference is something gtag.js gets for free server-side and we do not. So on Safari
-// and Firefox, which do not implement User-Agent Client Hints at all, the request-level
-// `device` object would otherwise carry no browser, OS or category, and GA4 reports
-// `(not set)` for all of them.
+// GA4's /mp/collect never reads the User-Agent request *header* — that inference is
+// something gtag.js gets for free server-side and we do not. The library also sends the
+// UA string as the body field `user_agent`, but Google documents that field as ignored
+// whenever `device` is present, and we always send `device` (see #89). So on Safari and
+// Firefox, which do not implement User-Agent Client Hints at all, this parser is what
+// fills the request-level `device` object's browser, OS and category; without it GA4
+// reports `(not set)` for all of them.
 //
 // The vocabulary here deliberately matches what `userAgentData.getHighEntropyValues()`
 // returns ("Windows", "macOS", "Chrome OS", "Edge", "Chrome"), so both paths feed the

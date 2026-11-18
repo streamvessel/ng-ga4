@@ -44,6 +44,10 @@ export class NgGa4Service implements OnDestroy {
     // hide-time event's page_location (see flushEngagement for the null case).
     private lastPagePath: string | null = null;
     private device: Ga4Device | null = null;
+    // Sent as the request-level `user_agent` on every hit. Per Google's MP reference,
+    // GA4 ignores it whenever `device` is present — which in a browser is effectively
+    // always — so today it is inert. See collectUserAgent() and #89.
+    private userAgent: string | null = null;
     private userLocation: Ga4UserLocation | null = null;
     private pendingCalls: Array<() => void> = [];
     private engagement: EngagementTimer | null = null;
@@ -466,6 +470,7 @@ export class NgGa4Service implements OnDestroy {
             client_id: string;
             events: Array<{ name: string; params?: Record<string, any> }>;
             device?: Ga4Device;
+            user_agent?: string;
             user_location?: Ga4UserLocation;
             consent?: Ga4ConsentPayload;
         } = {
@@ -476,11 +481,17 @@ export class NgGa4Service implements OnDestroy {
                 ? events.map(event => ({ ...event, params: { ...event.params, debug_mode: 1 } }))
                 : events
         };
-        // `device` and `user_location` are request-level fields (siblings of
-        // `client_id`/`events`), not per-event params. /mp/collect does not infer
-        // device/geo from the request, so we supply them explicitly.
+        // `device`, `user_agent` and `user_location` are request-level fields (siblings
+        // of `client_id`/`events`), not per-event params. /mp/collect never reads the
+        // User-Agent *header*, so device data has to be in the body. We send both forms:
+        // `device` is what GA4 uses — its reference says `user_agent` "is ignored if the
+        // request also includes `device`" — and `user_agent` only takes effect on a hit
+        // without `device`. Whether that precedence holds in practice is #89.
         if (this.device) {
             body.device = this.device;
+        }
+        if (this.userAgent) {
+            body.user_agent = this.userAgent;
         }
         if (this.userLocation) {
             body.user_location = this.userLocation;
@@ -711,6 +722,14 @@ export class NgGa4Service implements OnDestroy {
     // --- Device & location context (request-level GA4 fields) ---
 
     private async collectContext(): Promise<void> {
+        // Its own block, first: if device collection fails, user_agent is the one
+        // device signal GA4 would still use, so it must not share that failure.
+        try {
+            this.userAgent = this.collectUserAgent();
+        } catch (err) {
+            console.warn('[ng-ga4] user_agent collection failed', err);
+            this.userAgent = null;
+        }
         try {
             this.userLocation = this.collectUserLocation();
         } catch (err) {
@@ -723,6 +742,19 @@ export class NgGa4Service implements OnDestroy {
             console.warn('[ng-ga4] device collection failed', err);
             this.device = null;
         }
+    }
+
+    // A defensive cap, not a documented Google limit: real UAs, including verbose in-app
+    // browsers, stay well under it, and anything longer is not a UA worth parsing.
+    private readonly MAX_USER_AGENT_LENGTH = 512;
+
+    private collectUserAgent(): string | null {
+        const ua = this.getUserAgentString();
+        if (typeof ua !== 'string') {
+            return null;
+        }
+        const trimmed = ua.trim();
+        return trimmed ? trimmed.slice(0, this.MAX_USER_AGENT_LENGTH) : null;
     }
 
     private collectUserLocation(): Ga4UserLocation | null {
