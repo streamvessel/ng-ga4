@@ -60,12 +60,12 @@ this.analytics.setUserProperties(null);             // remove all
 
 ## User-provided data
 
-Off unless you call `setUserData()`. The library never reads an email address or phone number on its own, and never detects one on the page the way `gtag.js`'s automatic collection can. Google uses the hashes for [enhanced conversions](https://developers.google.com/analytics/devguides/collection/ga4/uid-data) in Google Ads, and GA4 uses them for conversion modelling and other "enhanced Analytics capabilities".
+Off unless you call `setUserData()`; nothing is collected automatically. Google uses the hashes for [enhanced conversions](https://developers.google.com/analytics/devguides/collection/ga4/uid-data) in Google Ads, and GA4 uses them for conversion modelling.
 
 Two things are needed before anything is sent and used:
 
-- **In GA4:** link the property to Google Ads, then turn on **Admin → Data collection → User-provided data collection** and accept the policy. Without that, GA4 drops the data. It isn't available for properties in the Health industry category, and Google still calls the feature a beta. See [Google's setup guide](https://support.google.com/analytics/answer/14077171).
-- **In your app:** grant `adUserData` consent, through the `consent` option or `setConsent({ adUserData: 'granted' })`. Until it is granted, `user_data` is held back. That includes when you never set consent at all.
+- **In GA4:** link the property to Google Ads, then turn on **Admin → Data collection → User-provided data collection** and accept the policy. Without that, GA4 drops the data. It isn't available for properties in the Health industry category. See [Google's setup guide](https://support.google.com/analytics/answer/14077171).
+- **In your app:** grant `adUserData` consent, through the `consent` option or `setConsent({ adUserData: 'granted' })`. Until then, including when consent is never set, `user_data` is not sent. Data set before the grant goes out once it comes; denying again stops it from the next hit.
 
 ```typescript
 // After the user signs in, with data you already hold:
@@ -90,34 +90,26 @@ await this.analytics.setUserData({ sha256EmailAddress: user.emailHash });
 await this.analytics.setUserData(null);
 ```
 
-Fields and how each is sent:
-
-| Field | Sent as | Normalised before hashing |
+| Field | Sent as | Normalised |
 |---|---|---|
 | `email` | `sha256_email_address` | lowercased, spaces removed, dots before the `@` dropped for `gmail.com` and `googlemail.com`; values without an `@` and a domain are skipped |
-| `phone` | `sha256_phone_number` | digits only, with `+` in front; a leading `00` is accepted in place of `+` |
-| `address.firstName`, `address.lastName` | `sha256_first_name`, `sha256_last_name` | all spaces, digits and symbols removed, lowercased, as `gtag.js` does: `Mary Ann` becomes `maryann`, and `O'Brien` keeps its apostrophe |
+| `phone` | `sha256_phone_number` | digits only, with `+` in front (include the country code; a leading `00` counts as `+`) |
+| `address.firstName`, `address.lastName` | `sha256_first_name`, `sha256_last_name` | all spaces, digits and symbols removed, lowercased (`Mary Ann` → `maryann`; `O'Brien` keeps its apostrophe) |
 | `address.street` | `sha256_street` | symbols removed, lowercased, trimmed |
-| `address.city`, `address.region` | `city`, `region`, **not hashed** | digits and symbols removed, lowercased, trimmed, as `gtag.js` does |
-| `address.postalCode` | `postal_code`, **not hashed** | `.` and `~` removed, trimmed |
-| `address.country` | `country`, **not hashed** | `.` and `~` removed, trimmed; pass an ISO 3166-1 alpha-2 code such as `'US'` |
+| `address.city`, `address.region` | `city`, `region`, **not hashed** | digits and symbols removed, lowercased, trimmed |
+| `address.postalCode`, `address.country` | `postal_code`, `country`, **not hashed** | `.` and `~` removed, trimmed |
 
-- Raw values are SHA-256 hashed in the browser, and only the hex digests of email, phone, name and street go into the request. City, region, postal code and country go as they are, because the Measurement Protocol expects them that way.
 - Up to 3 emails, 3 phones and 2 addresses; more are cut with a warning. Empty values and duplicates are skipped.
-- Include the country code in phone numbers. The library can't guess it, and a number without one never matches.
 - For an address to be useful for matching, Google Ads asks for at least first name, last name, postal code and country.
-- **Already hashed:** `sha256EmailAddress`, `sha256PhoneNumber`, and `sha256FirstName`, `sha256LastName` and `sha256Street` on an address take hex SHA-256 digests you computed yourself, after applying the same normalisation. As in `gtag.js`, a `sha256*` field replaces its raw counterpart, and any value that already is a 64-character hex digest (in either kind of field) is sent as-is. A value in a `sha256*` field that isn't a digest is normalised and hashed like a raw one, so a raw address passed there by mistake never goes out unhashed.
+- **Already hashed:** `sha256EmailAddress`, `sha256PhoneNumber`, and `sha256FirstName`, `sha256LastName` and `sha256Street` on an address take hex SHA-256 digests of the normalised value and replace their raw counterparts. Any 64-character hex value is sent as-is; anything else is normalised and hashed, so raw data is never sent unhashed.
 - Google recommends sending a [user ID](#user-id) alongside it.
-- Nothing is stored, unlike the user ID. The hashes live in memory only, so call `setUserData()` again on every start-up and in every tab or extension context.
-- Hits sent before the returned promise resolves go without `user_data`, including while replacing earlier data, so one user's hashes never go out on another user's hits.
-- `user_data` goes out only while `adUserData` is `'granted'` (see [Consent](consent.md)). Data set before consent is granted is kept in memory and sent once it is. Denying consent again holds it back from the next hit on.
-- With `debug: true`, the copy posted to the validation endpoint carries the same hashes.
-- It needs `crypto.subtle`, which only exists in a secure context (HTTPS or `localhost`). Elsewhere the call does nothing and logs a warning; raw values are never sent. The returned promise never rejects.
+- Kept in memory only: call it again on every start-up and in every tab or extension context.
+- Hits sent before the returned promise resolves go without `user_data`, even when replacing earlier data.
+- Needs `crypto.subtle` (HTTPS or `localhost`); elsewhere it logs a warning and sends nothing. The promise never rejects.
 
 **Your obligations.** A hashed email address is still personal data, and city, region and postal code go unhashed. Before you send it you must:
 
-- have the user's consent to share it with Google for advertising (the `adUserData: 'granted'` the library requires should reflect a real choice, not a default);
+- have the user's consent to share it with Google for advertising, and set `adUserData` from that choice, not a default;
 - disclose it in your privacy policy;
-- follow Google's [customer data policies](https://support.google.com/adspolicy/answer/7475709) and, in the EEA/UK, the [EU user consent policy](https://www.google.com/about/company/user-consent-policy/).
-
-Clear it with `setUserData(null)` when the user signs out or withdraws consent.
+- follow Google's [customer data policies](https://support.google.com/adspolicy/answer/7475709) and, in the EEA/UK, the [EU user consent policy](https://www.google.com/about/company/user-consent-policy/);
+- clear it with `setUserData(null)` when the user signs out or withdraws consent.

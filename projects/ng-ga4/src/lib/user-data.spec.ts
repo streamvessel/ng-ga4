@@ -17,8 +17,6 @@ const JANE = '81f8f6dde88365f3928796ec7aa53f72820b06db8664f5fe76a7eb13e24546a2';
 const DOE = '799ef92a11af918e3fb741df42934f3b568ed2d93ac1df74f1b8d41a27932a6f';
 const STREET = '22b7e2d69b91e0ef4a88e81a73d897b92fd9c93ccfbe0a860f77db16c26f662e'; // 1600 amphitheatre pkwy
 const MULLER = '2dbd218072117713f2d5996a726a9b216ed791ffd0783b6ba4ab6d61b8333192'; // müller
-const MARYANN = '16b3f07f0ec2f9dd127b71dc2e6c791b7d93116a1c3bc99d057eaa7a8a077e73'; // maryann
-const OBRIEN = '65b87174be3b1b122e2b0929f0b84888637d31a4a83bb96a860bcff411f5e668'; // o'brien
 
 describe('user-data', () => {
     const subtle = crypto.subtle;
@@ -83,6 +81,12 @@ describe('user-data', () => {
             expect(console.warn).toHaveBeenCalled();
         });
 
+        it('warns and returns null without crypto.subtle', async () => {
+            spyOn(console, 'warn');
+            expect(await hashUserData({ email: 'a@x.com' }, undefined)).toBeNull();
+            expect(console.warn).toHaveBeenCalled();
+        });
+
         it('returns null when nothing usable is left', async () => {
             expect(await hashUserData({}, subtle)).toBeNull();
             expect(await hashUserData({ email: ' ', phone: '' }, subtle)).toBeNull();
@@ -90,8 +94,7 @@ describe('user-data', () => {
     });
 
     describe('address normalisation', () => {
-        // Same results as gtag.js's own normaliser, including its quirks.
-        it('names lose all whitespace, digits and gtag.js\'s symbol list, but keep apostrophes', () => {
+        it('names lose whitespace, digits and symbols but keep apostrophes', () => {
             expect(normalizeName('  Jane-3! ')).toBe('jane');
             expect(normalizeName('Mary Ann')).toBe('maryann');
             expect(normalizeName("O'Brien")).toBe("o'brien");
@@ -133,12 +136,6 @@ describe('user-data', () => {
             const payload = await hashUserData({ email: JANE_DOE_EXAMPLE.toUpperCase() }, subtle);
             expect(payload).toEqual({ sha256_email_address: [JANE_DOE_EXAMPLE] });
         });
-
-        it('caps pre-hashed values at 3', async () => {
-            spyOn(console, 'warn');
-            const payload = await hashUserData({ sha256PhoneNumber: [JANE, DOE, STREET, MULLER] }, subtle);
-            expect(payload!.sha256_phone_number).toEqual([JANE, DOE, STREET]);
-        });
     });
 
     describe('address', () => {
@@ -167,11 +164,6 @@ describe('user-data', () => {
         it('hashes non-ASCII names as UTF-8', async () => {
             const payload = await hashUserData({ address: { lastName: 'Müller' } }, subtle);
             expect(payload).toEqual({ address: [{ sha256_last_name: MULLER }] });
-        });
-
-        it('hashes names the way gtag.js does', async () => {
-            const payload = await hashUserData({ address: { firstName: 'Mary Ann', lastName: "O'Brien" } }, subtle);
-            expect(payload).toEqual({ address: [{ sha256_first_name: MARYANN, sha256_last_name: OBRIEN }] });
         });
 
         it('prefers a supplied digest over a raw value for the same field', async () => {

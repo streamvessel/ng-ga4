@@ -74,7 +74,6 @@ export class NgGa4Service implements OnDestroy {
     // applied on top of what was stored. `null` once loaded.
     private pendingUserProperties: UserPropertyUpdate | null = emptyUserPropertyUpdate();
     private engagement: EngagementTimer | null = null;
-    // See setUserData().
     private userData: Ga4UserDataPayload | null = null;
     private userDataGeneration = 0;
     private enhancedMeasurement: EnhancedMeasurement | null = null;
@@ -264,16 +263,9 @@ export class NgGa4Service implements OnDestroy {
     }
 
     /**
-     * Attach user-provided data (email, phone, address) for Google Ads enhanced
-     * conversions to every following hit, or clear it with `null`. Strictly
-     * opt-in: the library never collects these itself. Values are normalised and
-     * SHA-256 hashed in memory; the raw values are not kept and nothing is
-     * persisted, so call this again on every start-up (e.g. after login).
-     *
-     * Resolves once the hashes are ready; hits sent before that go without
-     * `user_data` (also when replacing earlier data, so one user's hashes never
-     * ride on another's hits). A later call (including `null`) always wins over
-     * an earlier one that is still hashing. Never rejects.
+     * Attach hashed email/phone/address (`user_data`) to later hits, or clear it
+     * with `null`. Kept in memory only. Resolves once hashed; hits sent before
+     * that go without it. A later call wins over one still hashing. Never rejects.
      */
     async setUserData(userData: NgGa4UserData | null): Promise<void> {
         const generation = ++this.userDataGeneration;
@@ -281,21 +273,7 @@ export class NgGa4Service implements OnDestroy {
         if (!userData || !this.isBrowser) {
             return;
         }
-        // crypto.subtle only exists in secure contexts. Raw values are never sent instead.
-        const subtle = globalThis.crypto?.subtle;
-        if (!subtle) {
-            console.warn('[ng-ga4] setUserData() needs crypto.subtle (a secure context); user_data will not be sent.');
-            return;
-        }
-        // Callers often fire-and-forget this from a login handler, so a failure
-        // must not surface as an unhandled rejection.
-        let hashed: Ga4UserDataPayload | null;
-        try {
-            hashed = await hashUserData(userData, subtle);
-        } catch (err) {
-            console.warn('[ng-ga4] Hashing user_data failed; it will not be sent.', err);
-            return;
-        }
+        const hashed = await hashUserData(userData, globalThis.crypto?.subtle);
         if (generation === this.userDataGeneration) {
             this.userData = hashed;
         }
@@ -672,8 +650,6 @@ export class NgGa4Service implements OnDestroy {
         if (consentPayload) {
             body.consent = consentPayload;
         }
-        // Withheld, not just flagged, until ad_user_data is granted: the hashes are
-        // personal data.
         if (this.userData && this.consent.userDataAllowed) {
             body.user_data = this.userData;
         }
@@ -716,9 +692,7 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private sendForValidation(body: object): void {
-        // ENFORCE_RECOMMENDATIONS surfaces wrong types and exceeded limits, not only
-        // malformed requests. Validation request only: Google advises against it on
-        // real sends, where it would make GA4 drop data RELAXED would keep.
+        // Validation copy only: on real hits it would make GA4 drop data RELAXED keeps.
         const validationBody = { ...body, validation_behavior: 'ENFORCE_RECOMMENDATIONS' };
         this.http.post<{ validationMessages?: unknown[] }>(this.collectUrl(this.GA4_DEBUG_ENDPOINT), validationBody).subscribe({
             next: (response) => {

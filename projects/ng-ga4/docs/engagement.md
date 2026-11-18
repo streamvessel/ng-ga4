@@ -16,7 +16,7 @@ This feeds GA4's **average engagement time**. It does **not** make sessions coun
 
 ## Debug mode
 
-`debug: true` tags every event with `debug_mode`, so it shows in [DebugView](https://support.google.com/analytics/answer/7201382). **Events are still recorded** and go out over your configured transport. Each payload is also posted to the [validation endpoint](https://developers.google.com/analytics/devguides/collection/protocol/ga4/validating-events), and any problems it reports are logged with `console.warn`. That copy asks for `validation_behavior: 'ENFORCE_RECOMMENDATIONS'`, so wrong types and values over the limits are reported as well as malformed requests. The real hit is left at the default (`RELAXED`), which Google recommends for real traffic.
+`debug: true` tags every event with `debug_mode`, so it shows in [DebugView](https://support.google.com/analytics/answer/7201382). **Events are still recorded** and go out over your configured transport. Each payload is also posted to the [validation endpoint](https://developers.google.com/analytics/devguides/collection/protocol/ga4/validating-events), and any problems it reports are logged with `console.warn`. That copy uses `validation_behavior: 'ENFORCE_RECOMMENDATIONS'`, so wrong types and over-limit values are reported too; the real hit stays `RELAXED`.
 
 ```typescript
 provideNgGa4({ ...config, debug: !environment.production })

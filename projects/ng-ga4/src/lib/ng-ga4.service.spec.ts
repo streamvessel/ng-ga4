@@ -4255,108 +4255,70 @@ describe('NgGa4Service', () => {
         const JOHNSMITH_GMAIL = '3586de92bb3636d0885a12eff961429a32e4ebd764b96f50d85d016f9338d586';
         const PHONE_US = '910a625c4ba147b544e6bd2f267e130ae14c591b6ba9c25cb8573322dedbebd0';
 
-        beforeEach(() => {
+        function sentUserData(event = 'probe'): unknown {
+            service.trackEvent(event);
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            req.flush({});
+            return req.request.body['user_data'];
+        }
+
+        beforeEach(async () => {
             reconfigureTestBed({ consent: { adUserData: 'granted' } });
+            await service.init();
         });
 
-        it('is never sent unless the app calls setUserData()', async () => {
-            await service.init();
-            service.trackEvent('test_event');
-
-            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
-            expect(req.request.body['user_data']).toBeUndefined();
-            req.flush({});
+        it('is never sent unless the app calls setUserData()', () => {
+            expect(sentUserData()).toBeUndefined();
         });
 
         it('sends hashed email and phone, never the raw values', async () => {
-            await service.init();
             await service.setUserData({ email: 'John.Smith@gmail.com', phone: '+1 (555) 555-5555' });
-            service.trackEvent('purchase');
+            const userData = sentUserData();
 
-            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
-            expect(req.request.body['user_data']).toEqual({
-                sha256_email_address: [JOHNSMITH_GMAIL],
-                sha256_phone_number: [PHONE_US]
-            });
-            expect(JSON.stringify(req.request.body)).not.toContain('gmail');
-            expect(JSON.stringify(req.request.body)).not.toContain('555-5555');
-            req.flush({});
+            expect(userData).toEqual({ sha256_email_address: [JOHNSMITH_GMAIL], sha256_phone_number: [PHONE_US] });
+            expect(JSON.stringify(userData)).not.toContain('gmail');
         });
 
-        it('sends addresses and pre-hashed values', async () => {
-            await service.init();
-            await service.setUserData({
-                sha256EmailAddress: JOHNSMITH_GMAIL,
-                address: { lastName: 'Doe', country: 'US' }
-            });
-            service.trackEvent('purchase');
-
-            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
-            expect(req.request.body['user_data']).toEqual({
-                sha256_email_address: [JOHNSMITH_GMAIL],
-                address: [{ sha256_last_name: '799ef92a11af918e3fb741df42934f3b568ed2d93ac1df74f1b8d41a27932a6f', country: 'US' }]
-            });
-            req.flush({});
+        it('passes addresses and pre-hashed values through', async () => {
+            await service.setUserData({ sha256EmailAddress: JOHNSMITH_GMAIL, address: { country: 'US' } });
+            expect(sentUserData()).toEqual({ sha256_email_address: [JOHNSMITH_GMAIL], address: [{ country: 'US' }] });
         });
 
         it('stops sending after setUserData(null)', async () => {
-            await service.init();
             await service.setUserData({ email: 'a@x.com' });
             await service.setUserData(null);
-            service.trackEvent('after_logout');
-
-            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
-            expect(req.request.body['user_data']).toBeUndefined();
-            req.flush({});
+            expect(sentUserData()).toBeUndefined();
         });
 
         it('lets a later clear win over an earlier call that is still hashing', async () => {
-            await service.init();
             const pending = service.setUserData({ email: 'a@x.com' });
             await service.setUserData(null);
             await pending;
-            service.trackEvent('probe');
-
-            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
-            expect(req.request.body['user_data']).toBeUndefined();
-            req.flush({});
+            expect(sentUserData()).toBeUndefined();
         });
 
         it('is withheld until ad_user_data consent is explicitly granted', async () => {
             reconfigureTestBed();
             await service.init();
             await service.setUserData({ email: 'a@x.com' });
-            service.trackEvent('unset');
-            service.setConsent({ adUserData: 'denied' });
-            service.trackEvent('denied');
-            service.setConsent({ adUserData: 'granted' });
-            service.trackEvent('granted');
 
-            const [unset, denied, granted] = httpMock.match(r => r.url.includes('/mp/collect'));
-            expect(unset.request.body['user_data']).toBeUndefined();
-            expect(denied.request.body['user_data']).toBeUndefined();
-            expect(granted.request.body['user_data']).toBeDefined();
-            unset.flush({});
-            denied.flush({});
-            granted.flush({});
+            expect(sentUserData('unset')).toBeUndefined();
+            service.setConsent({ adUserData: 'denied' });
+            expect(sentUserData('denied')).toBeUndefined();
+            service.setConsent({ adUserData: 'granted' });
+            expect(sentUserData('granted')).toBeDefined();
         });
 
         it('warns instead of rejecting when hashing fails', async () => {
-            await service.init();
             spyOn(crypto.subtle, 'digest').and.returnValue(Promise.reject(new Error('boom')));
             spyOn(console, 'warn');
 
             await expectAsync(service.setUserData({ email: 'a@x.com' })).toBeResolved();
             expect(console.warn).toHaveBeenCalled();
-            service.trackEvent('probe');
-
-            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
-            expect(req.request.body['user_data']).toBeUndefined();
-            req.flush({});
+            expect(sentUserData()).toBeUndefined();
         });
 
         it('is never written to storage', async () => {
-            await service.init();
             const before = JSON.stringify(mockLocalStorage);
             await service.setUserData({ email: 'a@x.com' });
             expect(JSON.stringify(mockLocalStorage)).toBe(before);

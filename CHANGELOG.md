@@ -9,18 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `setUserData()` sends user-provided data (`user_data`) for Google Ads enhanced
-  conversions. It is opt-in only and never collected automatically. Email, phone and
-  up to 2 addresses are normalised and SHA-256 hashed in the browser (city, region,
-  postal code and country go unhashed, as the Measurement Protocol expects), or
-  you can pass digests you computed yourself. They are kept in memory only. They are only sent while `adUserData` consent is
-  granted, and the GA4 property must have user-provided data collection turned on.
-  See [User-provided data](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-provided-data)
-  for setup and the privacy obligations.
+- `setUserData()` sends opt-in, SHA-256-hashed email, phone and address as
+  `user_data` for Google Ads enhanced conversions, only while `adUserData` is
+  granted. Needs user-provided data collection turned on in GA4. See
+  [User-provided data](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-provided-data).
   ([#23](https://github.com/streamvessel/ng-ga4/issues/23))
-- In debug mode, the payload posted to the validation endpoint sets
-  `validation_behavior: 'ENFORCE_RECOMMENDATIONS'`, so recommendation-level
-  problems are reported too. Real hits are unchanged.
+- In debug mode, the validation request uses
+  `validation_behavior: 'ENFORCE_RECOMMENDATIONS'`; real hits are unchanged.
 - `trackEvent()` checks event and parameter names against the Measurement
   Protocol's rules ([#29](https://github.com/streamvessel/ng-ga4/issues/29)).
   `/mp/collect` returns 204 for a payload it discards, so a bad name used to be
