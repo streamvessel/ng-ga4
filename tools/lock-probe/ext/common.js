@@ -3,7 +3,7 @@ const ctxName = typeof window === 'undefined'
   ? 'worker'
   : (new URLSearchParams(location.search).get('ctx') || 'page');
 const realLocks = navigator.locks;
-const LOCK = 'ng-ga4:client-id';
+const LOCK = self.probeMint.lockName;
 const bc = new BroadcastChannel('probe');
 let release = null;
 

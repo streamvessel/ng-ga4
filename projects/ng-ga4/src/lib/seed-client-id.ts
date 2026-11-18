@@ -1,4 +1,4 @@
-import { withClientIdLock } from './client-id-lock';
+import { readOrMintChromeClientId } from './client-id-lock';
 
 /**
  * Write a client ID into `chrome.storage.local` if one is not there already.
@@ -49,22 +49,11 @@ export async function seedNgGa4ClientId(): Promise<string | null> {
             console.warn('[ng-ga4] seedNgGa4ClientId: chrome.storage.local is unavailable.');
             return null;
         }
-        // Same lock as the service's mint path (#51).
-        return await withClientIdLock(async () => {
-            const result = await chrome.storage.local.get(['ga_client_id']);
-            const existing = result['ga_client_id'];
-            // Idempotent by contract: onInstalled fires on update as well as install,
-            // and overwriting here would re-identify every existing user on upgrade.
-            if (typeof existing === 'string' && existing) {
-                return existing;
-            }
-            // Matches what the service's own extension path mints, so a seeded ID and
-            // a service-minted one are interchangeable. Not mintGtagClientId(): there
-            // is no _ga cookie on a chrome-extension:// origin to align the shape with.
-            const clientId = crypto.randomUUID();
-            await chrome.storage.local.set({ ga_client_id: clientId });
-            return clientId;
-        });
+        // Idempotent by contract: onInstalled fires on update as well as install,
+        // and overwriting here would re-identify every existing user on upgrade.
+        // Same mint path and lock as the service (#51), so their IDs are
+        // interchangeable.
+        return await readOrMintChromeClientId((clientId) => chrome.storage.local.set({ ga_client_id: clientId }));
     } catch (err) {
         console.warn('[ng-ga4] seedNgGa4ClientId failed', err);
         return null;

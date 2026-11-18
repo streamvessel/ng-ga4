@@ -1,42 +1,28 @@
-// Test double for navigator.locks: exclusive and FIFO per name like the real
-// one, but grants on a microtask so specs that only drain microtasks under
-// jasmine.clock() still progress.
+// Test double for navigator.locks: exclusive and FIFO like the real one, but
+// grants on a microtask so specs that only drain microtasks under
+// jasmine.clock() still progress. Only one lock name is ever used.
 export class FakeLockManager {
     readonly requested: string[] = [];
-    held = 0;
     maxHeld = 0;
 
-    private readonly tails = new Map<string, Promise<void>>();
+    private held = 0;
+    private tail: Promise<void> = Promise.resolve();
 
-    request<T>(
-        name: string,
-        optionsOrCallback: { signal?: AbortSignal } | ((lock: unknown) => Promise<T> | T),
-        maybeCallback?: (lock: unknown) => Promise<T> | T
-    ): Promise<T> {
-        const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback!;
-        const signal = typeof optionsOrCallback === 'function' ? undefined : optionsOrCallback.signal;
+    request<T>(name: string, options: { signal?: AbortSignal }, callback: (lock: unknown) => Promise<T> | T): Promise<T> {
         this.requested.push(name);
-
-        const previous = this.tails.get(name) ?? Promise.resolve();
+        const previous = this.tail;
         let release!: () => void;
-        const mine = new Promise<void>(resolve => { release = resolve; });
-        this.tails.set(name, previous.then(() => mine));
+        this.tail = previous.then(() => new Promise<void>(resolve => { release = resolve; }));
 
         return new Promise<T>((resolve, reject) => {
-            const aborted = () => new DOMException('The lock request was aborted.', 'AbortError');
-            if (signal?.aborted) {
-                release();
-                reject(aborted());
-                return;
-            }
             let granted = false;
-            signal?.addEventListener('abort', () => {
+            options.signal?.addEventListener('abort', () => {
                 if (!granted) {
-                    reject(aborted());
+                    reject(new DOMException('The lock request was aborted.', 'AbortError'));
                 }
-            });
+            }, { once: true });
             previous.then(async () => {
-                if (signal?.aborted) {
+                if (options.signal?.aborted) {
                     release();
                     return;
                 }

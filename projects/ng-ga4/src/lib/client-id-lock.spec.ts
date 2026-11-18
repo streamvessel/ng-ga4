@@ -68,7 +68,7 @@ describe('withClientIdLock', () => {
         restoreLocks = installLockManager(locks);
         spyOn(console, 'warn');
         const stuck = deferred();
-        const holder = locks.request(CLIENT_ID_LOCK_NAME, () => stuck.promise);
+        const holder = locks.request(CLIENT_ID_LOCK_NAME, {}, () => stuck.promise);
 
         const critical = jasmine.createSpy('critical').and.resolveTo('id');
         expect(await withClientIdLock(critical, 20)).toBe('id');

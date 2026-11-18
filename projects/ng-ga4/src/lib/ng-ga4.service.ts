@@ -23,7 +23,7 @@ import {
     UserProperties,
     UserPropertyUpdate
 } from './user-properties';
-import { withClientIdLock } from './client-id-lock';
+import { readOrMintChromeClientId } from './client-id-lock';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
 
 interface Ga4Device {
@@ -1775,41 +1775,31 @@ export class NgGa4Service implements OnDestroy {
             return this.loadOrCreateClientIdFromLocalStorage();
         }
         try {
-            // Serialised across extension contexts (#51).
-            return await withClientIdLock(() => this.readOrMintChromeClientId());
+            // Minted under a lock shared with other extension contexts (#51).
+            return await readOrMintChromeClientId(async (clientId) => {
+                if (!this.consent.storageAllowed) {
+                    return;
+                }
+                // Enqueued like every other write so a write issued later cannot
+                // overtake it, and awaited so a failure reaches the catch below —
+                // falling back to localStorage rather than returning an ID that was
+                // persisted nowhere. enqueueStorageWrite's returned promise keeps
+                // the rejection for exactly this reason.
+                //
+                // Awaiting does not defeat MV3 teardown: it makes our code wait,
+                // not Chrome. seedNgGa4ClientId() is the fix that does — see #32.
+                //
+                // Unlike repersistIdentity, no inner catch: a failure here is worth
+                // both lines it produces, since the chain's message names the write
+                // and the catch below names the recovery.
+                await this.enqueueStorageWrite(
+                    'chrome.storage.local.set (mint client id)',
+                    () => chrome.storage.local.set({ ga_client_id: clientId })
+                );
+            });
         } catch (err) {
             console.warn('[ng-ga4] chrome.storage.local failed, falling back to localStorage', err);
             return this.loadOrCreateClientIdFromLocalStorage();
         }
-    }
-
-    // Runs under the client-ID lock. Throws on storage failure.
-    private async readOrMintChromeClientId(): Promise<string> {
-        const result = await chrome.storage.local.get(['ga_client_id']);
-        if (result['ga_client_id']) {
-            return result['ga_client_id'];
-        }
-        const clientId = crypto.randomUUID();
-        if (this.consent.storageAllowed) {
-            // Enqueued like every other write so a write issued later cannot
-            // overtake it, and awaited so a failure reaches the caller's catch —
-            // falling back to localStorage rather than returning an ID that was
-            // persisted nowhere. enqueueStorageWrite's returned promise keeps
-            // the rejection for exactly this reason.
-            //
-            // The await also keeps the lock held until the write has landed.
-            //
-            // Awaiting does not defeat MV3 teardown: it makes our code wait,
-            // not Chrome. seedNgGa4ClientId() is the fix that does — see #32.
-            //
-            // Unlike repersistIdentity, no inner catch: a failure here is worth
-            // both lines it produces, since the chain's message names the write
-            // and the caller's catch names the recovery.
-            await this.enqueueStorageWrite(
-                'chrome.storage.local.set (mint client id)',
-                () => chrome.storage.local.set({ ga_client_id: clientId })
-            );
-        }
-        return clientId;
     }
 }

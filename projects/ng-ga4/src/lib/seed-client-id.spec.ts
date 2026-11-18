@@ -134,14 +134,22 @@ describe('seedNgGa4ClientId', () => {
         });
 
         function mockSlowChrome(store: Record<string, any>, setSpy: jasmine.Spy): void {
-            const later = <T>(fn: () => T) => new Promise<T>(resolve => setTimeout(() => resolve(fn()), 1));
-            mockChrome(store, {
-                get: (keys: string[]) => later(() =>
-                    keys.reduce((acc: any, k: string) => { if (store[k] !== undefined) acc[k] = store[k]; return acc; }, {})
-                ),
-                set: (items: any) => { setSpy(items); return later(() => { Object.assign(store, items); }); }
-            });
+            mockChrome(store);
+            const local = (window as any).chrome.storage.local;
+            const { get, set } = local;
+            const later = <T>(op: () => Promise<T>) => new Promise<T>(resolve => setTimeout(() => resolve(op()), 1));
+            local.get = (keys: string[]) => later(() => get(keys));
+            local.set = (items: any) => { setSpy(items); return later(() => set(items)); };
         }
+
+        it('reads an existing ID without taking the lock', async () => {
+            const locks = new FakeLockManager();
+            restoreLocks = installLockManager(locks);
+            mockChrome({ ga_client_id: 'already-here' });
+
+            expect(await seedNgGa4ClientId()).toBe('already-here');
+            expect(locks.requested).toEqual([]);
+        });
 
         it('both callers end up with one ID, written once, under the real navigator.locks', async () => {
             const store: Record<string, any> = {};

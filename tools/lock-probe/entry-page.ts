@@ -2,6 +2,7 @@
 import { Subject, of } from 'rxjs';
 import { seedNgGa4ClientId } from '../../projects/ng-ga4/src/lib/seed-client-id';
 import { NgGa4Service } from '../../projects/ng-ga4/src/lib/ng-ga4.service';
+import { CLIENT_ID_LOCK_NAME } from '../../projects/ng-ga4/src/lib/client-id-lock';
 
 const httpStub = { post: () => of(null), get: () => of(null) };
 const zoneStub = { run: (fn: () => unknown) => fn(), runOutsideAngular: (fn: () => unknown) => fn() };
@@ -22,4 +23,4 @@ async function service(): Promise<string> {
     }
 }
 
-(self as any).probeMint = { seed: () => seedNgGa4ClientId(), service };
+(self as any).probeMint = { lockName: CLIENT_ID_LOCK_NAME, seed: () => seedNgGa4ClientId(), service };

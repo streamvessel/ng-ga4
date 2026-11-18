@@ -399,14 +399,6 @@ describe('NgGa4Service', () => {
             );
         });
 
-        it('mints under the shared client-ID lock', async () => {
-            setupChromeMock({});
-
-            await service.init();
-
-            expect(fakeLocks.requested).toEqual([CLIENT_ID_LOCK_NAME]);
-        });
-
         it('gives two contexts starting cold together one client ID, minted once', async () => {
             const chromeLocal: Record<string, any> = {};
             setupChromeMock(chromeLocal);
@@ -444,7 +436,7 @@ describe('NgGa4Service', () => {
         it('still falls back to localStorage when chrome.storage fails inside the lock', async () => {
             spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
             setupChromeMock({});
-            (window as any).chrome.storage.local.get = () => Promise.reject(new Error('no access'));
+            (window as any).chrome.storage.local.set = () => Promise.reject(new Error('quota exceeded'));
             spyOn(console, 'warn');
 
             await service.init();

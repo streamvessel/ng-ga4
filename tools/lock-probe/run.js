@@ -58,8 +58,11 @@ async function build() {
         tsconfigRaw: { compilerOptions: { experimentalDecorators: true, useDefineForClassFields: false } },
         plugins: [angularLinkerPlugin(linker.default)]
     };
-    await esbuild.build({ ...common, entryPoints: [path.join(HERE, 'entry-worker.ts')], outfile: path.join(EXT, 'worker.bundle.js') });
-    await esbuild.build({ ...common, entryPoints: [path.join(HERE, 'entry-page.ts')], outfile: path.join(EXT, 'page.bundle.js') });
+    await esbuild.build({
+        ...common,
+        entryPoints: { 'worker.bundle': path.join(HERE, 'entry-worker.ts'), 'page.bundle': path.join(HERE, 'entry-page.ts') },
+        outdir: EXT
+    });
 }
 
 // Which caller each context runs: seedNgGa4ClientId() or NgGa4Service.init().
