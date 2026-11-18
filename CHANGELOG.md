@@ -85,7 +85,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers 2xx to anything it receives, so a non-2xx (a proxy or blocker) is
   not retried. A replay sends one batch first and the rest only if it gets
   through. The outbox holds at most 500 events and about 1 MB, and evicts the
-  oldest first, also to make room when `localStorage` is full.
+  oldest first, also to make room when `localStorage` is full. Contexts sharing
+  it (an extension's popup and service worker, a site's tabs) take turns under
+  the `ng-ga4:outbox` Web Lock, so a stored request is replayed once and one
+  context's drain never overwrites a request another has just stored.
   Events older than the 72-hour backdating window are dropped. With
   `analyticsStorage` denied nothing is stored, and withdrawing it deletes the
   outbox along with the client ID. Such calls now resolve `delivered` to the new

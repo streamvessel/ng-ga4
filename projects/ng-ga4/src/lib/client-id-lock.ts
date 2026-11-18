@@ -1,52 +1,23 @@
 // Serialises client-ID minting across an extension's worker and pages (#51).
 // No Angular imports: seedNgGa4ClientId() uses it at worker top level.
 
+import { LOCK_TIMEOUT_MS, withLock } from './web-lock';
+
 export const CLIENT_ID_LOCK_NAME = 'ng-ga4:client-id';
 
 // Bounds the wait so a stuck holder can't block init() (an APP_INITIALIZER).
-export const CLIENT_ID_LOCK_TIMEOUT_MS = 3000;
-
-function lockManager(): LockManager | null {
-    if (typeof navigator === 'undefined') {
-        return null;
-    }
-    const locks = (navigator as Navigator & { locks?: LockManager }).locks;
-    return locks && typeof locks.request === 'function' ? locks : null;
-}
+export const CLIENT_ID_LOCK_TIMEOUT_MS = LOCK_TIMEOUT_MS;
 
 /**
  * Runs `critical` under the client-ID lock. Runs it unlocked if Web Locks are
  * unavailable, refused, or not granted within `timeoutMs`. Errors from
  * `critical` are rethrown, never retried.
  */
-export async function withClientIdLock<T>(
+export function withClientIdLock<T>(
     critical: () => Promise<T>,
     timeoutMs: number = CLIENT_ID_LOCK_TIMEOUT_MS
 ): Promise<T> {
-    const locks = lockManager();
-    if (!locks) {
-        return critical();
-    }
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    let settle: () => T;
-    try {
-        // The callback must not reject: under zone.js that surfaces as an
-        // unhandled rejection even though it is caught here.
-        settle = await locks.request(CLIENT_ID_LOCK_NAME, { signal: controller.signal }, () =>
-            critical().then(
-                (value): (() => T) => () => value,
-                (error): (() => T) => () => { throw error; }
-            )
-        );
-    } catch (err) {
-        // Not granted: timed out or refused.
-        console.warn('[ng-ga4] Could not acquire the client-ID lock; continuing without it.', err);
-        return critical();
-    } finally {
-        clearTimeout(timer);
-    }
-    return settle();
+    return withLock(CLIENT_ID_LOCK_NAME, critical, { timeoutMs, label: 'client-ID' });
 }
 
 async function readStoredClientId(): Promise<string | null> {

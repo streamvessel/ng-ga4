@@ -417,7 +417,8 @@ describe('NgGa4Service', () => {
             await service.init();
 
             expect((service as any).clientId).toBe('stored-id');
-            expect(fakeLocks.requested).toEqual([]);
+            // The outbox takes its own lock once init() finishes; not this one.
+            expect(fakeLocks.requested).not.toContain('ng-ga4:client-id');
         });
 
         it('gives two contexts starting cold together one client ID, minted once', async () => {
@@ -463,7 +464,8 @@ describe('NgGa4Service', () => {
             await service.init();
 
             expect((service as any).clientId).toBe(MOCK_MINTED_CLIENT_ID);
-            expect(fakeLocks.requested).toEqual([CLIENT_ID_LOCK_NAME]);
+            // The outbox's own lock, taken after init(), is not part of this.
+            expect(fakeLocks.requested.filter(name => name === CLIENT_ID_LOCK_NAME)).toEqual([CLIENT_ID_LOCK_NAME]);
         });
     });
 
@@ -4919,6 +4921,75 @@ describe('NgGa4Service', () => {
 
             httpMock.expectNone(isCollect);
             expect(chromeLocal['ga_outbox'][0].events[0].name).toBe('backlog');
+        });
+
+        it('runs each outbox read-modify-write under the outbox lock', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['earlier'], HOUR_MS)]);
+
+            await initAndDrain();
+            httpMock.expectOne(isCollect).flush('', ok);
+            await service.flush();
+
+            expect(fakeLocks.requested).toContain('ng-ga4:outbox');
+        });
+
+        describe('across extension contexts', () => {
+            // A popup and the service worker: two services sharing one chrome.storage.
+            function secondContext(): NgGa4Service {
+                return Injector.create({
+                    providers: [
+                        NgGa4Service,
+                        { provide: HttpClient, useValue: TestBed.inject(HttpClient) },
+                        { provide: Router, useValue: { events: new Subject<any>().asObservable() } },
+                        { provide: NG_GA4_CONFIG, useValue: { ...defaultConfig, isExtension: true } },
+                        { provide: PLATFORM_ID, useValue: 'browser' },
+                        { provide: NgZone, useValue: TestBed.inject(NgZone) }
+                    ]
+                }).get(NgGa4Service);
+            }
+
+            // Both contexts drain the shared outbox at once, on 'online'. Writes
+            // are held until released, as chrome.storage's are until they land,
+            // so without a lock each context's read happens before the other's
+            // clearing write.
+            async function bothDrain(): Promise<{ replays: TestRequest[]; mock: DeferredChromeMock }> {
+                reconfigureTestBed({ isExtension: true });
+                setupChromeMock({ ga_client_id: 'ext-cid' });
+                const second = secondContext();
+                await Promise.all([service.init(), second.init()]);
+                await Promise.all([service.flush(), second.flush()]);
+                const mock = setupDeferredChromeMock({ ga_client_id: 'ext-cid', ga_outbox: [storedBody(['backlog'], HOUR_MS)] });
+
+                window.dispatchEvent(new Event('online'));
+                for (let round = 0; round < 5; round++) {
+                    await mock.releaseAll();
+                    await drainMicrotasks();
+                }
+                const replays = httpMock.match(isCollect);
+                replays.forEach(r => r.flush('', ok));
+                const flushed = Promise.all([service.flush(), second.flush()]);
+                await mock.releaseAll();
+                await flushed;
+                second.ngOnDestroy();
+                return { replays, mock };
+            }
+
+            it('replays each stored request once when both drain together', async () => {
+                const { replays, mock } = await bothDrain();
+
+                expect(replays.length).toBe(1);
+                expect(mock.localStore['ga_outbox']).toBeUndefined();
+            });
+
+            // Control: proves the shared mock reproduces the race the lock closes.
+            it('replays the backlog twice without Web Locks', async () => {
+                restoreLocks();
+                restoreLocks = installLockManager(undefined);
+
+                const { replays } = await bothDrain();
+
+                expect(replays.length).toBe(2);
+            });
         });
 
         it('costs no storage write on init() when empty', async () => {

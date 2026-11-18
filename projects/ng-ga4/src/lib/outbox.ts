@@ -4,6 +4,16 @@ import { isWithinBackdateWindow } from './timestamp';
 export const OUTBOX_STORAGE_KEY = 'ga_outbox';
 
 /**
+ * The Web Lock every read-modify-write of the stored outbox runs under, so
+ * contexts sharing it (an extension's worker and pages, a site's tabs) take
+ * turns. Separate from the client-ID lock: the two never need each other.
+ */
+export const OUTBOX_LOCK_NAME = 'ng-ga4:outbox';
+
+/** How the outbox lock is named in the warning logged when it is not granted. */
+export const OUTBOX_LOCK_LABEL = 'outbox';
+
+/**
  * At most this many events are kept. Past it the oldest are evicted first:
  * they are the closest to falling out of the 72-hour window anyway, and the
  * newest are the ones still worth most. Sized for a few hours offline at an

@@ -28,7 +28,8 @@ import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCo
 import { clampToNow, isWithinBackdateWindow, toTimestampMicros } from './timestamp';
 import { EventBatcher } from './event-batcher';
 import { NgGa4Delivery, NgGa4TrackResult, NgGa4TrackStatus } from './track-result';
-import { OUTBOX_STORAGE_KEY, parseOutbox, pruneOutbox } from './outbox';
+import { OUTBOX_LOCK_LABEL, OUTBOX_LOCK_NAME, OUTBOX_STORAGE_KEY, parseOutbox, pruneOutbox } from './outbox';
+import { withLock } from './web-lock';
 
 // A transport outcome before dispatch() decides what to do with it:
 // 'unreachable' is a genuine network failure, the only one worth retrying —
@@ -1110,8 +1111,12 @@ export class NgGa4Service implements OnDestroy {
         }
     }
 
-    // The single read-modify-write for the outbox, on the storage chain so two
-    // in this context never interleave. `change` gets what is stored, already
+    // The single read-modify-write for the outbox. The storage chain keeps two
+    // in this context from interleaving; the Web Lock does the same across
+    // contexts — an extension's popup and service worker, or a site's tabs —
+    // which share the stored outbox. Without it, two contexts could both read
+    // the same requests and replay them twice, or one could write back over a
+    // request the other had just stored. `change` gets what is stored, already
     // within the 72-hour window and the size cap, and returns what to store
     // plus whatever the caller wants back. Rejects if storage does.
     private async updateOutbox<R>(
@@ -1125,7 +1130,7 @@ export class NgGa4Service implements OnDestroy {
             return pruneOutbox(next, now);
         };
         if (this.config.isExtension && chrome?.storage) {
-            await this.enqueueStorageWrite('chrome.storage.local (outbox)', async () => {
+            await this.enqueueStorageWrite('chrome.storage.local (outbox)', () => withLock(OUTBOX_LOCK_NAME, async () => {
                 const raw = (await chrome.storage.local.get([OUTBOX_STORAGE_KEY]))[OUTBOX_STORAGE_KEY];
                 const next = apply(raw);
                 // Nothing stored and nothing to store — the usual case — costs no write.
@@ -1134,12 +1139,14 @@ export class NgGa4Service implements OnDestroy {
                 } else if (raw != null) {
                     await chrome.storage.local.remove([OUTBOX_STORAGE_KEY]);
                 }
-            });
+            }, { label: OUTBOX_LOCK_LABEL }));
             return outcome;
         }
         // Chained even though localStorage is synchronous, so its order against
         // a consent withdrawal's removal holds on this path too.
-        await this.enqueueStorageWrite('localStorage (outbox)', async () => {
+        // localStorage is synchronous but not atomic across tabs, so the
+        // read-modify-write takes the lock too.
+        await this.enqueueStorageWrite('localStorage (outbox)', () => withLock(OUTBOX_LOCK_NAME, async () => {
             const raw = localStorage.getItem(OUTBOX_STORAGE_KEY);
             const next = apply(raw);
             if (next.length) {
@@ -1155,7 +1162,7 @@ export class NgGa4Service implements OnDestroy {
             } else if (raw != null) {
                 localStorage.removeItem(OUTBOX_STORAGE_KEY);
             }
-        });
+        }, { label: OUTBOX_LOCK_LABEL }));
         return outcome;
     }
 
