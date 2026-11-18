@@ -56,6 +56,19 @@ describe('outbox', () => {
             expect(pruned[0].events[0].name).toBe('e10');
         });
 
+        it('evicts whole requests oldest-first past the character cap', () => {
+            const big = (name: string) => ({ ...body([name], [0]), padding: 'x'.repeat(400) });
+            const pruned = pruneOutbox([big('a'), big('b'), big('c')], NOW, 500, 1000);
+
+            expect(pruned.map(b => b.events[0].name)).toEqual(['b', 'c']);
+        });
+
+        it('keeps the newest request even when it alone is over the character cap', () => {
+            const huge = { ...body(['only'], [0]), padding: 'x'.repeat(2000) };
+
+            expect(pruneOutbox([huge], NOW, 500, 1000)).toEqual([huge]);
+        });
+
         it('returns an untouched body as the same object', () => {
             const kept = body(['a'], [0]);
             expect(pruneOutbox([kept], NOW)[0]).toBe(kept);

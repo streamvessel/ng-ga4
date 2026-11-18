@@ -4435,6 +4435,65 @@ describe('NgGa4Service', () => {
             req.flush('', ok);
         });
 
+        // A blocker or captive portal fails every request; one doomed probe per
+        // drain is enough to find out.
+        it('replays one batch as a probe and puts the rest back when it fails', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([
+                storedBody(['first'], 2 * HOUR_MS, 'cid-a'),
+                storedBody(['second'], HOUR_MS, 'cid-b')
+            ]);
+
+            await initAndDrain();
+            const probe = httpMock.expectOne(isCollect);
+            expect(probe.request.body.events[0].name).toBe('first');
+            failOffline(probe);
+            await service.flush();
+
+            httpMock.expectNone(isCollect);
+            expect(storedOutbox().map(b => b.events[0].name)).toEqual(['first', 'second']);
+        });
+
+        it('sends the rest once the probe gets through', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([
+                storedBody(['first'], 2 * HOUR_MS, 'cid-a'),
+                storedBody(['second'], HOUR_MS, 'cid-b')
+            ]);
+
+            await initAndDrain();
+            httpMock.expectOne(isCollect).flush('', ok);
+            for (let i = 0; i < 10; i++) { await Promise.resolve(); }
+
+            const rest = httpMock.expectOne(isCollect);
+            expect(rest.request.body.events[0].name).toBe('second');
+            rest.flush('', ok);
+            await service.flush();
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+        });
+
+        it('gives up the oldest half of the outbox when localStorage is full', async () => {
+            await initAndDrain();
+            mockLocalStorage['ga_outbox'] = JSON.stringify([
+                storedBody(['old1'], 3 * HOUR_MS),
+                storedBody(['old2'], 2 * HOUR_MS),
+                storedBody(['old3'], HOUR_MS)
+            ]);
+            let refused = false;
+            (localStorage.setItem as jasmine.Spy).and.callFake((key: string, value: string) => {
+                if (key === 'ga_outbox' && !refused) {
+                    refused = true;
+                    throw new DOMException('quota', 'QuotaExceededError');
+                }
+                mockLocalStorage[key] = value;
+            });
+
+            service.setConsent({ adUserData: 'denied' });
+            const result = service.trackEvent('newest');
+            failOffline(httpMock.expectOne(isCollect));
+
+            expect(await result.delivered).toBe('stored');
+            expect(storedOutbox().map(b => b.events[0].name)).toEqual(['old3', 'newest']);
+        });
+
         it('leaves the outbox alone when init() runs offline', async () => {
             mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['earlier'], HOUR_MS)]);
             spyOn<any>(service, 'getNavigator').and.returnValue({ onLine: false });

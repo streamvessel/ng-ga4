@@ -83,7 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps the request's original client ID, user ID, user properties, consent and
   event times. Only network failures are retried. GA4
   answers 2xx to anything it receives, so a non-2xx (a proxy or blocker) is
-  not retried. The outbox holds at most 500 events and evicts the oldest first.
+  not retried. A replay sends one batch first and the rest only if it gets
+  through. The outbox holds at most 500 events and about 1 MB, and evicts the
+  oldest first, also to make room when `localStorage` is full.
   Events older than the 72-hour backdating window are dropped. With
   `analyticsStorage` denied nothing is stored, and withdrawing it deletes the
   outbox along with the client ID. Such calls now resolve `delivered` to the new

@@ -1058,13 +1058,29 @@ export class NgGa4Service implements OnDestroy {
         }
         // Stored requests are as small as the batches that failed. Merged back
         // into full batches, a long outage replays in a few requests, not
-        // hundreds. Each one that fails again goes back in through dispatch().
-        const transport = this.transport;
+        // hundreds.
         const batcher = new EventBatcher<Ga4RequestBody, null>();
         for (const body of pending) {
             batcher.add(body, null);
         }
-        await Promise.all(batcher.drain().map(({ body }) => this.dispatch(body, transport)));
+        const batches = batcher.drain().map(({ body }) => body);
+        // The first batch is a probe: only once it gets through are the rest
+        // sent. Where every request fails — a blocker that makes fetch reject,
+        // a captive portal — each drain then costs one doomed request instead
+        // of one per stored batch. A probe that fails goes back in through
+        // dispatch(); the rest are put back unsent.
+        while (batches.length) {
+            const outcome = await this.dispatch(batches.shift()!, this.transport);
+            if (outcome === 'sent') {
+                await Promise.all(batches.map(body => this.dispatch(body, this.transport)));
+                return;
+            }
+            // Nothing was sent (every event aged out): the next batch probes.
+            if (outcome !== 'dropped') {
+                await Promise.all(batches.map(body => this.storeInOutbox(body)));
+                return;
+            }
+        }
     }
 
     // The single read-modify-write for the outbox, on the storage chain so two
@@ -1100,9 +1116,15 @@ export class NgGa4Service implements OnDestroy {
             const raw = localStorage.getItem(OUTBOX_STORAGE_KEY);
             const next = apply(raw);
             if (next.length) {
-                // Throws on quota exhaustion or in Safari private mode; the
-                // caller fails the requests, which are lost as they were before.
-                localStorage.setItem(OUTBOX_STORAGE_KEY, JSON.stringify(next));
+                try {
+                    localStorage.setItem(OUTBOX_STORAGE_KEY, JSON.stringify(next));
+                } catch {
+                    // Quota exhausted, by this origin's other data as much as by
+                    // the outbox. Give up the oldest half rather than the new
+                    // requests; if even that does not fit (Safari private mode
+                    // throws on any write), the caller fails the requests.
+                    localStorage.setItem(OUTBOX_STORAGE_KEY, JSON.stringify(next.slice(Math.floor(next.length / 2))));
+                }
             } else if (raw != null) {
                 localStorage.removeItem(OUTBOX_STORAGE_KEY);
             }

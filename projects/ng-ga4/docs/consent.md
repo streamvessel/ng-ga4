@@ -33,5 +33,7 @@ Things to know:
 
 - **This library doesn't store consent, and each tab or extension context has its own.** Call `setConsent()` on every start-up from your own record of the user's choice, in every context. A tab that is still granted keeps writing session data to the shared store after another tab denies.
 - **`setEnabled(false)` stops sending but deletes nothing.** To remove stored identifiers, deny `analyticsStorage`.
+  - Events already waiting in the [batch](delivery.md#batching) were tracked while collection was on, so they're sent at that moment rather than dropped. If you use `setEnabled(false)` as a user's opt-out, that last request still leaves after the click. For a withdrawal of consent, call `setConsent()` too.
+  - If that last request can't reach GA4, it goes to the [offline outbox](delivery.md#offline-outbox) like any other, and is replayed once collection is on again and the outbox drains.
 - **Granting again restores the client ID, user ID and session at once, but `_ga` only on the next page load.**
 - An invalid consent value counts as `denied`, with a warning.

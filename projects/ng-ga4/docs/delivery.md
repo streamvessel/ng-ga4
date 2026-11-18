@@ -41,7 +41,8 @@ console.log(status, await delivered);
 A request that can't reach GA4 at all (the browser reports itself offline, or a DNS failure or connection reset) is saved and sent again on the next `init()`, when the browser comes back `online`, and after the next request that does get through. Its `delivered` resolves to `'stored'`. A replay is the original request: same client ID, user ID, user properties, consent and event times. Stored requests are merged back into full batches when replayed, so a long outage doesn't turn into hundreds of requests.
 
 - It lives in `chrome.storage.local` in an extension and `localStorage` on the web, under `ga_outbox`.
-- It holds at most 500 events, dropping the oldest first. Events older than 72 hours are dropped, since GA4 would record them at the wrong time.
+- It holds at most 500 events and about 1 MB, dropping the oldest first. If `localStorage` is full anyway, the oldest half of the outbox gives way to the new requests. Events older than 72 hours are dropped, since GA4 would record them at the wrong time.
+- A replay sends one batch first and the rest only once that one gets through, so where every request fails (a captive portal, a blocker) each attempt costs one request, not one per stored batch.
 - Only network failures are retried. GA4 answers 2xx to anything it receives, so an error status comes from something in between (a proxy, a blocker) and is not retried.
 - With `analyticsStorage` denied nothing is saved, and withdrawing it deletes the outbox along with the client ID.
 - In an extension, a popup and the service worker each replay on their own `init()`. If both start while the outbox holds requests, those requests can be sent twice.
