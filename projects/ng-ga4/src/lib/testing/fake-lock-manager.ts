@@ -1,6 +1,7 @@
 // Test double for navigator.locks: exclusive and FIFO like the real one, but
 // grants on a microtask so specs that only drain microtasks under
-// jasmine.clock() still progress. Only one lock name is ever used.
+// jasmine.clock() still progress. Every name shares one queue — stricter than
+// real Web Locks, which only serialise requests for the same name.
 export class FakeLockManager {
     readonly requested: string[] = [];
     maxHeld = 0;

@@ -13,7 +13,8 @@
 
 - `siteUrl` (`string`): base of `page_location`, e.g. `https://example.com`. Needed in extensions, where the page address is `chrome-extension://…`. Without it, `page_location` is the page's full address.
 - `appVersion` (`string`): sent as `app_version` on every event. An `app_version` passed in `trackEvent()` params takes precedence, as do any other params that collide with ones the library sets.
-- `transport` (`'beacon' | 'xhr'`, default `'beacon'`): `'beacon'` tries `sendBeacon`, then `fetch` with `keepalive`, then XHR, so hits survive the page closing. `'xhr'` sends through `HttpClient` and your interceptors, but a request still in flight when the page closes is lost.
+- `transport` (`'beacon' | 'xhr'`, default `'beacon'`): `'beacon'` tries `sendBeacon`, then `fetch` with `keepalive`, then XHR, so hits survive the page closing. `'xhr'` sends through `HttpClient` and your interceptors, but a request still in flight when the page closes is lost, so a batch sent as the page is hidden or closed takes the `'beacon'` chain. Both batch events (see [Batching](delivery.md#batching)).
+- `batchDelayMs` (`number`, default `300`): how long an event waits for others to share its request. See [Batching](delivery.md#batching).
 - `debug` (`boolean`, default `false`): see [Debug mode](engagement.md#debug-mode).
 - `clientIdSource` (`'auto' | 'cookie' | 'storage'`, default `'auto'`): where the web client ID comes from. See [Client ID and gtag.js](identity.md#client-id-and-gtagjs). An unknown value logs a warning and falls back to `'auto'`, which reads `_ga`. Ignored in extensions.
 - `writeGaCookie` (`boolean` or `NgGa4CookieOptions`, default `false`): write a `_ga` cookie when there is no valid one, and refresh the one it wrote on each page load (web only). See [Client ID and gtag.js](identity.md#client-id-and-gtagjs).

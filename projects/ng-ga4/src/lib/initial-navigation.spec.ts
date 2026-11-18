@@ -87,7 +87,17 @@ describe('initial navigation', () => {
                 })
             ]
         });
-        await appRef.whenStable();
+        await settle();
+    }
+
+    // Events are batched, and the batch timer runs outside the zone, so
+    // whenStable() does not wait for it. One macrotask lets the router's page
+    // view (sent a microtask after NavigationEnd) reach the queue; flush()
+    // then sends it, as an app awaiting delivery would.
+    async function settle(): Promise<void> {
+        await appRef!.whenStable();
+        await new Promise(resolve => setTimeout(resolve));
+        await appRef!.injector.get(NgGa4Service).flush();
     }
 
     function pageViews(): HttpRequest<any>[] {
@@ -170,8 +180,8 @@ describe('initial navigation', () => {
             ];
             await bootstrap(false, titled);
 
-            await appRef.injector.get(Router).navigateByUrl('/about');
-            await appRef.whenStable();
+            await appRef!.injector.get(Router).navigateByUrl('/about');
+            await settle();
 
             const titles = pageViews().map(r =>
                 r.body.events.find((e: any) => e.name === 'page_view').params.page_title);

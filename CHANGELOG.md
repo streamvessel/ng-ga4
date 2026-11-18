@@ -46,6 +46,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Subcontinent dimensions used to read `(not set)`
   ([#22](https://github.com/streamvessel/ng-ga4/issues/22)).
 
+- Every event now carries `timestamp_micros`, the time it was tracked, and each
+  request carries the earliest of its events'. GA4 used to stamp events with
+  their arrival time, which is wrong for anything sent later than it happened —
+  a call made while `init()` was still running, and soon batched and replayed
+  events. An event older than the Measurement Protocol's 72-hour backdating
+  window is dropped rather than sent, since GA4 would re-stamp it to exactly 72
+  hours ago; a timestamp in the future is clamped to the send time.
+  ([#21](https://github.com/streamvessel/ng-ga4/issues/21))
+- Events are batched, over either transport, as `gtag.js` does. Calls made within
+  `batchDelayMs` (new option, default 300 ms) of each other go out as one
+  request of up to 25 events, the Measurement Protocol's limit, instead of one
+  request (and CORS preflight) each. A batch is sent at once when it is full, when
+  the page is hidden or torn down (`visibilitychange` → hidden, `pagehide`), and
+  when the service is destroyed. Events whose request-level fields differ — a
+  consent change between two calls, say — are never merged, and a batch stays
+  under the 64 KiB `sendBeacon` quota. In debug mode each batch is validated as
+  sent. Under `transport: 'xhr'` a batch goes through `HttpClient` like a single
+  hit used to, except one sent as the page is hidden or closed, which takes the
+  unload-safe beacon chain.
+  ([#24](https://github.com/streamvessel/ng-ga4/issues/24))
+- `flush()` on `NgGa4Service`: sends every queued event at once and resolves when
+  their requests have settled and pending `chrome.storage` writes have landed.
+  Calls made while `init()` is still running are included. It never rejects.
+  Await it before an MV3 event handler returns or an extension popup closes. The
+  batch goes out before the first `await`, so calling it without waiting works
+  in an unload handler too.
+  ([#26](https://github.com/streamvessel/ng-ga4/issues/26))
+- `trackEvent()` and `trackPageView()` return an `NgGa4TrackResult`.
+  Its `status` says synchronously what happened to the call: `'accepted'`,
+  `'deferred'` (held until `init()` finishes), `'invalid'` (an event name
+  GA4 would discard; see event validation), `'disabled'`, `'uninitialized'`
+  or `'server'`. Its `delivered` promise resolves to `'sent'`, `'failed'`
+  (a network error, or a non-2xx from something between you and GA4) or
+  `'dropped'`, and never rejects. Existing call sites that ignore the return
+  value are unaffected. New exported types: `NgGa4TrackResult`,
+  `NgGa4TrackStatus`, `NgGa4Delivery`.
+  ([#26](https://github.com/streamvessel/ng-ga4/issues/26))
+- Offline outbox. A request that cannot reach GA4 at all (the browser reports
+  itself offline, or a DNS failure or connection reset) is saved whole to
+  `chrome.storage.local` in an extension, `localStorage` on the web. It is
+  replayed on the next `init()`, when the browser fires `online`, and after the
+  next request that does get through, merged back into full batches. A replay
+  keeps the request's original client ID, user ID, user properties, consent and
+  event times. Only network failures are retried. GA4
+  answers 2xx to anything it receives, so a non-2xx (a proxy or blocker) is
+  not retried. A replay sends one batch first and the rest only if it gets
+  through. The outbox holds at most 500 events and about 1 MB, and evicts the
+  oldest first, also to make room when `localStorage` is full. Contexts sharing
+  it (an extension's popup and service worker, a site's tabs) take turns under
+  the `ng-ga4:outbox` Web Lock, so a stored request is replayed once and one
+  context's drain never overwrites a request another has just stored.
+  Events older than the 72-hour backdating window are dropped. Hashed
+  `user_data` is never stored; a replayed request goes without it. With
+  `analyticsStorage` denied nothing is stored, and withdrawing it deletes the
+  outbox along with the client ID. Such calls now resolve `delivered` to the new
+  `'stored'` outcome.
+  ([#25](https://github.com/streamvessel/ng-ga4/issues/25))
+
 ### Changed
 
 - A caller-supplied `app_version` in `trackEvent()` params now replaces the

@@ -33,6 +33,8 @@ describe('NgGa4Service enhanced measurement wiring', () => {
     }
 
     function sentEvents(): Array<{ name: string; params: Record<string, any> }> {
+        // Events are batched; send what is queued rather than wait for the timer.
+        (service as any).flushQueue();
         return httpMock.match(r => r.url.includes('mp/collect')).flatMap(r => r.request.body.events);
     }
 
