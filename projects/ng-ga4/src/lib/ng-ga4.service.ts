@@ -1,14 +1,51 @@
-import { Inject, Injectable, NgZone, OnDestroy, PLATFORM_ID } from '@angular/core';
+import { Inject, Injectable, isDevMode, NgZone, OnDestroy, PLATFORM_ID } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { isPlatformBrowser } from '@angular/common';
 import { NavigationEnd, Router } from '@angular/router';
-import { filter, Subscription } from 'rxjs';
+import { asapScheduler, filter, observeOn, Subscription } from 'rxjs';
 import { NG_GA4_CONFIG, NgGa4Config, NgGa4CookieOptions } from './ng-ga4.config';
 import { ConsentState, Ga4ConsentPayload, NgGa4Consent } from './consent';
+import { regionFromCountry } from './country-region';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
+import { Ga4UserDataPayload, hashUserData, NgGa4UserData } from './user-data';
+import { EnhancedMeasurement } from './enhanced-measurement';
+import { appOnlyEventNameProblem, eventNameProblem, validateEventParams } from './ga4-validation';
+import {
+    applyUserPropertyUpdate,
+    emptyUserPropertyUpdate,
+    foldUserPropertyUpdate,
+    Ga4UserPropertiesPayload,
+    NgGa4UserPropertyValue,
+    parseStoredUserProperties,
+    serializeUserProperties,
+    toUserPropertiesPayload,
+    UserProperties,
+    UserPropertyUpdate
+} from './user-properties';
+import { readOrMintChromeClientId } from './client-id-lock';
 import { formatGaCookie, isGtagClientId, mintGtagClientId, parseGaCookie, readCookieValue, registrableDomainCandidates } from './ga-cookie';
+import { clampToNow, isWithinBackdateWindow, toTimestampMicros } from './timestamp';
+import { EventBatcher } from './event-batcher';
+import { NgGa4Delivery, NgGa4TrackResult, NgGa4TrackStatus } from './track-result';
+import { OUTBOX_LOCK_LABEL, OUTBOX_LOCK_NAME, OUTBOX_STORAGE_KEY, parseOutbox, pruneOutbox } from './outbox';
+import { withLock } from './web-lock';
+
+// A transport outcome before dispatch() decides what to do with it:
+// 'unreachable' is a genuine network failure, the only one worth retrying —
+// GA4 answers 2xx to whatever it receives, and its docs say not to retry a
+// non-2xx, so there is no server-side signal to retry on (#25).
+type SendOutcome = Exclude<NgGa4Delivery, 'stored'> | 'unreachable';
+
+// Settles one call's `delivered`.
+type Settle = (outcome: NgGa4Delivery | Promise<NgGa4Delivery>) => void;
+
+function deferred(): { promise: Promise<NgGa4Delivery>; settle: Settle } {
+    let settle!: Settle;
+    const promise = new Promise<NgGa4Delivery>(resolve => { settle = resolve; });
+    return { promise, settle };
+}
 
 interface Ga4Device {
     language?: string;
@@ -24,6 +61,34 @@ interface Ga4Device {
 
 interface Ga4UserLocation {
     country_id?: string;
+    continent_id?: string;
+    subcontinent_id?: string;
+}
+
+interface Ga4Event {
+    name: string;
+    params?: Record<string, any>;
+    // When the event happened, not when it was sent. The track methods capture
+    // it on entry and carry it through a replay from pendingCalls; anything
+    // else is stamped in sendToGA4(), which it reaches synchronously.
+    timestamp_micros?: number;
+}
+
+// One Measurement Protocol request as queued, stored and replayed. Everything
+// except `events` is the envelope EventBatcher groups by, so a new
+// request-level field added here is batched correctly with no other change.
+// The request-level `timestamp_micros` is not kept: dispatch() derives it
+// from the events, which always carry their own.
+interface Ga4RequestBody {
+    client_id: string;
+    user_id?: string;
+    events: Array<Ga4Event & { timestamp_micros: number }>;
+    device?: Ga4Device;
+    user_agent?: string;
+    user_location?: Ga4UserLocation;
+    consent?: Ga4ConsentPayload;
+    user_data?: Ga4UserDataPayload;
+    user_properties?: Ga4UserPropertiesPayload;
 }
 
 @Injectable()
@@ -43,17 +108,34 @@ export class NgGa4Service implements OnDestroy {
     // Set by trackPageView(); read by flushEngagement() to attribute the
     // hide-time event's page_location (see flushEngagement for the null case).
     private lastPagePath: string | null = null;
+    // Top-level MP `user_id` (#18). Never a user property: `user_id` is a
+    // reserved user property name there.
+    private userId: string | null = null;
+    // Set by setUserId(). The app's own call is newer than anything on disk, so
+    // init() must not overwrite it with a value it loads afterwards.
+    private userIdSetByApp = false;
     private device: Ga4Device | null = null;
     // Sent as the request-level `user_agent` on every hit. Per Google's MP reference,
     // GA4 ignores it whenever `device` is present — which in a browser is effectively
     // always — so today it is inert. See collectUserAgent() and #89.
     private userAgent: string | null = null;
     private userLocation: Ga4UserLocation | null = null;
-    private pendingCalls: Array<() => void> = [];
+    // Calls made while init() runs. `drop` settles the caller's `delivered`
+    // when the call will never be replayed (the service is destroyed first).
+    private pendingCalls: Array<{ replay: () => void; drop: () => void }> = [];
+    // What this context sends as user_properties. Loaded from storage in init().
+    private userProperties: UserProperties = {};
+    // setUserProperties() calls made before that load, folded together and
+    // applied on top of what was stored. `null` once loaded.
+    private pendingUserProperties: UserPropertyUpdate | null = emptyUserPropertyUpdate();
     private engagement: EngagementTimer | null = null;
+    private userData: Ga4UserDataPayload | null = null;
+    private userDataGeneration = 0;
+    private enhancedMeasurement: EnhancedMeasurement | null = null;
     // Resolved once, in init(), by resolveEngagementEventName() — validating on
     // every flush would warn on every window switch for a misconfigured name.
     private engagementEventName = 'page_engagement';
+    private readonly MAX_USER_ID_LENGTH = 256;
     private readonly SESSION_TIMEOUT_MS = 30 * 60 * 1000;
     // Below this, a flush is noise — the time is not discarded, it rides out on
     // the next flush or hit. Blur never reaches this check (see registerEngagementListeners).
@@ -64,21 +146,33 @@ export class NgGa4Service implements OnDestroy {
     private readonly GA_COOKIE_MAX_AGE_SECONDS = 63072000;
     private readonly GA4_ENDPOINT = 'https://www.google-analytics.com/mp/collect';
     private readonly GA4_DEBUG_ENDPOINT = 'https://www.google-analytics.com/debug/mp/collect';
-    // Reserved automatically-collected/recommended event names — sending a custom
-    // event under one of these is accepted with 2xx and silently dropped.
-    private readonly RESERVED_MP_EVENT_NAMES = new Set([
-        'user_engagement', 'session_start', 'first_visit', 'first_open', 'error',
-        'in_app_purchase', 'os_update', 'app_remove', 'app_update', 'app_clear_data',
-        'ad_click', 'ad_impression', 'ad_query', 'ad_exposure', 'adunit_exposure',
-        'notification_dismiss', 'notification_foreground', 'notification_open',
-        'notification_receive', 'screen_view'
-    ]);
 
     private readonly isBrowser: boolean;
+    // Whether trackEvent() explains what it dropped. Validation itself runs in
+    // every build — sending a hit GA4 will discard helps nobody — but in
+    // production it stays silent, and a clean payload never builds a message.
+    private readonly warnOnInvalid: boolean;
     private readonly consent: ConsentState;
     private enabled: boolean;
     private initPromise: Promise<void> | null = null;
     private storageWrites: Promise<void> = Promise.resolve();
+    // Events waiting to go out together (#24), over either transport.
+    // Each ticket settles one call's `delivered` with its batch's outcome.
+    private readonly batcher = new EventBatcher<Ga4RequestBody, Settle>();
+    // Requests on the wire, for flush() to wait on.
+    private readonly inFlight = new Set<Promise<unknown>>();
+    private onlineListener?: () => void;
+    // Requests waiting for the next outbox write, so a burst of failures costs
+    // one read-modify-write rather than one each.
+    private outboxAppends: Array<{ body: Ga4RequestBody; settle: Settle }> = [];
+    // Whether the stored outbox may hold anything, so a successful send knows
+    // to drain it. Starts true: an earlier lifetime may have left requests.
+    private outboxMayHaveItems = true;
+    private batchTimer: ReturnType<typeof setTimeout> | null = null;
+    private readonly DEFAULT_BATCH_DELAY_MS = 300;
+    // The configured transport for an ordinary send; anything but 'xhr' is the
+    // default beacon chain.
+    private readonly transport: 'beacon' | 'xhr';
 
     constructor(
         private http: HttpClient,
@@ -92,6 +186,8 @@ export class NgGa4Service implements OnDestroy {
         // config.enabled is only the *initial* value now: a consent banner has to be
         // able to turn collection on after the injector is built.
         this.enabled = config.enabled;
+        this.transport = config.transport === 'xhr' ? 'xhr' : 'beacon';
+        this.warnOnInvalid = !!config.debug || isDevMode();
     }
 
     init(): Promise<void> {
@@ -120,6 +216,12 @@ export class NgGa4Service implements OnDestroy {
 
     private async runInit(): Promise<void> {
         this.initialized = true;
+        // A setUserId() made before init() started was held in memory only (see
+        // setUserId). Written here, before the first await, so a call made
+        // during the awaits below — which persists itself — is not written twice.
+        if (this.userIdSetByApp) {
+            this.persistUserId(this.userId);
+        }
 
         // Created here, not in the constructor: the constructor also runs on
         // the server, where `document` does not exist.
@@ -132,9 +234,25 @@ export class NgGa4Service implements OnDestroy {
         // for listeners to be live before clientId is ready.
         this.registerEngagementListeners();
         this.engagementEventName = this.resolveEngagementEventName();
+        this.warnOnMalformedConfig();
+        // Before the awaits for the same reason, and so the landing page view —
+        // queued until clientId is ready — still reaches pageViewed() for site
+        // search. Events fired meanwhile queue like any other trackEvent() call.
+        // Outside Angular: the handlers only send hits (see registerEngagementListeners).
+        // With every flag off (the default) it registers nothing.
+        const enhanced = this.enhancedMeasurement ??= new EnhancedMeasurement(this.config.enhancedMeasurement ?? {}, {
+            track: (name, params) => this.trackEvent(name, params),
+            pageLocation: () => this.engagementPageLocation(),
+            siteUrl: this.config.siteUrl
+        });
+        this.zone.runOutsideAngular(() => enhanced.start());
 
         const clientId = await this.loadOrCreateClientId();
+        if (!this.userIdSetByApp) {
+            await this.restoreUserId();
+        }
         this.sessionNumber = await this.loadSessionNumber();
+        await this.restoreUserProperties();
         await this.restoreOrStartSession();
         await this.collectContext();
         // Assign clientId last so the `!this.clientId` guard in track* gates sends
@@ -145,12 +263,19 @@ export class NgGa4Service implements OnDestroy {
         this.drainPendingCalls();
 
         this.routerSubscription = this.router.events
-            .pipe(filter(event => event instanceof NavigationEnd))
+            .pipe(
+                filter(event => event instanceof NavigationEnd),
+                // The router emits NavigationEnd *before* TitleStrategy.updateTitle()
+                // sets the new route's title; reading document.title synchronously
+                // would report the previous page's. One microtask later it is set.
+                observeOn(asapScheduler)
+            )
             .subscribe((event: NavigationEnd) => {
                 this.trackPageView(event.urlAfterRedirects);
             });
 
         this.registerSessionSyncListener();
+        this.registerOnlineListener();
         // Closes the gap between "another context wrote during the awaits above"
         // and "the listener just registered above can observe it" — see
         // catchUpSessionState() for why this can't simply be moved earlier instead.
@@ -172,17 +297,52 @@ export class NgGa4Service implements OnDestroy {
         // settles would stall bootstrap — but loadOrCreateClientIdFromChromeStorage
         // already awaits one above, so this adds no new class of hazard.
         await this.flushStorage();
+
+        // Events that failed to send in an earlier page or worker lifetime.
+        // Started after the flush above and not awaited: init() is an
+        // APP_INITIALIZER, and must wait neither on the network nor on an extra
+        // storage read. flush() waits for it.
+        this.trackInFlight(this.drainOutbox());
+    }
+
+    /**
+     * Set the signed-in user's ID, sent as the top-level `user_id` of every hit
+     * from here on — the equivalent of `gtag('config', id, { user_id })`. Pass
+     * `null` on sign-out to stop sending it. Signing out or switching to another
+     * ID also clears `setUserData()`.
+     *
+     * Persisted alongside the client ID, so it survives reloads, and subject to
+     * the same `analyticsStorage` consent: while that is denied it is held in
+     * memory only. Never send PII (an email address, say) as a user ID.
+     */
+    setUserId(userId: string | null): void {
+        const next = this.normaliseUserId(userId);
+        if (this.userId !== null && next !== this.userId) {
+            this.clearUserData();
+        }
+        this.userId = next;
+        this.userIdSetByApp = true;
+        // Before init() starts nothing is written — `enabled: false` promises no
+        // storage writes until collection is turned on. runInit() persists it then.
+        if (this.initialized) {
+            this.persistUserId(next);
+        }
     }
 
     /**
      * Update consent at runtime. Merges into the current state — keys you omit are
      * left alone. Call this on every app boot from your own consent store; this
-     * library deliberately does not persist consent itself.
+     * library deliberately does not persist consent itself. Withdrawing a granted
+     * `adUserData` or `analyticsStorage` also clears `setUserData()`.
      */
     setConsent(consent: NgGa4Consent): void {
         const wasAllowed = this.consent.storageAllowed;
+        const wasUserDataAllowed = this.consent.userDataAllowed;
         this.consent.merge(consent);
         const isAllowed = this.consent.storageAllowed;
+        if ((wasUserDataAllowed && !this.consent.userDataAllowed) || (wasAllowed && !isAllowed)) {
+            this.clearUserData();
+        }
         if (wasAllowed && !isAllowed) {
             this.clearPersistedIdentity();
             return;
@@ -190,6 +350,28 @@ export class NgGa4Service implements OnDestroy {
         if (!wasAllowed && isAllowed && this.clientId) {
             this.repersistIdentity(this.clientId);
         }
+    }
+
+    /**
+     * Attach hashed email/phone/address (`user_data`) to later hits, or clear it
+     * with `null`. Kept in memory only. Resolves once hashed; hits sent before
+     * that go without it. A later call wins over one still hashing. Never rejects.
+     */
+    async setUserData(userData: NgGa4UserData | null): Promise<void> {
+        const generation = this.clearUserData();
+        if (!userData || !this.isBrowser) {
+            return;
+        }
+        const hashed = await hashUserData(userData, globalThis.crypto?.subtle);
+        if (generation === this.userDataGeneration) {
+            this.userData = hashed;
+        }
+    }
+
+    /** Drops the hashes and any hashing still in flight; returns the new generation. */
+    private clearUserData(): number {
+        this.userData = null;
+        return ++this.userDataGeneration;
     }
 
     /**
@@ -210,6 +392,10 @@ export class NgGa4Service implements OnDestroy {
             // accrued before this point was collected under consent and stays in
             // the accumulator to ride out on a later hit.
             this.engagement?.setEngaged(false);
+            // Queued events were tracked while enabled, and before batching they
+            // would already have been sent. Send them now rather than up to
+            // batchDelayMs after the switch was turned off.
+            this.flushQueue();
             return;
         }
         if (!this.isBrowser) {
@@ -224,6 +410,26 @@ export class NgGa4Service implements OnDestroy {
     }
 
     /**
+     * Set user properties, the equivalent of `gtag('set', 'user_properties', {...})`.
+     * Merges into what is set: a `null` value removes that property, an
+     * `undefined` one is ignored, and `null` instead of an object removes all.
+     * Sent as `user_properties` on every later hit and stored next to the client
+     * ID. Anything GA4 would reject is dropped, with a warning in dev mode — see
+     * https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-properties
+     * for the limits. Calls made before `init()` finishes are applied once it does.
+     */
+    setUserProperties(properties: Record<string, NgGa4UserPropertyValue> | null): void {
+        if (!this.isBrowser) {
+            return;
+        }
+        const update = this.pendingUserProperties ?? emptyUserPropertyUpdate();
+        this.warnDroppedUserProperties(foldUserPropertyUpdate(update, properties));
+        if (!this.pendingUserProperties) {
+            this.updateUserProperties(update, false);
+        }
+    }
+
+    /**
      * Resolve once every pending `chrome.storage` write has landed.
      *
      * Await this before an MV3 event handler returns. The service worker can be
@@ -232,7 +438,7 @@ export class NgGa4Service implements OnDestroy {
      *
      * Resolves immediately on the web, where storage writes are synchronous.
      *
-     * This does not flush *events*: sends are still fire-and-forget (see #26).
+     * This does not flush *events*; `flush()` does both.
      * It is also not a guarantee against forced termination — a browser quit or
      * extension reload can drop an in-flight write whatever we do. For the client
      * ID specifically, `seedNgGa4ClientId()` removes the exposure entirely.
@@ -254,6 +460,39 @@ export class NgGa4Service implements OnDestroy {
             tail = this.storageWrites;
             await tail;
         } while (tail !== this.storageWrites);
+    }
+
+    /**
+     * Send every queued event now, and resolve once their requests — and any
+     * pending `chrome.storage` writes — have settled. Never rejects.
+     *
+     * Await this before an MV3 event handler returns, or before closing an
+     * extension popup or navigating away by script: a batch waiting for its
+     * timer is otherwise lost with the context. Calls made while `init()` is
+     * still running are waited for and included.
+     *
+     * Resolves as soon as `sendBeacon` accepts a batch, since the browser
+     * delivers it from there; a `fetch` or XHR fallback is waited for.
+     */
+    async flush(): Promise<void> {
+        if (!this.isBrowser) {
+            return;
+        }
+        // Sent before the first await, so a caller that cannot wait — an unload
+        // handler, a popup about to close — still gets the batch out.
+        this.flushQueue();
+        // Calls made during init() sit in pendingCalls, not the queue, until it
+        // finishes. A failed init is not this method's to report.
+        if (this.initPromise) {
+            await this.initPromise.catch(() => undefined);
+            this.flushQueue();
+        }
+        // Looped for the same reason as flushStorage(): a request started while
+        // awaiting — a call from another task — belongs to this flush too.
+        while (this.inFlight.size) {
+            await Promise.all([...this.inFlight]);
+        }
+        await this.flushStorage();
     }
 
     // Serialises chrome.storage operations: each is chained behind everything
@@ -290,7 +529,8 @@ export class NgGa4Service implements OnDestroy {
         if (this.config.isExtension && chrome?.storage) {
             this.enqueueStorageWrite(
                 'chrome.storage.local.remove',
-                () => chrome.storage.local.remove(['ga_client_id', 'ga_session_number'])
+                // The outbox holds the client ID too, on every stored request.
+                () => chrome.storage.local.remove(['ga_client_id', 'ga_session_number', 'ga_user_id', 'ga_user_properties', OUTBOX_STORAGE_KEY])
             );
             this.enqueueStorageWrite(
                 'chrome.storage.session.remove',
@@ -309,6 +549,9 @@ export class NgGa4Service implements OnDestroy {
         localStorage.removeItem('ga_session_id');
         localStorage.removeItem('ga_last_activity');
         localStorage.removeItem('ga_session_number');
+        localStorage.removeItem('ga_user_id');
+        localStorage.removeItem('ga_user_properties');
+        localStorage.removeItem(OUTBOX_STORAGE_KEY);
         this.deleteGaCookie();
     }
 
@@ -367,10 +610,25 @@ export class NgGa4Service implements OnDestroy {
         }
         this.saveSessionNumber(this.sessionNumber);
         this.saveSessionState();
+        if (this.userId) {
+            this.saveUserId(this.userId);
+        }
+        if (Object.keys(this.userProperties).length) {
+            // Re-grant writes this context's whole map back, as for the client ID.
+            this.persistUserPropertyUpdate({ clear: true, values: new Map(Object.entries(this.userProperties)) });
+        }
     }
 
     ngOnDestroy(): void {
+        // Whatever is still waiting was collected while enabled; an injector torn
+        // down (an MV3 popup closing, an app destroyed) should not take it along.
+        this.flushQueue(true);
+        // Never replayed now; a caller awaiting `delivered` must not hang.
+        for (const call of this.pendingCalls.splice(0)) {
+            call.drop();
+        }
         this.routerSubscription?.unsubscribe();
+        this.enhancedMeasurement?.stop();
         if (this.visibilityListener && typeof document !== 'undefined') {
             document.removeEventListener('visibilitychange', this.visibilityListener);
         }
@@ -389,19 +647,31 @@ export class NgGa4Service implements OnDestroy {
         if (this.chromeStorageListener && chrome?.storage?.onChanged) {
             chrome.storage.onChanged.removeListener(this.chromeStorageListener);
         }
+        if (this.onlineListener) {
+            this.getGlobalScope()?.removeEventListener?.('online', this.onlineListener);
+        }
     }
 
-    trackPageView(pagePath: string, pageTitle?: string): void {
+    trackPageView(pagePath: string, pageTitle?: string): NgGa4TrackResult {
+        return this.recordPageView(pagePath, pageTitle, toTimestampMicros(Date.now()));
+    }
+
+    trackEvent(name: string, params?: Record<string, any>): NgGa4TrackResult {
+        return this.recordEvent(name, params, toTimestampMicros(Date.now()));
+    }
+
+    // The track methods' bodies, taking the time of the original call so that a
+    // call replayed after init() keeps it rather than the time init() finished.
+    private recordPageView(pagePath: string, pageTitle: string | undefined, timestampMicros: number): NgGa4TrackResult {
         // Dropped, not queued: the server has no client identity to attach a hit to,
         // and replaying queued events after hydration would double-count the view.
         if (!this.isBrowser || !this.enabled) {
-            return;
+            return this.notAccepted(this.isBrowser ? 'disabled' : 'server');
         }
         if (!this.clientId) {
-            if (this.initialized) {
-                this.pendingCalls.push(() => this.trackPageView(pagePath, pageTitle));
-            }
-            return;
+            return this.initialized
+                ? this.deferCall(() => this.recordPageView(pagePath, pageTitle, timestampMicros))
+                : this.notAccepted('uninitialized');
         }
         this.lastPagePath = pagePath;
 
@@ -411,76 +681,127 @@ export class NgGa4Service implements OnDestroy {
             page_location: this.config.siteUrl
                 ? this.joinSiteUrl(this.config.siteUrl, pagePath)
                 : window.location.href,
-            page_title: pageTitle,
+            // gtag.js defaults to document.title; without this, GA4 reports
+            // "(not set)" for every page view the router integration sends.
+            page_title: pageTitle ?? (this.getDocument()?.title || undefined),
             engagement_time_msec: this.consumeEngagementTime(),
             session_id: this.sessionId,
             session_number: this.sessionNumber,
             ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
         };
 
-        this.sendToGA4([{ name: 'page_view', params }]);
+        const delivered = this.sendToGA4([{ name: 'page_view', params, timestamp_micros: timestampMicros }]);
+        this.enhancedMeasurement?.pageViewed(pagePath);
+        return this.accepted(delivered);
     }
 
-    trackEvent(name: string, params?: Record<string, any>): void {
-        // See trackPageView: inert on the server, and deliberately not queued.
+    private recordEvent(name: string, params: Record<string, any> | undefined, timestampMicros: number): NgGa4TrackResult {
+        // See recordPageView: inert on the server, and deliberately not queued.
         if (!this.isBrowser || !this.enabled) {
-            return;
+            return this.notAccepted(this.isBrowser ? 'disabled' : 'server');
         }
         if (!this.clientId) {
-            if (this.initialized) {
-                this.pendingCalls.push(() => this.trackEvent(name, params));
-            }
-            return;
+            return this.initialized
+                ? this.deferCall(() => this.recordEvent(name, params, timestampMicros))
+                : this.notAccepted('uninitialized');
+        }
+
+        // /mp/collect answers 204 for an event it is about to discard, so this is
+        // the only place a bad name can surface. Checked here, after the queue,
+        // so a call replayed by drainPendingCalls() is validated (and warned
+        // about) once, and before ensureSession(), since a dropped event is not
+        // activity.
+        const nameProblem = eventNameProblem(name);
+        if (nameProblem) {
+            this.reportProblems(name, [`${nameProblem}. The event was not sent`]);
+            return this.notAccepted('invalid');
         }
 
         this.ensureSession();
 
-        this.sendToGA4([{
-            name,
-            params: {
-                // Consumed unconditionally, even though ...params below may override what
-                // gets reported: a sent hit closes the interval regardless of the value it
-                // carries. Skipping this when the caller overrides engagement_time_msec
-                // would leave the accumulator open, so the *next* hit reports time since
-                // two hits ago instead of one.
-                engagement_time_msec: this.consumeEngagementTime(),
-                session_id: this.sessionId,
-                session_number: this.sessionNumber,
-                ...params,
-                ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
-            }
-        }]);
+        const validation = validateEventParams({
+            // Consumed unconditionally, even though ...params below may override what
+            // gets reported: a sent hit closes the interval regardless of the value it
+            // carries. Skipping this when the caller overrides engagement_time_msec
+            // would leave the accumulator open, so the *next* hit reports time since
+            // two hits ago instead of one.
+            engagement_time_msec: this.consumeEngagementTime(),
+            session_id: this.sessionId,
+            session_number: this.sessionNumber,
+            // Library defaults first, caller wins: like engagement_time_msec,
+            // a caller-supplied app_version replaces the configured one. An
+            // `undefined` value does not count as supplied — validateEventParams
+            // would drop the key, losing the default along with it.
+            ...(this.config.appVersion ? { app_version: this.config.appVersion } : {}),
+            ...Object.fromEntries(Object.entries(params ?? {}).filter(([, value]) => value !== undefined))
+        }, this.warnOnInvalid);
+        if (this.warnOnInvalid) {
+            const appOnly = appOnlyEventNameProblem(name);
+            this.reportProblems(name, appOnly ? [appOnly, ...validation.problems] : validation.problems);
+        }
+
+        return this.accepted(this.sendToGA4([{ name, params: validation.params, timestamp_micros: timestampMicros }]));
+    }
+
+    // The dev-only warning policy for trackEvent() validation. Not used by
+    // resolveEngagementEventName(): a bad engagementEventName is a config error
+    // caught once at startup, and stays a warning in every build.
+    private reportProblems(eventName: unknown, problems: string[]): void {
+        if (!this.warnOnInvalid || problems.length === 0) {
+            return;
+        }
+        for (const problem of problems) {
+            console.warn(`[ng-ga4] trackEvent("${eventName}"): ${problem}.`);
+        }
+    }
+
+    private accepted(delivered: Promise<NgGa4Delivery>): NgGa4TrackResult {
+        return { status: 'accepted', delivered };
+    }
+
+    private notAccepted(status: Exclude<NgGa4TrackStatus, 'accepted' | 'deferred'>): NgGa4TrackResult {
+        return { status, delivered: Promise.resolve('dropped') };
+    }
+
+    // Held until init() finishes; `delivered` follows whatever the replayed
+    // call does then — sent, or dropped if collection was disabled meanwhile,
+    // or if the service is destroyed before init() finishes.
+    private deferCall(call: () => NgGa4TrackResult): NgGa4TrackResult {
+        const { promise, settle } = deferred();
+        this.pendingCalls.push({ replay: () => settle(call().delivered), drop: () => settle('dropped') });
+        return { status: 'deferred', delivered: promise };
     }
 
     private drainPendingCalls(): void {
         const calls = this.pendingCalls;
         this.pendingCalls = [];
         for (const call of calls) {
-            call();
+            call.replay();
         }
     }
 
     private sendToGA4(
-        events: Array<{ name: string; params?: Record<string, any> }>,
+        events: Ga4Event[],
         forceBeacon = false
-    ): void {
-        const url = this.collectUrl(this.GA4_ENDPOINT);
+    ): Promise<NgGa4Delivery> {
+        // Without a timestamp GA4 stamps each event with its arrival time, which
+        // is wrong for anything delayed between the call and the request.
+        const stamp = toTimestampMicros(Date.now());
+        const timed = events.map(event => ({ ...event, timestamp_micros: event.timestamp_micros ?? stamp }));
 
-        const body: {
-            client_id: string;
-            events: Array<{ name: string; params?: Record<string, any> }>;
-            device?: Ga4Device;
-            user_agent?: string;
-            user_location?: Ga4UserLocation;
-            consent?: Ga4ConsentPayload;
-        } = {
+        const body: Ga4RequestBody = {
             client_id: this.clientId,
             // debug_mode has to ride on every event in the batch — DebugView only
             // surfaces the individual events that carry it, not the request.
             events: this.config.debug
-                ? events.map(event => ({ ...event, params: { ...event.params, debug_mode: 1 } }))
-                : events
+                ? timed.map(event => ({ ...event, params: { ...event.params, debug_mode: 1 } }))
+                : timed
         };
+        // Omitted when unset, so an app that never calls setUserId() sends exactly
+        // what it sent before.
+        if (this.userId) {
+            body.user_id = this.userId;
+        }
         // `device`, `user_agent` and `user_location` are request-level fields (siblings
         // of `client_id`/`events`), not per-event params. /mp/collect never reads the
         // User-Agent *header*, so device data has to be in the body. We send both forms:
@@ -503,20 +824,136 @@ export class NgGa4Service implements OnDestroy {
         if (consentPayload) {
             body.consent = consentPayload;
         }
+        if (this.userData && this.consent.userDataAllowed) {
+            body.user_data = this.userData;
+        }
+        // Omitted when empty, for the same byte-identical reason as `consent`.
+        const userPropertiesPayload = toUserPropertiesPayload(this.userProperties);
+        if (userPropertiesPayload) {
+            body.user_properties = userPropertiesPayload;
+        }
+
+        // Batched over either transport, as gtag.js batches: a route change plus
+        // a few custom events becomes one request instead of one (plus a CORS
+        // preflight) each. A full batch, or a send as the page goes away, goes
+        // immediately; anything else waits briefly for company.
+        //
+        // forceBeacon is for sends as the page goes away, where XHR would be aborted
+        // and the hit lost — losing the event outright is worse than skipping interceptors.
+        const { promise, settle } = deferred();
+        const full = this.batcher.add(body, settle);
+        if (full || forceBeacon) {
+            this.flushQueue(forceBeacon);
+        } else {
+            this.scheduleFlush();
+        }
+        return promise;
+    }
+
+    // Sends everything queued, now, over the configured transport — or, when
+    // the page or context is going away, over the unload-safe beacon chain,
+    // since an XHR in flight then is aborted and the hit lost. Safe to call
+    // with nothing queued.
+    private flushQueue(unloading = false): void {
+        this.cancelScheduledFlush();
+        const transport = unloading ? 'beacon' : this.transport;
+        for (const { body, tickets } of this.batcher.drain()) {
+            const outcome = this.dispatch(body, transport);
+            tickets.forEach(settle => settle(outcome));
+        }
+    }
+
+    private scheduleFlush(): void {
+        if (this.batchTimer !== null) {
+            return;
+        }
+        // Outside Angular: a pending zone macrotask keeps the app "unstable",
+        // which stalls whenStable() and an app's own idle detection for the
+        // length of the delay, and the callback touches no view state anyway.
+        this.zone.runOutsideAngular(() => {
+            this.batchTimer = setTimeout(() => {
+                this.batchTimer = null;
+                this.flushQueue();
+            }, this.resolveBatchDelay());
+        });
+    }
+
+    private cancelScheduledFlush(): void {
+        if (this.batchTimer !== null) {
+            clearTimeout(this.batchTimer);
+            this.batchTimer = null;
+        }
+    }
+
+    private resolveBatchDelay(): number {
+        const configured = this.config.batchDelayMs;
+        return typeof configured === 'number' && Number.isFinite(configured) && configured >= 0
+            ? configured
+            : this.DEFAULT_BATCH_DELAY_MS;
+    }
+
+    // One request on the wire: a batch, or a replayed request. Every send, live or replayed, passes here,
+    // so the timestamp rules live here too. The promise never rejects, and is
+    // tracked until it settles for flush().
+    private dispatch(body: Ga4RequestBody, transport: 'beacon' | 'xhr'): Promise<NgGa4Delivery> {
+        const now = Date.now();
+        const events = body.events
+            // A timestamp in the future (the clock moved back since) is clamped.
+            .map(event => ({ ...event, timestamp_micros: clampToNow(event.timestamp_micros, now) }))
+            // GA4 re-stamps an event backdated past 72 hours to a time it did not
+            // happen at; better not sent at all.
+            .filter(event => isWithinBackdateWindow(event.timestamp_micros, now));
+        if (!events.length) {
+            return Promise.resolve('dropped');
+        }
+        const ready: Ga4RequestBody = { ...body, events };
+        return this.trackInFlight(this.send(ready, transport).then(outcome => {
+            if (outcome === 'unreachable') {
+                return this.storeInOutbox(ready);
+            }
+            // The network works: a good moment to send what an earlier
+            // failure left behind. Cannot loop — only a success triggers it,
+            // and a drain that takes nothing clears the flag.
+            if (outcome === 'sent' && this.outboxMayHaveItems) {
+                this.trackInFlight(this.drainOutbox());
+            }
+            return outcome;
+        }));
+    }
+
+    // Registers work for flush() to wait on, until it settles.
+    private trackInFlight<T>(work: Promise<T>): Promise<T> {
+        this.inFlight.add(work);
+        work.then(() => this.inFlight.delete(work), () => this.inFlight.delete(work));
+        return work;
+    }
+
+    private send(queued: Ga4RequestBody, transport: 'beacon' | 'xhr'): Promise<SendOutcome> {
+        // sendBeacon() returns true even offline — it only refuses on size —
+        // and the browser then drops the hit, so the outbox would never see an
+        // offline page. navigator.onLine is unreliable only in the other
+        // direction (true without a working network), which the transports
+        // below still catch.
+        if (this.getNavigator()?.onLine === false) {
+            return Promise.resolve('unreachable');
+        }
+
+        const url = this.collectUrl(this.GA4_ENDPOINT);
+        // Request-level, the earliest in the request. Each event's own takes
+        // precedence, so a batch spanning time keeps each event's real time.
+        const body = { ...queued, timestamp_micros: Math.min(...queued.events.map(event => event.timestamp_micros)) };
 
         // The validation endpoint records nothing — "events sent to the validation
         // server don't show up in reports" — so it can only ever be a side channel.
         // The real hit below still goes to production, over the configured transport,
-        // so debug traffic exercises the same path production will.
+        // so debug traffic exercises the same path production will. Validated per
+        // request, so a batch is validated as the batch GA4 actually receives.
         if (this.config.debug) {
             this.sendForValidation(body);
         }
 
-        // forceBeacon is for sends as the page goes away, where XHR would be aborted
-        // and the hit lost — losing the event outright is worse than skipping interceptors.
-        if (this.config.transport === 'xhr' && !forceBeacon) {
-            this.sendViaXhr(url, body);
-            return;
+        if (transport === 'xhr') {
+            return this.sendViaXhr(url, body);
         }
 
         // Default ('beacon'): prefer transports that survive page/tab unload so events
@@ -524,20 +961,27 @@ export class NgGa4Service implements OnDestroy {
         // → XHR (last resort, aborted on unload but better than silently losing the hit).
         const payload = JSON.stringify(body);
         if (this.trySendBeacon(url, payload)) {
-            return;
+            return Promise.resolve('sent');
         }
-        if (this.tryFetchKeepalive(url, payload)) {
-            return;
-        }
-        this.sendViaXhr(url, body);
+        return this.tryFetchKeepalive(url, payload) ?? this.sendViaXhr(url, body);
     }
 
     private collectUrl(endpoint: string): string {
-        return `${endpoint}?measurement_id=${this.config.measurementId}&api_secret=${this.config.apiSecret}`;
+        return `${endpoint}?measurement_id=${encodeURIComponent(this.measurementId())}`
+            + `&api_secret=${encodeURIComponent(this.config.apiSecret)}`;
+    }
+
+    // Uppercase, as GA4 Admin shows it: Google doesn't document whether a
+    // lowercase ID reaches the same property. String(... ?? '') survives a JS
+    // caller that omits it or passes a non-string, so nothing here can throw.
+    private measurementId(): string {
+        return String(this.config.measurementId ?? '').toUpperCase();
     }
 
     private sendForValidation(body: object): void {
-        this.http.post<{ validationMessages?: unknown[] }>(this.collectUrl(this.GA4_DEBUG_ENDPOINT), body).subscribe({
+        // Validation copy only: on real hits it would make GA4 drop data RELAXED keeps.
+        const validationBody = { ...body, validation_behavior: 'ENFORCE_RECOMMENDATIONS' };
+        this.http.post<{ validationMessages?: unknown[] }>(this.collectUrl(this.GA4_DEBUG_ENDPOINT), validationBody).subscribe({
             next: (response) => {
                 // Only speak up when something is actually wrong. Logging the whole
                 // envelope either way made a clean payload and a rejected one look
@@ -551,9 +995,22 @@ export class NgGa4Service implements OnDestroy {
         });
     }
 
-    private sendViaXhr(url: string, body: object): void {
-        this.http.post(url, body, { responseType: 'text' }).subscribe({
-            error: (err) => this.logHttpError(err)
+    private sendViaXhr(url: string, body: object): Promise<SendOutcome> {
+        return new Promise(resolve => {
+            this.http.post(url, body, { responseType: 'text' }).subscribe({
+                next: () => resolve('sent'),
+                error: (err) => {
+                    this.logHttpError(err);
+                    // HttpClient reports a request that never got a response —
+                    // offline, DNS, connection reset — as status 0.
+                    resolve(err?.status === 0 ? 'unreachable' : 'failed');
+                },
+                // Completing without a response means an interceptor swallowed
+                // the request (returned EMPTY): nothing left the browser, and
+                // retrying would only be swallowed again. resolve() after
+                // next() is a no-op.
+                complete: () => resolve('dropped')
+            });
         });
     }
 
@@ -575,26 +1032,219 @@ export class NgGa4Service implements OnDestroy {
         }
     }
 
-    private tryFetchKeepalive(url: string, payload: string): boolean {
+    // null when fetch is unavailable or throws synchronously, so the caller
+    // falls back to XHR; otherwise the request's eventual outcome.
+    private tryFetchKeepalive(url: string, payload: string): Promise<SendOutcome> | null {
         const fetchFn = this.getFetch();
         if (!fetchFn) {
-            return false;
+            return null;
         }
         try {
             // application/json to match what GA4's /mp/collect expects (see trySendBeacon).
             // Default CORS mode (not 'no-cors') so the application/json header is permitted and
             // genuine HTTP/network failures still surface to logHttpError; GA4 returns the CORS
             // headers the XHR path already depends on.
-            fetchFn(url, {
+            return fetchFn(url, {
                 method: 'POST',
                 body: payload,
                 keepalive: true,
                 headers: { 'Content-Type': 'application/json' }
-            }).catch((err: unknown) => this.logHttpError(err));
-            return true;
+            }).then(
+                (response: Response | undefined): SendOutcome => {
+                    // GA4 answers 2xx to anything it receives, even a payload it then
+                    // discards, so a non-2xx is a proxy or blocker in the way.
+                    if (response && response.ok === false) {
+                        this.logHttpError(response);
+                        return 'failed';
+                    }
+                    return 'sent';
+                },
+                // fetch() rejects only when no response arrived at all.
+                (err: unknown): SendOutcome => {
+                    this.logHttpError(err);
+                    return 'unreachable';
+                }
+            );
         } catch {
-            return false;
+            return null;
         }
+    }
+
+    // --- Offline outbox (#25) ---
+    //
+    // A request that could not reach GA4 at all is persisted whole — client_id,
+    // consent, device and each event's timestamp_micros — so a replay hours
+    // later, from another page or worker lifetime, sends exactly what would
+    // have been sent. Every read-modify-write runs on the storage chain, so two
+    // in this context can never interleave and lose an entry.
+
+    private storeInOutbox(body: Ga4RequestBody): Promise<NgGa4Delivery> {
+        // The outbox is storage like any other, and a stored request carries
+        // the client ID.
+        if (!this.consent.storageAllowed) {
+            return Promise.resolve('failed');
+        }
+        const { promise, settle } = deferred();
+        // Hashed user_data is held in memory only and never persisted (see
+        // setUserData()), so it is not stored here either. The replay goes
+        // without it: its events lose enhanced-conversion matching, not the
+        // events themselves.
+        const storable: Ga4RequestBody = { ...body };
+        delete storable.user_data;
+        this.outboxAppends.push({ body: storable, settle });
+        // One write takes every append that arrived before its turn on the
+        // storage chain; later ones queue the next.
+        if (this.outboxAppends.length === 1) {
+            // What this write took. Appends arriving after it took them start
+            // the next write, so on failure only these belong to this one —
+            // or, if it failed before taking any, everything still waiting.
+            let taken: typeof this.outboxAppends | null = null;
+            let allowed = true;
+            this.updateOutbox(stored => {
+                taken = this.outboxAppends.splice(0);
+                // Rechecked here, when the write finally runs: consent withdrawn
+                // since the request failed has already removed the outbox, and
+                // this write must not recreate it with the client ID in it.
+                allowed = this.consent.storageAllowed;
+                if (!allowed) {
+                    return { next: stored };
+                }
+                this.outboxMayHaveItems = true;
+                return { next: [...stored, ...taken.map(append => append.body)] };
+            }).then(
+                () => taken?.forEach(append => append.settle(allowed ? 'stored' : 'failed')),
+                // enqueueStorageWrite has already logged the failure.
+                () => (taken ?? this.outboxAppends.splice(0)).forEach(append => append.settle('failed'))
+            );
+        }
+        return promise;
+    }
+
+    // Sends what earlier failures left behind. Runs on init(), on 'online', and
+    // after any successful send while something may be stored; never after a
+    // failure, so an unreachable network cannot spin it.
+    private async drainOutbox(): Promise<void> {
+        // Offline, every replay would fail and be written straight back.
+        if (!this.enabled || !this.isBrowser || this.getNavigator()?.onLine === false) {
+            return;
+        }
+        let pending: Ga4RequestBody[];
+        try {
+            ({ result: pending } = await this.updateOutbox(stored => {
+                // Rechecked here, after the wait for storage: setEnabled(false)
+                // in the meantime leaves the backlog stored for a later drain.
+                if (!this.enabled) {
+                    return { next: stored, result: [] };
+                }
+                this.outboxMayHaveItems = false;
+                return { next: [], result: stored };
+            }));
+        } catch {
+            // Already logged by enqueueStorageWrite.
+            return;
+        }
+        // Stored requests are as small as the batches that failed. Merged back
+        // into full batches, a long outage replays in a few requests, not
+        // hundreds.
+        const batcher = new EventBatcher<Ga4RequestBody, null>();
+        for (const body of pending) {
+            batcher.add(body, null);
+        }
+        const batches = batcher.drain().map(({ body }) => body);
+        // The first batch is a probe: only once it gets through are the rest
+        // sent. Where every request fails — a blocker that makes fetch reject,
+        // a captive portal — each drain then costs one doomed request instead
+        // of one per stored batch. A probe that fails goes back in through
+        // dispatch(); the rest are put back unsent.
+        while (batches.length) {
+            const outcome = await this.dispatch(batches.shift()!, this.transport);
+            if (outcome === 'sent') {
+                await Promise.all(batches.map(body => this.dispatch(body, this.transport)));
+                return;
+            }
+            // Nothing was sent (every event aged out): the next batch probes.
+            if (outcome !== 'dropped') {
+                await Promise.all(batches.map(body => this.storeInOutbox(body)));
+                return;
+            }
+        }
+    }
+
+    // The single read-modify-write for the outbox. The storage chain keeps two
+    // in this context from interleaving; the Web Lock does the same across
+    // contexts — an extension's popup and service worker, or a site's tabs —
+    // which share the stored outbox. Without it, two contexts could both read
+    // the same requests and replay them twice, or one could write back over a
+    // request the other had just stored. `change` gets what is stored, already
+    // within the 72-hour window and the size cap, and returns what to store
+    // plus whatever the caller wants back. Rejects if storage does.
+    private async updateOutbox<R>(
+        change: (stored: Ga4RequestBody[]) => { next: Ga4RequestBody[] } & R
+    ): Promise<R> {
+        let outcome!: R;
+        const apply = (raw: unknown): Ga4RequestBody[] => {
+            const now = Date.now();
+            const { next, ...rest } = change(pruneOutbox(parseOutbox<Ga4RequestBody>(raw), now));
+            outcome = rest as unknown as R;
+            return pruneOutbox(next, now);
+        };
+        if (this.config.isExtension && chrome?.storage) {
+            await this.enqueueStorageWrite('chrome.storage.local (outbox)', () => withLock(OUTBOX_LOCK_NAME, async () => {
+                const raw = (await chrome.storage.local.get([OUTBOX_STORAGE_KEY]))[OUTBOX_STORAGE_KEY];
+                const next = apply(raw);
+                // Nothing stored and nothing to store — the usual case — costs no write.
+                if (next.length) {
+                    await chrome.storage.local.set({ [OUTBOX_STORAGE_KEY]: next });
+                } else if (raw != null) {
+                    await chrome.storage.local.remove([OUTBOX_STORAGE_KEY]);
+                }
+            }, { label: OUTBOX_LOCK_LABEL }));
+            return outcome;
+        }
+        // Chained even though localStorage is synchronous, so its order against
+        // a consent withdrawal's removal holds on this path too.
+        // localStorage is synchronous but not atomic across tabs, so the
+        // read-modify-write takes the lock too.
+        await this.enqueueStorageWrite('localStorage (outbox)', () => withLock(OUTBOX_LOCK_NAME, async () => {
+            const raw = localStorage.getItem(OUTBOX_STORAGE_KEY);
+            const next = apply(raw);
+            if (next.length) {
+                try {
+                    localStorage.setItem(OUTBOX_STORAGE_KEY, JSON.stringify(next));
+                } catch {
+                    // Quota exhausted, by this origin's other data as much as by
+                    // the outbox. Give up the oldest half rather than the new
+                    // requests; if even that does not fit (Safari private mode
+                    // throws on any write), the caller fails the requests.
+                    localStorage.setItem(OUTBOX_STORAGE_KEY, JSON.stringify(next.slice(Math.floor(next.length / 2))));
+                }
+            } else if (raw != null) {
+                localStorage.removeItem(OUTBOX_STORAGE_KEY);
+            }
+        }, { label: OUTBOX_LOCK_LABEL }));
+        return outcome;
+    }
+
+    // 'online' fires on window in a page and on the global scope in a worker,
+    // so the global scope covers both, including an MV3 service worker.
+    private registerOnlineListener(): void {
+        // See registerEngagementListeners: runInit() can run more than once.
+        if (this.onlineListener) {
+            return;
+        }
+        const scope = this.getGlobalScope();
+        if (!scope?.addEventListener) {
+            return;
+        }
+        this.onlineListener = () => {
+            this.trackInFlight(this.drainOutbox());
+        };
+        // Outside Angular for the same reason as the engagement listeners.
+        this.zone.runOutsideAngular(() => scope.addEventListener('online', this.onlineListener!));
+    }
+
+    private getGlobalScope(): Pick<EventTarget, 'addEventListener' | 'removeEventListener'> | undefined {
+        return typeof globalThis !== 'undefined' ? globalThis as unknown as EventTarget : undefined;
     }
 
     // Indirection seams (mirrors getUserAgentData/getTimeZone) so tests can stub the
@@ -759,7 +1409,7 @@ export class NgGa4Service implements OnDestroy {
 
     private collectUserLocation(): Ga4UserLocation | null {
         const country = countryFromTimeZone(this.getTimeZone());
-        return country ? { country_id: country } : null;
+        return country ? { country_id: country, ...regionFromCountry(country) } : null;
     }
 
     private async collectDevice(): Promise<Ga4Device | null> {
@@ -923,7 +1573,7 @@ export class NgGa4Service implements OnDestroy {
                 // focus sits in a child frame is disengaged too, and must not send
                 // on the way back in.
                 if (this.isPageHidden()) {
-                    this.flushEngagement();
+                    this.onPageLeave();
                 }
             };
             // blur stops the clock but deliberately does not flush: sending on every
@@ -950,7 +1600,7 @@ export class NgGa4Service implements OnDestroy {
             // bfcache restore minutes later can't have that dead time recounted.
             this.pagehideListener = () => {
                 this.setEngagementActive(false);
-                this.flushEngagement();
+                this.onPageLeave();
             };
             document.addEventListener('visibilitychange', this.visibilityListener);
             window.addEventListener('focus', this.focusListener);
@@ -958,6 +1608,14 @@ export class NgGa4Service implements OnDestroy {
             window.addEventListener('pageshow', this.pageshowListener);
             window.addEventListener('pagehide', this.pagehideListener);
         });
+    }
+
+    // The page is hidden or going away and may never run JavaScript again
+    // (bfcache, discard, a mobile tab killed in the background), so neither
+    // the trailing engagement time nor the batch timer can wait.
+    private onPageLeave(): void {
+        this.flushEngagement();
+        this.flushQueue(true);
     }
 
     // Flushes the trailing chunk of foreground time a page_view-only visit
@@ -1000,6 +1658,25 @@ export class NgGa4Service implements OnDestroy {
         }], true);
     }
 
+    // Called from init(); dev/debug only. Warns, never blocks sending.
+    private warnOnMalformedConfig(): void {
+        if (!this.warnOnInvalid) {
+            return;
+        }
+        if (!/^G-[A-Z0-9]+$/.test(this.measurementId())) {
+            console.warn(
+                `[ng-ga4] measurementId "${this.config.measurementId}" does not look like a GA4 Measurement ID `
+                + `(expected "G-" followed by letters and digits, e.g. "G-XXXXXXXXXX"). `
+                + `GA4 accepts hits for an unknown ID and records nothing.`
+            );
+        }
+        if (!String(this.config.apiSecret ?? '').trim()) {
+            console.warn(
+                '[ng-ga4] apiSecret is empty. GA4 accepts hits without a valid secret and records nothing.'
+            );
+        }
+    }
+
     // Validated once here, in init(), not in flushEngagement(): a misconfigured
     // name would otherwise warn on every window switch. GA4 returns 2xx and
     // silently drops a hit carrying an invalid or reserved event name — the
@@ -1009,22 +1686,14 @@ export class NgGa4Service implements OnDestroy {
         if (configured === undefined) {
             return 'page_engagement';
         }
-        if (this.isValidGa4EventName(configured)) {
+        // App-only names are only a warning for trackEvent(), but this name is
+        // the library's own choice to make, so it falls back rather than risk it.
+        const problem = eventNameProblem(configured) ?? appOnlyEventNameProblem(configured);
+        if (!problem) {
             return configured;
         }
-        console.warn(`[ng-ga4] Invalid engagementEventName "${configured}", falling back to "page_engagement".`);
+        console.warn(`[ng-ga4] Invalid engagementEventName "${configured}" (${problem}), falling back to "page_engagement".`);
         return 'page_engagement';
-    }
-
-    // Mirrors the Measurement Protocol's actual event-name naming rules.
-    private isValidGa4EventName(name: string): boolean {
-        if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(name)) {
-            return false;
-        }
-        if (/^(ga_|google_|firebase_)/.test(name)) {
-            return false;
-        }
-        return !this.RESERVED_MP_EVENT_NAMES.has(name);
     }
 
     private ensureSession(): void {
@@ -1257,6 +1926,234 @@ export class NgGa4Service implements OnDestroy {
         }
     }
 
+    // --- Storage: user ID (persistent — chrome.storage.local / localStorage) ---
+
+    // GA4 documents a 256-character maximum (Analytics Help, "Measure activity
+    // across platforms with User-ID"); counted in code points, not UTF-16 units.
+    private isValidUserId(userId: unknown): userId is string {
+        return typeof userId === 'string' && userId.length > 0 && [...userId].length <= this.MAX_USER_ID_LENGTH;
+    }
+
+    // An empty string is treated as "no user", since GA4 has nothing to join on.
+    // Anything else invalid clears too, rather than keep attributing hits to
+    // the previous user.
+    private normaliseUserId(userId: unknown): string | null {
+        if (this.isValidUserId(userId)) {
+            return userId;
+        }
+        if (userId != null && userId !== '') {
+            const why = typeof userId === 'string'
+                ? `is longer than ${this.MAX_USER_ID_LENGTH} characters`
+                : `must be a string or null, got ${typeof userId}`;
+            console.warn(`[ng-ga4] setUserId(): the user ID ${why}; clearing the user ID.`);
+        }
+        return null;
+    }
+
+    private async restoreUserId(): Promise<void> {
+        // Booting denied: a stored ID was written under an earlier consent and is
+        // about to be deleted by clearPersistedIdentity(). Using it for this page
+        // load would tie a denied-storage visit to a known person.
+        if (!this.consent.storageAllowed) {
+            return;
+        }
+        const stored = await this.loadUserId();
+        // setUserId() may have run during the await above; it wins, and has
+        // already persisted itself since `initialized` was set by then.
+        if (this.userIdSetByApp) {
+            return;
+        }
+        if (this.isValidUserId(stored)) {
+            this.userId = stored;
+        } else if (stored != null) {
+            // Junk on disk (not ours, or a since-tightened rule): drop it
+            // quietly rather than skip it on every start-up.
+            this.removeUserId();
+        }
+    }
+
+    private loadUserId(): Promise<unknown> {
+        return this.readPersistent('ga_user_id');
+    }
+
+    private persistUserId(userId: string | null): void {
+        if (userId === null) {
+            this.removeUserId();
+        } else {
+            this.saveUserId(userId);
+        }
+    }
+
+    // Best effort, and never throws: setUserId() is called from app code (a
+    // sign-in handler), and a storage failure must not surface there. The user ID
+    // is still sent from memory for the rest of this page's life.
+    private saveUserId(userId: string): void {
+        if (!this.isBrowser || !this.consent.storageAllowed) {
+            return;
+        }
+        if (this.config.isExtension && chrome?.storage) {
+            this.enqueueStorageWrite(
+                'chrome.storage.local.set (user id)',
+                // Recovers into localStorage, which loadUserId() falls back to
+                // when chrome.storage is broken — same as repersistIdentity.
+                // The rejection can land after a sign-out or a consent
+                // withdrawal already deleted the local copy, so the fallback
+                // only writes if this ID is still current and still allowed.
+                () => chrome.storage.local.set({ ga_user_id: userId })
+                    .catch(err => {
+                        console.warn('[ng-ga4] chrome.storage.local.set failed', err);
+                        if (this.userId === userId && this.consent.storageAllowed) {
+                            this.saveUserIdToLocalStorage(userId);
+                        }
+                    })
+            );
+            return;
+        }
+        this.saveUserIdToLocalStorage(userId);
+    }
+
+    private saveUserIdToLocalStorage(userId: string): void {
+        try {
+            localStorage.setItem('ga_user_id', userId);
+        } catch (err) {
+            console.warn('[ng-ga4] could not persist the user ID', err);
+        }
+    }
+
+    // Not consent-gated: deleting is always allowed. Clears both stores on an
+    // extension, since loadUserId() falls back to localStorage when
+    // chrome.storage throws and a stale copy there would come back after sign-out.
+    private removeUserId(): void {
+        if (!this.isBrowser) {
+            return;
+        }
+        if (this.config.isExtension && chrome?.storage) {
+            this.enqueueStorageWrite(
+                'chrome.storage.local.remove (user id)',
+                () => chrome.storage.local.remove(['ga_user_id'])
+            );
+        }
+        try {
+            localStorage.removeItem('ga_user_id');
+        } catch (err) {
+            console.warn('[ng-ga4] could not remove the user ID', err);
+        }
+    }
+
+    // --- Storage: user properties (persistent — chrome.storage.local / localStorage) ---
+    //
+    // Each write applies only this call's change to what is stored now. Other
+    // tabs and extension contexts share the key, and writing this context's
+    // whole, possibly stale, map would delete what they set.
+
+    // Guarded: a retried init must not reload over properties set since.
+    private async restoreUserProperties(): Promise<void> {
+        const pending = this.pendingUserProperties;
+        if (!pending) {
+            return;
+        }
+        // Denied: what is stored is about to be deleted, so it is not used either.
+        // Checked again after the read, since consent can change meanwhile.
+        const raw = this.consent.storageAllowed ? await this.readPersistent('ga_user_properties') : null;
+        const stored = this.consent.storageAllowed ? raw : null;
+        this.pendingUserProperties = null;
+        this.userProperties = parseStoredUserProperties(stored);
+        // Rewritten when parsing dropped junk, so it is cleaned up once.
+        const dirty = stored != null && stored !== serializeUserProperties(this.userProperties);
+        this.updateUserProperties(pending, dirty);
+    }
+
+    private updateUserProperties(update: UserPropertyUpdate, forceWrite: boolean): void {
+        const before = serializeUserProperties(this.userProperties);
+        const { properties, problems } = applyUserPropertyUpdate(this.userProperties, update);
+        this.warnDroppedUserProperties(problems);
+        this.userProperties = properties;
+        // Skipped when nothing changed: apps tend to call this on every route.
+        if (forceWrite || serializeUserProperties(properties) !== before) {
+            this.persistUserPropertyUpdate(update);
+        }
+    }
+
+    // "Warn in dev, drop in prod" (#19): GA4 would reject these anyway.
+    private warnDroppedUserProperties(problems: string[]): void {
+        if (problems.length && isDevMode()) {
+            console.warn('[ng-ga4] setUserProperties() dropped:', problems);
+        }
+    }
+
+    // On success, adopts the merged result, so this context also sends what
+    // others stored. On failure, keeps its own map rather than lose properties.
+    private persistUserPropertyUpdate(update: UserPropertyUpdate): void {
+        if (!this.consent.storageAllowed) {
+            return;
+        }
+        const merge = (raw: unknown) => applyUserPropertyUpdate(parseStoredUserProperties(raw), update).properties;
+        const writeLocal = () => {
+            try {
+                const next = merge(localStorage.getItem('ga_user_properties'));
+                const json = serializeUserProperties(next);
+                if (json === null) {
+                    localStorage.removeItem('ga_user_properties');
+                } else {
+                    localStorage.setItem('ga_user_properties', json);
+                }
+                this.userProperties = next;
+            } catch (err) {
+                console.warn('[ng-ga4] could not persist user properties', err);
+            }
+        };
+        if (!(this.config.isExtension && chrome?.storage)) {
+            writeLocal();
+            return;
+        }
+        // Queued, so this read-modify-write cannot interleave with other writes.
+        this.enqueueStorageWrite('chrome.storage.local (user properties)', async () => {
+            if (!this.consent.storageAllowed) {
+                return;
+            }
+            try {
+                const next = merge((await chrome.storage.local.get(['ga_user_properties']))['ga_user_properties']);
+                if (!this.consent.storageAllowed) {
+                    return;
+                }
+                const json = serializeUserProperties(next);
+                await (json === null
+                    ? chrome.storage.local.remove(['ga_user_properties'])
+                    : chrome.storage.local.set({ ga_user_properties: json }));
+                this.userProperties = next;
+                // Drop a fallback copy from an earlier failure: it is stale now.
+                try {
+                    localStorage.removeItem('ga_user_properties');
+                } catch {
+                    // Unreadable localStorage holds no copy either.
+                }
+            } catch (err) {
+                // readPersistent() reads this fallback when chrome.storage fails.
+                console.warn('[ng-ga4] chrome.storage.local failed, falling back to localStorage', err);
+                if (this.consent.storageAllowed) {
+                    writeLocal();
+                }
+            }
+        });
+    }
+
+    // chrome.storage.local on an extension, localStorage otherwise or when it throws.
+    private async readPersistent(key: string): Promise<unknown> {
+        if (this.config.isExtension && chrome?.storage) {
+            try {
+                const result = await chrome.storage.local.get([key]);
+                return result[key];
+            } catch (err) {
+                console.warn('[ng-ga4] chrome.storage.local.get failed, falling back to localStorage', err);
+            }
+        }
+        try {
+            return localStorage.getItem(key);
+        } catch {
+            return null;
+        }
+    }
+
     // --- Storage: client ID (persistent — chrome.storage.local / localStorage) ---
 
     private async loadOrCreateClientId(): Promise<string> {
@@ -1278,6 +2175,14 @@ export class NgGa4Service implements OnDestroy {
                 // Not persisted: the cookie is the durable store for an ID we don't
                 // own, so deleting _ga resets identity, the same way gtag.js itself
                 // mints a fresh client ID once _ga disappears.
+                //
+                // gtag.js rewrites _ga on every hit, so its two-year window slides.
+                // Matching that once per page load keeps an active user's cookie alive
+                // without a write per hit. Only for a cookie we wrote ourselves: an
+                // adopted ID never reaches ga_client_id, so it is never written back.
+                if (this.gaCookieWriteEnabled(source) && localStorage.getItem('ga_client_id') === fromCookie) {
+                    this.persistGaCookie(fromCookie);
+                }
                 return fromCookie;
             }
         }
@@ -1303,7 +2208,7 @@ export class NgGa4Service implements OnDestroy {
         const stored = this.loadOrCreateClientIdFromLocalStorage();
         // The source check is load-bearing: 'storage' means "never touch the cookie",
         // so it has to override writeGaCookie rather than combining with it.
-        if (source !== 'storage' && this.config.writeGaCookie) {
+        if (this.gaCookieWriteEnabled(source)) {
             // Write the ID already held, not a fresh mint: re-identifying users is the
             // harm this feature exists to avoid. The _ga payload may end up a UUID
             // instead of gtag's numeric pair, but GA4 accepts any client_id string —
@@ -1311,6 +2216,11 @@ export class NgGa4Service implements OnDestroy {
             this.persistGaCookie(stored);
         }
         return stored;
+    }
+
+    // 'cookie' implies writeGaCookie; 'storage' overrides it.
+    private gaCookieWriteEnabled(source: 'auto' | 'cookie' | 'storage'): boolean {
+        return source === 'cookie' || (source !== 'storage' && !!this.config.writeGaCookie);
     }
 
     // Validated once here, not trusted verbatim: a typo'd value (e.g. 'Cookie') would
@@ -1446,12 +2356,11 @@ export class NgGa4Service implements OnDestroy {
             return this.loadOrCreateClientIdFromLocalStorage();
         }
         try {
-            const result = await chrome.storage.local.get(['ga_client_id']);
-            if (result['ga_client_id']) {
-                return result['ga_client_id'];
-            }
-            const clientId = crypto.randomUUID();
-            if (this.consent.storageAllowed) {
+            // Minted under a lock shared with other extension contexts (#51).
+            return await readOrMintChromeClientId(async (clientId) => {
+                if (!this.consent.storageAllowed) {
+                    return;
+                }
                 // Enqueued like every other write so a write issued later cannot
                 // overtake it, and awaited so a failure reaches the catch below —
                 // falling back to localStorage rather than returning an ID that was
@@ -1468,8 +2377,7 @@ export class NgGa4Service implements OnDestroy {
                     'chrome.storage.local.set (mint client id)',
                     () => chrome.storage.local.set({ ga_client_id: clientId })
                 );
-            }
-            return clientId;
+            });
         } catch (err) {
             console.warn('[ng-ga4] chrome.storage.local failed, falling back to localStorage', err);
             return this.loadOrCreateClientIdFromLocalStorage();

@@ -1,5 +1,6 @@
 import { InjectionToken } from '@angular/core';
 import { NgGa4Consent } from './consent';
+import { NgGa4EnhancedMeasurement } from './enhanced-measurement';
 
 /**
  * Options for the `_ga` cookie this library writes when `writeGaCookie` is
@@ -38,8 +39,25 @@ export interface NgGa4Config {
      *   but in-flight requests are aborted when the document unloads.
      * The hide-time engagement event always takes the 'beacon' chain. In debug mode the
      * validation request is a separate HttpClient call.
+     *
+     * Both batch events (see `batchDelayMs`). Under 'xhr' a batch goes out through
+     * HttpClient, but a batch sent as the page is hidden or closed takes the 'beacon'
+     * chain, like the hide-time engagement event.
      */
     transport?: 'beacon' | 'xhr';
+
+    /**
+     * How long, in milliseconds, an event waits for others to share its request.
+     * Default `300`. The Measurement Protocol takes up to 25 events per request, so a
+     * route change plus a few custom events goes out as one request rather than one
+     * each (and, with an `application/json` body, a CORS preflight each).
+     *
+     * A batch is sent sooner when it reaches 25 events, when the page is hidden or
+     * torn down (`visibilitychange` → hidden, `pagehide`), and when the service is
+     * destroyed. `0` still batches calls made in the same task. A negative or
+     * non-numeric value falls back to the default.
+     */
+    batchDelayMs?: number;
     /**
      * Where the client ID comes from on web. Ignored when `isExtension` is true —
      * there is no `_ga` cookie on a `chrome-extension://` origin.
@@ -63,7 +81,10 @@ export interface NgGa4Config {
 
     /**
      * Write `_ga` when it is absent or unreadable, on the registrable domain,
-     * with gtag's two-year expiry by default. Only that envelope — name, domain, expiry —
+     * with gtag's two-year expiry by default. A `_ga` this library wrote itself
+     * is rewritten once per page load with the same client ID, so — like
+     * gtag.js, which rewrites it on every hit — the expiry counts from the
+     * user's last visit, not from when the cookie was first set. Only that envelope — name, domain, expiry —
      * is gtag's format: the value written is whatever client ID this library
      * already has. A genuinely new install mints one in gtag's own numeric
      * `<random>.<seconds>` shape — there is no identity to preserve there, so
@@ -97,14 +118,16 @@ export interface NgGa4Config {
      *
      * Raises GA4's average engagement time. It does not affect engaged
      * sessions, engagement rate or bounce rate on a Measurement-Protocol-only
-     * property — see the README.
+     * property — see
+     * https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/limitations.md
      *
      * Losing focus alone (e.g. alt-tab) stops the clock the same way but does
      * not send this event; the accrued time rides out on the next hit or the
      * eventual hide. Always sent over the unload-safe transport chain
      * (`sendBeacon` → `fetch(keepalive)` → XHR), regardless of the configured
-     * `transport`. See "Engagement time" in the README for the full
-     * reasoning.
+     * `transport`. See
+     * https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md#engagement-time
+     * for the full reasoning.
      */
     sendEngagementOnHide?: boolean;
 
@@ -114,7 +137,9 @@ export interface NgGa4Config {
      * it appears as an ordinary custom event in Events reports. Validated at
      * startup against the Measurement Protocol's naming rules; an invalid or
      * reserved value logs a console warning and falls back to the default.
-     * See "Engagement time" in the README for the full reasoning.
+     * See
+     * https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md#engagement-time
+     * for the full reasoning.
      */
     engagementEventName?: string;
 
@@ -133,8 +158,19 @@ export interface NgGa4Config {
      * boot from your own store.
      */
     consent?: NgGa4Consent;
+
+    /**
+     * Automatically collected events matching gtag.js's Enhanced Measurement:
+     * `scroll`, outbound `click`, `file_download`, `view_search_results`,
+     * `form_start`, `form_submit`, and `video_start` / `video_progress` /
+     * `video_complete` for native `<video>`. Every flag is off by default, so leaving
+     * this out sends exactly what earlier versions sent. See
+     * https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/enhanced-measurement.md
+     */
+    enhancedMeasurement?: NgGa4EnhancedMeasurement;
 }
 
 export const NG_GA4_CONFIG = new InjectionToken<NgGa4Config>('NG_GA4_CONFIG');
 
 export { NgGa4Consent, NgGa4ConsentState } from './consent';
+export { NgGa4EnhancedMeasurement } from './enhanced-measurement';

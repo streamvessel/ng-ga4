@@ -23,9 +23,153 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sent so a hit without `device` still has device data, and in case GA4's
   precedence differs in practice; that is being checked in
   [#89](https://github.com/streamvessel/ng-ga4/issues/89).
+- `setUserData()` sends opt-in, SHA-256-hashed email, phone and address as
+  `user_data` for Google Ads enhanced conversions, only while `adUserData` is
+  granted. Cleared on sign-out or a user ID switch, and when a granted `adUserData`
+  or `analyticsStorage` is withdrawn. Needs user-provided data collection turned on in GA4. See
+  [User-provided data](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-provided-data).
+  ([#23](https://github.com/streamvessel/ng-ga4/issues/23))
+- In debug mode, the validation request uses
+  `validation_behavior: 'ENFORCE_RECOMMENDATIONS'`; real hits are unchanged.
+- `trackEvent()` checks event and parameter names against the Measurement
+  Protocol's rules ([#29](https://github.com/streamvessel/ng-ga4/issues/29)).
+  `/mp/collect` returns 204 for a payload it discards, so a bad name used to be
+  lost without a trace. An event with an invalid or reserved name is no longer
+  sent; a parameter with an invalid or reserved name is removed from the event.
+  In development (or with `debug: true`) each one logs a `console.warn` naming
+  the rule; production stays silent. App-stream event names, over-long string
+  values and more than 25 parameters are warned about but sent unchanged.
+- `setUserId(userId)` sends a top-level `user_id` on every hit, for GA4's User-ID
+  reporting identity and cross-device analysis ([#18](https://github.com/streamvessel/ng-ga4/issues/18)).
+  Pass `null` on sign-out. The ID is stored next to the client ID, so it survives
+  reloads, and follows `analyticsStorage` consent like the client ID does.
+- `setUserProperties()`, the equivalent of `gtag('set', 'user_properties', { ... })`
+  ([#19](https://github.com/streamvessel/ng-ga4/issues/19)). Properties merge across
+  calls, go out as `user_properties` on every hit, and are stored next to the client
+  ID so they survive a reload; denying `analyticsStorage` deletes them along with it.
+  Names and values GA4 would reject are dropped, with a warning in dev mode.
+- `enhancedMeasurement` config: opt-in `scroll`, outbound `click`, `file_download`,
+  `view_search_results`, `form_start`, `form_submit`, `video_start`, `video_progress`
+  and `video_complete` events with `gtag.js`'s names and parameters
+  ([#28](https://github.com/streamvessel/ng-ga4/issues/28)). Everything is off by
+  default, so nothing you send changes on upgrade. Video tracking covers native
+  `<video>` elements, not embedded YouTube players; `data-ng-ga4-ignore` on a video
+  or its container leaves it out, for decorative background loops.
+- `user_location` now carries `continent_id` and `subcontinent_id` (UN M49) next to
+  `country_id`, looked up from the country the time zone resolves to. GA4's Continent
+  and Subcontinent dimensions used to read `(not set)`
+  ([#22](https://github.com/streamvessel/ng-ga4/issues/22)).
+
+- Every event now carries `timestamp_micros`, the time it was tracked, and each
+  request carries the earliest of its events'. GA4 used to stamp events with
+  their arrival time, which is wrong for anything sent later than it happened —
+  a call made while `init()` was still running, and soon batched and replayed
+  events. An event older than the Measurement Protocol's 72-hour backdating
+  window is dropped rather than sent, since GA4 would re-stamp it to exactly 72
+  hours ago; a timestamp in the future is clamped to the send time.
+  ([#21](https://github.com/streamvessel/ng-ga4/issues/21))
+- Events are batched, over either transport, as `gtag.js` does. Calls made within
+  `batchDelayMs` (new option, default 300 ms) of each other go out as one
+  request of up to 25 events, the Measurement Protocol's limit, instead of one
+  request (and CORS preflight) each. A batch is sent at once when it is full, when
+  the page is hidden or torn down (`visibilitychange` → hidden, `pagehide`), and
+  when the service is destroyed. Events whose request-level fields differ — a
+  consent change between two calls, say — are never merged, and a batch stays
+  under the 64 KiB `sendBeacon` quota. In debug mode each batch is validated as
+  sent. Under `transport: 'xhr'` a batch goes through `HttpClient` like a single
+  hit used to, except one sent as the page is hidden or closed, which takes the
+  unload-safe beacon chain.
+  ([#24](https://github.com/streamvessel/ng-ga4/issues/24))
+- `flush()` on `NgGa4Service`: sends every queued event at once and resolves when
+  their requests have settled and pending `chrome.storage` writes have landed.
+  Calls made while `init()` is still running are included. It never rejects.
+  Await it before an MV3 event handler returns or an extension popup closes. The
+  batch goes out before the first `await`, so calling it without waiting works
+  in an unload handler too.
+  ([#26](https://github.com/streamvessel/ng-ga4/issues/26))
+- `trackEvent()` and `trackPageView()` return an `NgGa4TrackResult`.
+  Its `status` says synchronously what happened to the call: `'accepted'`,
+  `'deferred'` (held until `init()` finishes), `'invalid'` (an event name
+  GA4 would discard; see event validation), `'disabled'`, `'uninitialized'`
+  or `'server'`. Its `delivered` promise resolves to `'sent'`, `'failed'`
+  (a network error, or a non-2xx from something between you and GA4) or
+  `'dropped'`, and never rejects. Existing call sites that ignore the return
+  value are unaffected. New exported types: `NgGa4TrackResult`,
+  `NgGa4TrackStatus`, `NgGa4Delivery`.
+  ([#26](https://github.com/streamvessel/ng-ga4/issues/26))
+- Offline outbox. A request that cannot reach GA4 at all (the browser reports
+  itself offline, or a DNS failure or connection reset) is saved whole to
+  `chrome.storage.local` in an extension, `localStorage` on the web. It is
+  replayed on the next `init()`, when the browser fires `online`, and after the
+  next request that does get through, merged back into full batches. A replay
+  keeps the request's original client ID, user ID, user properties, consent and
+  event times. Only network failures are retried. GA4
+  answers 2xx to anything it receives, so a non-2xx (a proxy or blocker) is
+  not retried. A replay sends one batch first and the rest only if it gets
+  through. The outbox holds at most 500 events and about 1 MB, and evicts the
+  oldest first, also to make room when `localStorage` is full. Contexts sharing
+  it (an extension's popup and service worker, a site's tabs) take turns under
+  the `ng-ga4:outbox` Web Lock, so a stored request is replayed once and one
+  context's drain never overwrites a request another has just stored.
+  Events older than the 72-hour backdating window are dropped. Hashed
+  `user_data` is never stored; a replayed request goes without it. With
+  `analyticsStorage` denied nothing is stored, and withdrawing it deletes the
+  outbox along with the client ID. Such calls now resolve `delivered` to the new
+  `'stored'` outcome.
+  ([#25](https://github.com/streamvessel/ng-ga4/issues/25))
+
+### Changed
+
+- A caller-supplied `app_version` in `trackEvent()` params now replaces the
+  configured `appVersion` instead of being silently overwritten. Every library
+  default (`engagement_time_msec`, `session_id`, `session_number`, `app_version`)
+  now follows the same rule: defaults first, caller wins
+  ([#31](https://github.com/streamvessel/ng-ga4/issues/31)). A param passed as
+  `undefined` keeps the default instead of removing it from the event.
+- `engagementEventName` is validated against the same, fuller reserved-name
+  list, and its warning now says which rule the name broke.
+- The README is now a short overview: the pitch, features, what you give up,
+  install, the required options, one usage example and the API table. The
+  reference material moved to topic docs under
+  [`projects/ng-ga4/docs/`](https://github.com/streamvessel/ng-ga4/tree/master/projects/ng-ga4/docs),
+  which the README links by absolute GitHub URL ([#84](https://github.com/streamvessel/ng-ga4/issues/84)).
+  The text is the same; the docs only gained a note on which version they describe,
+  section headings for the required and optional options, and links between files.
+  `LIMITATIONS.md` is now `docs/limitations.md`, and like the other topic docs it
+  is no longer included in the npm package. A short `LIMITATIONS.md` stays at the
+  old path and points to the new one, so the link in the READMEs already published
+  for 0.2.x keeps working.
 
 ### Fixed
 
+- A `_ga` cookie this library wrote (`writeGaCookie`, or `clientIdSource: 'cookie'`) is
+  now rewritten with the same client ID on each page load, so its two-year expiry
+  counts from the user's last visit, as gtag.js's does. Before, it lapsed two years
+  after it was first written, however active the user was. A `_ga` adopted from
+  gtag.js is still never written back ([#40](https://github.com/streamvessel/ng-ga4/issues/40)).
+- An extension's service worker and a popup that start together with no client
+  ID stored no longer each create their own: `NgGa4Service` and
+  `seedNgGa4ClientId()` now share a Web Lock around creating it. Falls back to
+  the old behaviour without Web Locks or after a 3-second wait. Measured on
+  Chromium 153 under Linux with `tools/lock-probe`.
+  ([#51](https://github.com/streamvessel/ng-ga4/issues/51))
+- `measurement_id` and `api_secret` are URL-encoded in the collect URL, so a
+  secret containing `&`, `#`, `+` or similar no longer corrupts the request.
+- `measurementId` is uppercased before sending, so `g-abc123` is sent as
+  `G-ABC123`, the form GA4 shows in Admin → Data Streams.
+- In dev mode (and whenever `debug` is on), `init()` logs a warning when the
+  uppercased `measurementId` does not look like `G-` followed by letters and
+  digits, or when `apiSecret` is empty. GA4 answers both with a normal 2xx and
+  records nothing. Hits are still sent.
+- Visitors in 13 time zones sent no `user_location`, so GA4 showed their country as
+  `(not set)`. Chrome reports these zones under older names than the ones the
+  library knew, such as `America/Godthab` for Greenland and `America/Indianapolis`,
+  plus Chile's new `America/Coyhaique`.
+- Page views now default `page_title` to `document.title` when no title is passed,
+  as `gtag.js` does, instead of leaving it unset — every automatic router page view
+  used to show up as `(not set)` in GA4's Pages and screens report. The router
+  page view is sent one microtask after `NavigationEnd`, so it picks up the title
+  the router's `TitleStrategy` sets for the new route rather than the previous one.
 - Chromium on an Android tablet reported `device.category` as `desktop`, while
   Firefox on the same tablet reported `tablet`. The Client Hints path derived
   category from `userAgentData.mobile` alone. Chrome drops that bit on Android

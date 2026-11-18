@@ -3,10 +3,12 @@ import { TestBed } from '@angular/core/testing';
 import { HttpClient } from '@angular/common/http';
 import { HttpClientTestingModule, HttpTestingController, TestRequest } from '@angular/common/http/testing';
 import { Router, NavigationEnd, NavigationStart } from '@angular/router';
-import { Subject } from 'rxjs';
+import { EMPTY, Subject } from 'rxjs';
 import { NgGa4Service } from './ng-ga4.service';
 import { NG_GA4_CONFIG, NgGa4Config } from './ng-ga4.config';
 import { isGtagClientId } from './ga-cookie';
+import { CLIENT_ID_LOCK_NAME } from './client-id-lock';
+import { FakeLockManager, installLockManager } from './testing/fake-lock-manager';
 import { deviceFromUserAgent } from './ua-device';
 
 const MOCK_UUID = '12345678-1234-1234-1234-123456789abc';
@@ -20,6 +22,8 @@ const MOCK_SESSION_ID = Math.floor(MOCK_TIMESTAMP / 1000).toString();
 // coincidence.
 const MOCK_CLIENT_ID_SEED = 555555555;
 const MOCK_MINTED_CLIENT_ID = `${MOCK_CLIENT_ID_SEED}.${Math.floor(MOCK_TIMESTAMP / 1000)}`;
+// The default batchDelayMs; see NgGa4Config.batchDelayMs.
+const BATCH_DELAY_MS = 300;
 
 const defaultConfig: NgGa4Config = {
     measurementId: 'G-TEST123',
@@ -45,6 +49,9 @@ describe('NgGa4Service', () => {
     let pageEngaged: boolean;
     // undefined: hidden exactly when not engaged, which is what most specs mean.
     let pageHidden: boolean | undefined;
+    let originalTitle: string;
+    let fakeLocks: FakeLockManager;
+    let restoreLocks: () => void;
 
     function configureTestBed(config?: Partial<NgGa4Config>, platformId?: string): void {
         // Reset here, not just in the top-level beforeEach, so a reconfigureTestBed()
@@ -98,6 +105,16 @@ describe('NgGa4Service', () => {
         // the clock immediately in its constructor when started engaged), so
         // jasmine.clock().tick() keeps driving the existing specs unchanged.
         spyOn(service as any, 'monotonicNow').and.callFake(() => Date.now());
+
+        // 'xhr' batches like 'beacon' does, so every call would otherwise wait
+        // for the batch timer. The bulk of the suite asserts one request per
+        // call on the default XHR-pinned config, so there the queue is flushed
+        // as soon as it is scheduled. The batching specs set transport or
+        // batchDelayMs explicitly and get the real timer.
+        const effective = { ...defaultConfig, ...config };
+        if (effective.transport === 'xhr' && effective.batchDelayMs === undefined) {
+            spyOn(service as any, 'scheduleFlush').and.callFake(() => (service as any).flushQueue());
+        }
 
         // The service reads and writes cookies through seams precisely so tests can
         // stub them; mutating document.cookie for real would leak between specs and
@@ -268,8 +285,14 @@ describe('NgGa4Service', () => {
 
         spyOn(crypto, 'randomUUID').and.returnValue(MOCK_UUID as `${string}-${string}-${string}-${string}-${string}`);
 
+        originalTitle = document.title;
+
         // Save original chrome.storage (if any) for restoration
         originalChromeStorage = (window as any).chrome?.storage;
+
+        // Real lock grants land on a task, which microtask-only specs never reach.
+        fakeLocks = new FakeLockManager();
+        restoreLocks = installLockManager(fakeLocks);
 
         configureTestBed();
     });
@@ -286,6 +309,8 @@ describe('NgGa4Service', () => {
         httpMock.verify();
         jasmine.clock().uninstall();
         clearChromeMock();
+        document.title = originalTitle;
+        restoreLocks();
     });
 
     // --- init() ---
@@ -358,6 +383,90 @@ describe('NgGa4Service', () => {
             // The localStorage fallback mints in gtag's shape same as the direct web
             // path, not a UUID — see loadOrCreateClientIdFromLocalStorage.
             expect(localStorage.setItem).toHaveBeenCalledWith('ga_client_id', MOCK_MINTED_CLIENT_ID);
+        });
+    });
+
+    // --- client ID lock (#51) ---
+
+    describe('client ID lock across extension contexts', () => {
+        // A second context sharing the same mocked chrome.storage.
+        function secondExtensionService(): NgGa4Service {
+            return Injector.create({
+                providers: [
+                    NgGa4Service,
+                    { provide: HttpClient, useValue: TestBed.inject(HttpClient) },
+                    { provide: Router, useValue: { events: new Subject<any>().asObservable() } },
+                    { provide: NG_GA4_CONFIG, useValue: { ...defaultConfig, isExtension: true } },
+                    { provide: PLATFORM_ID, useValue: 'browser' },
+                    { provide: NgZone, useValue: TestBed.inject(NgZone) }
+                ]
+            }).get(NgGa4Service);
+        }
+
+        beforeEach(() => {
+            reconfigureTestBed({ isExtension: true });
+            // Distinct IDs per mint, so a double mint is visible.
+            (crypto.randomUUID as jasmine.Spy).and.returnValues(
+                'aaaaaaaa-0000-4000-8000-000000000001' as any,
+                'bbbbbbbb-0000-4000-8000-000000000002' as any
+            );
+        });
+
+        it('reads a stored client ID without taking the lock', async () => {
+            setupChromeMock({ ga_client_id: 'stored-id' });
+
+            await service.init();
+
+            expect((service as any).clientId).toBe('stored-id');
+            // The outbox takes its own lock once init() finishes; not this one.
+            expect(fakeLocks.requested).not.toContain('ng-ga4:client-id');
+        });
+
+        it('gives two contexts starting cold together one client ID, minted once', async () => {
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal);
+            const second = secondExtensionService();
+
+            await Promise.all([service.init(), second.init()]);
+
+            expect((service as any).clientId).toBe('aaaaaaaa-0000-4000-8000-000000000001');
+            expect((second as any).clientId).toBe((service as any).clientId);
+            expect(chromeLocal['ga_client_id']).toBe((service as any).clientId);
+            expect(crypto.randomUUID).toHaveBeenCalledTimes(1);
+            expect(fakeLocks.maxHeld).toBe(1);
+
+            second.ngOnDestroy();
+        });
+
+        // Control: proves the mock reproduces the race the lock prevents.
+        it('falls back to unlocked minting where navigator.locks is unavailable', async () => {
+            restoreLocks();
+            restoreLocks = installLockManager(undefined);
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal);
+            const second = secondExtensionService();
+
+            await Promise.all([service.init(), second.init()]);
+
+            expect((service as any).clientId).toBeTruthy();
+            expect((second as any).clientId).toBeTruthy();
+            expect((second as any).clientId).not.toBe((service as any).clientId);
+            expect(crypto.randomUUID).toHaveBeenCalledTimes(2);
+
+            second.ngOnDestroy();
+        });
+
+        it('still falls back to localStorage when chrome.storage fails inside the lock', async () => {
+            spyOn(service as any, 'randomClientIdSeed').and.returnValue(MOCK_CLIENT_ID_SEED);
+            setupChromeMock({});
+            (window as any).chrome.storage.local.set = () => Promise.reject(new Error('quota exceeded'));
+            spyOn(console, 'warn');
+
+            await service.init();
+
+            expect((service as any).clientId).toBe(MOCK_MINTED_CLIENT_ID);
+            // The outbox's own lock, taken after init(), is not part of this.
+            expect(fakeLocks.requested.filter(name => name === CLIENT_ID_LOCK_NAME)).toEqual([CLIENT_ID_LOCK_NAME]);
         });
     });
 
@@ -746,6 +855,88 @@ describe('NgGa4Service', () => {
                 const second = sentClientId();
 
                 expect(second).toBe(first);
+            });
+        });
+
+        // #40: gtag.js rewrites _ga on every hit, so its two-year window slides.
+        // A cookie this library wrote must be refreshed too, or it lapses two years
+        // after it was first set however active the user is.
+        describe('refreshing a _ga this library wrote', () => {
+            function gaWrites(): string[] {
+                return writtenCookies.filter(c => c.startsWith('_ga=') && !/max-age=0\b/.test(c));
+            }
+
+            it('rewrites its own _ga with the same ID and a fresh expiry under auto + writeGaCookie', async () => {
+                reconfigureTestBed({ writeGaCookie: true });
+                mockLocalStorage['ga_client_id'] = 'existing-id';
+                mockCookieJar = '_ga=GA1.1.existing-id';
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+
+                expect(gaWrites().length).toBe(1);
+                expect(gaWrites()[0]).toContain('_ga=GA1.1.existing-id');
+                expect(gaWrites()[0]).toContain('max-age=63072000');
+                expect(sentClientId()).toBe('existing-id');
+            });
+
+            it('rewrites its own _ga under clientIdSource: cookie', async () => {
+                reconfigureTestBed({ clientIdSource: 'cookie' });
+                mockLocalStorage['ga_client_id'] = '1234567890.1700000000';
+                mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+
+                expect(gaWrites().length).toBe(1);
+                expect(gaWrites()[0]).toContain('_ga=GA1.1.1234567890.1700000000');
+            });
+
+            it('writes once per page load, not once per hit', async () => {
+                reconfigureTestBed({ writeGaCookie: true });
+                mockLocalStorage['ga_client_id'] = 'existing-id';
+                mockCookieJar = '_ga=GA1.1.existing-id';
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+                sentClientId();
+                sentClientId();
+
+                expect(gaWrites().length).toBe(1);
+            });
+
+            // An adopted ID is never written back (see writeGaCookie's JSDoc): gtag
+            // owns that cookie and refreshes it itself.
+            it('does not rewrite a _ga holding an ID it adopted rather than minted', async () => {
+                reconfigureTestBed({ writeGaCookie: true });
+                mockLocalStorage['ga_client_id'] = 'existing-id';
+                mockCookieJar = '_ga=GA1.1.1234567890.1700000000';
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+
+                expect(gaWrites()).toEqual([]);
+                expect(sentClientId()).toBe('1234567890.1700000000');
+            });
+
+            it('does not rewrite its own _ga when writeGaCookie is off', async () => {
+                mockLocalStorage['ga_client_id'] = 'existing-id';
+                mockCookieJar = '_ga=GA1.1.existing-id';
+
+                await service.init();
+
+                expect(gaWrites()).toEqual([]);
+            });
+
+            it('does not rewrite its own _ga while analytics storage is denied', async () => {
+                reconfigureTestBed({ consent: { analyticsStorage: 'denied' }, writeGaCookie: true });
+                mockLocalStorage['ga_client_id'] = 'existing-id';
+                mockCookieJar = '_ga=GA1.1.existing-id';
+                spyOn(service as any, 'getHostname').and.returnValue('localhost');
+
+                await service.init();
+
+                expect(gaWrites()).toEqual([]);
             });
         });
 
@@ -1730,7 +1921,9 @@ describe('NgGa4Service', () => {
             // Both instances now hold the same session read from shared storage.
             // Advance past the timeout so second's own roll, below, is a real one.
             jasmine.clock().tick(31 * 60 * 1000);
+            // Built outside configureTestBed, so it has the real batch timer.
             second.trackEvent('tab_b_rolls');
+            jasmine.clock().tick(BATCH_DELAY_MS);
             httpMock.expectOne((r) => r.url.includes('mp/collect'))
                 .flush('', { status: 204, statusText: 'No Content' });
 
@@ -1896,6 +2089,48 @@ describe('NgGa4Service', () => {
             await service.init();
         });
 
+        describe('page_title', () => {
+            function sentTitle(): unknown {
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                const params = req.request.body.events[0].params;
+                req.flush('', { status: 204, statusText: 'No Content' });
+                return params.page_title;
+            }
+
+            it('defaults to document.title when the caller omits it', () => {
+                document.title = 'Dashboard | Acme';
+
+                service.trackPageView('/dashboard');
+
+                expect(sentTitle()).toBe('Dashboard | Acme');
+            });
+
+            it('prefers an explicit title over document.title', () => {
+                document.title = 'Dashboard | Acme';
+
+                service.trackPageView('/dashboard', 'Custom');
+
+                expect(sentTitle()).toBe('Custom');
+            });
+
+            it('omits page_title when there is no title to report', () => {
+                document.title = '';
+
+                service.trackPageView('/untitled');
+
+                // Left out (JSON drops undefined) rather than sent as "".
+                expect(sentTitle()).toBeUndefined();
+            });
+
+            it('falls back to no title when there is no document', () => {
+                spyOn(service as any, 'getDocument').and.returnValue(undefined);
+
+                service.trackPageView('/worker');
+
+                expect(sentTitle()).toBeUndefined();
+            });
+        });
+
         it('should POST page_view event with window.location.href', () => {
             service.trackPageView('/home');
 
@@ -1947,6 +2182,33 @@ describe('NgGa4Service', () => {
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
+        it('should uppercase measurement_id on both the collect and debug validation URLs', async () => {
+            reconfigureTestBed({ measurementId: 'g-abc123xyz9', debug: true });
+            await service.init();
+
+            service.trackPageView('/test');
+            const debugReq = httpMock.expectOne((r) => r.url.includes('/debug/mp/collect'));
+            expect(new URL(debugReq.request.url).searchParams.get('measurement_id')).toBe('G-ABC123XYZ9');
+            debugReq.flush({ validationMessages: [] });
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect') && !r.url.includes('/debug/'));
+            expect(new URL(req.request.url).searchParams.get('measurement_id')).toBe('G-ABC123XYZ9');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('should URL-encode measurement_id and api_secret', async () => {
+            reconfigureTestBed({ apiSecret: 'a&b=c d+/?#%', measurementId: 'G-TEST123' });
+            await service.init();
+
+            service.trackPageView('/test');
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const url = new URL(req.request.url);
+            expect(url.searchParams.get('api_secret')).toBe('a&b=c d+/?#%');
+            expect(url.searchParams.get('measurement_id')).toBe('G-TEST123');
+            expect(url.hash).toBe('');
+            expect(req.request.url).toContain('api_secret=a%26b%3Dc%20d%2B%2F%3F%23%25');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
         it('should not track when disabled', () => {
             reconfigureTestBed({ enabled: false });
 
@@ -1994,6 +2256,488 @@ describe('NgGa4Service', () => {
 
             service.trackEvent('test_event');
             httpMock.expectNone(() => true);
+        });
+
+        // #29: /mp/collect answers 204 for a payload it will discard, so these
+        // rules are the only feedback a consumer ever gets.
+        describe('validation', () => {
+            beforeEach(() => {
+                spyOn(console, 'warn');
+            });
+
+            it('does not send an event with a reserved name, and warns naming the rule', () => {
+                service.trackEvent('session_start');
+
+                httpMock.expectNone((r) => r.url.includes('mp/collect'));
+                expect(console.warn).toHaveBeenCalledWith(
+                    jasmine.stringMatching(/^\[ng-ga4\] trackEvent\("session_start"\): .*"session_start" is reserved.*not sent/)
+                );
+            });
+
+            it('does not touch session state for a dropped event', () => {
+                const ensureSession = spyOn<any>(service, 'ensureSession').and.callThrough();
+
+                service.trackEvent('my-event');
+
+                expect(ensureSession).not.toHaveBeenCalled();
+                httpMock.expectNone((r) => r.url.includes('mp/collect'));
+            });
+
+            it('removes a reserved parameter but still sends the event', () => {
+                service.trackEvent('signup', { method: 'email', ga_source: 'x', firebase_conversion: 1 });
+
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                const params = req.request.body.events[0].params;
+                expect(params.method).toBe('email');
+                expect('ga_source' in params).toBeFalse();
+                expect('firebase_conversion' in params).toBeFalse();
+                expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/^\[ng-ga4\] trackEvent\("signup"\): .*"ga_source".*removed/));
+                expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/"firebase_conversion" is reserved.*removed/));
+                req.flush('', { status: 204, statusText: 'No Content' });
+            });
+
+            it('counts the parameters the library adds towards the 25 limit', () => {
+                // engagement_time_msec, session_id and session_number make 25.
+                const params: Record<string, number> = {};
+                for (let i = 0; i < 22; i++) {
+                    params[`p${i}`] = i;
+                }
+                service.trackEvent('many', params);
+
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                expect(console.warn).not.toHaveBeenCalled();
+                req.flush('', { status: 204, statusText: 'No Content' });
+
+                service.trackEvent('many', { ...params, p22: 22 });
+
+                const second = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                expect(Object.keys(second.request.body.events[0].params).length).toBe(26);
+                expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/26 parameters; the limit is 25/));
+                second.flush('', { status: 204, statusText: 'No Content' });
+            });
+
+            it('sends an App-stream-only event name, with a warning', () => {
+                service.trackEvent('ad_impression', { value: 0.02, currency: 'USD' });
+
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                expect(req.request.body.events[0].name).toBe('ad_impression');
+                expect(console.warn).toHaveBeenCalledWith(jasmine.stringMatching(/"ad_impression" is documented for App streams/));
+                req.flush('', { status: 204, statusText: 'No Content' });
+            });
+
+            it('does not warn for a valid event', () => {
+                service.trackEvent('file_download', { file_name: 'test.pdf', file_size: 1024 });
+
+                httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                    .flush('', { status: 204, statusText: 'No Content' });
+                expect(console.warn).not.toHaveBeenCalled();
+            });
+
+            // Production builds still keep junk off the wire, but say nothing.
+            it('drops silently when warnings are off', () => {
+                (service as any).warnOnInvalid = false;
+
+                service.trackEvent('session_start');
+                httpMock.expectNone((r) => r.url.includes('mp/collect'));
+
+                service.trackEvent('signup', { _private: 1, method: 'email', note: 'x'.repeat(101) });
+                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+                expect('_private' in req.request.body.events[0].params).toBeFalse();
+                req.flush('', { status: 204, statusText: 'No Content' });
+
+                service.trackEvent('ad_impression');
+                httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                    .flush('', { status: 204, statusText: 'No Content' });
+
+                expect(console.warn).not.toHaveBeenCalled();
+            });
+        });
+    });
+
+    // --- user properties ---
+
+    describe('setUserProperties()', () => {
+        const EXT = { isExtension: true, siteUrl: 'https://ext.example' };
+
+        function nextBody(): any {
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            const body = req.request.body;
+            req.flush({});
+            return body;
+        }
+
+        function sentUserProperties(): unknown {
+            service.trackEvent('test_event');
+            return nextBody()['user_properties'];
+        }
+
+        function stored(store: Record<string, any> = mockLocalStorage): unknown {
+            const raw = store['ga_user_properties'];
+            return raw === undefined ? undefined : JSON.parse(raw);
+        }
+
+        function failLocalStorageWrites(): void {
+            (localStorage.setItem as jasmine.Spy).and.callFake((key: string, value: string) => {
+                if (key === 'ga_user_properties') {
+                    throw new Error('QuotaExceededError');
+                }
+                mockLocalStorage[key] = value;
+            });
+        }
+
+        it('sends nothing until a property is set', async () => {
+            await service.init();
+            expect(sentUserProperties()).toBeUndefined();
+        });
+
+        it('sends properties as a request-level { name: { value } } map, merged across calls', async () => {
+            await service.init();
+            service.setUserProperties({ plan: 'pro', seats: 5 });
+            service.setUserProperties({ seats: null, region: 'eu' });
+
+            const body = (service.trackEvent('test_event'), nextBody());
+            expect(body['user_properties']).toEqual({ plan: { value: 'pro' }, region: { value: 'eu' } });
+            expect(body['events'][0]['params']['plan']).toBeUndefined();
+
+            service.setUserProperties(null);
+            expect(sentUserProperties()).toBeUndefined();
+            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+        });
+
+        it('drops invalid properties with a dev-mode warning', async () => {
+            spyOn(console, 'warn');
+            await service.init();
+            service.setUserProperties({ plan: 'pro', user_id: 'u1' });
+
+            expect(sentUserProperties()).toEqual({ plan: { value: 'pro' } });
+            expect(console.warn).toHaveBeenCalledWith('[ng-ga4] setUserProperties() dropped:', jasmine.any(Array));
+        });
+
+        it('persists to localStorage and restores on the next load', async () => {
+            await service.init();
+            service.setUserProperties({ plan: 'pro' });
+            expect(stored()).toEqual({ plan: 'pro' });
+
+            reconfigureTestBed();
+            await service.init();
+            expect(sentUserProperties()).toEqual({ plan: { value: 'pro' } });
+        });
+
+        it('cleans up stored entries that no longer validate', async () => {
+            mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'pro', ga_x: 'y' });
+            await service.init();
+            expect(stored()).toEqual({ plan: 'pro' });
+
+            mockLocalStorage['ga_user_properties'] = '{not json';
+            reconfigureTestBed();
+            await service.init();
+            expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+            expect(sentUserProperties()).toBeUndefined();
+        });
+
+        it('does not rewrite storage when a call changes nothing', async () => {
+            await service.init();
+            service.setUserProperties({ plan: 'pro' });
+            (localStorage.setItem as jasmine.Spy).calls.reset();
+
+            service.setUserProperties({ plan: 'pro' });
+            service.setUserProperties({ user_id: 'dropped' });
+
+            expect(localStorage.setItem).not.toHaveBeenCalledWith('ga_user_properties', jasmine.anything());
+        });
+
+        describe('before init()', () => {
+            it('applies calls on top of what was stored and writes once', async () => {
+                mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'free', region: 'eu' });
+                service.setUserProperties({ plan: 'team' });
+                service.setUserProperties({ plan: 'pro', seats: 5 });
+                await service.init();
+
+                const writes = (localStorage.setItem as jasmine.Spy).calls.allArgs().filter(([key]) => key === 'ga_user_properties');
+                expect(writes.length).toBe(1);
+                expect(stored()).toEqual({ plan: 'pro', region: 'eu', seats: 5 });
+            });
+
+            it('applies setUserProperties(null) to what was stored', async () => {
+                mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'pro' });
+                service.setUserProperties(null);
+                service.setUserProperties({ region: 'eu' });
+                await service.init();
+
+                expect(sentUserProperties()).toEqual({ region: { value: 'eu' } });
+            });
+
+            it('keeps a call made while disabled and applies it once enabled', async () => {
+                reconfigureTestBed({ enabled: false });
+                await service.init();
+                service.setUserProperties({ plan: 'pro' });
+                expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+
+                service.setEnabled(true);
+                await service.init();
+                expect(sentUserProperties()).toEqual({ plan: { value: 'pro' } });
+            });
+        });
+
+        it('is inert on the server', () => {
+            reconfigureTestBed({}, 'server');
+            service.setUserProperties({ plan: 'pro' });
+
+            expect((service as any).pendingUserProperties.values.size).toBe(0);
+        });
+
+        describe('across tabs', () => {
+            it('merges onto what another tab stored instead of overwriting it', async () => {
+                await service.init();
+                service.setUserProperties({ plan: 'pro' });
+                mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'pro', theme: 'dark' });
+
+                service.setUserProperties({ region: 'eu' });
+
+                expect(stored()).toEqual({ plan: 'pro', theme: 'dark', region: 'eu' });
+                expect(sentUserProperties()).toEqual({ plan: { value: 'pro' }, theme: { value: 'dark' }, region: { value: 'eu' } });
+            });
+
+            it('keeps its own properties, and does not throw, when localStorage refuses writes', async () => {
+                spyOn(console, 'warn');
+                await service.init();
+                service.setUserProperties({ plan: 'pro' });
+                failLocalStorageWrites();
+
+                expect(() => service.setUserProperties({ region: 'eu' })).not.toThrow();
+                expect(sentUserProperties()).toEqual({ plan: { value: 'pro' }, region: { value: 'eu' } });
+            });
+        });
+
+        describe('on an extension', () => {
+            it('persists to chrome.storage.local and restores from it', async () => {
+                const chromeLocal: Record<string, any> = {};
+                setupChromeMock(chromeLocal, {});
+                reconfigureTestBed(EXT);
+                await service.init();
+                service.setUserProperties({ plan: 'pro' });
+                await service.flushStorage();
+                expect(stored(chromeLocal)).toEqual({ plan: 'pro' });
+
+                reconfigureTestBed(EXT);
+                await service.init();
+                expect(sentUserProperties()).toEqual({ plan: { value: 'pro' } });
+            });
+
+            it('merges onto what another context stored, and keeps rapid successive calls', async () => {
+                const chromeLocal: Record<string, any> = {};
+                setupChromeMock(chromeLocal, {});
+                reconfigureTestBed(EXT);
+                await service.init();
+                chromeLocal['ga_user_properties'] = JSON.stringify({ theme: 'dark' });
+
+                service.setUserProperties({ plan: 'pro' });
+                service.setUserProperties({ seats: 5 });
+                service.setUserProperties({ region: 'eu' });
+                await service.flushStorage();
+
+                expect(stored(chromeLocal)).toEqual({ theme: 'dark', plan: 'pro', seats: 5, region: 'eu' });
+                expect(sentUserProperties()).toEqual({
+                    theme: { value: 'dark' }, plan: { value: 'pro' }, seats: { value: 5 }, region: { value: 'eu' }
+                });
+            });
+
+            it('falls back to localStorage when chrome.storage rejects, and clears the copy once it works', async () => {
+                spyOn(console, 'warn');
+                setupChromeMock({}, {});
+                reconfigureTestBed(EXT);
+                await service.init();
+                const set = (window as any).chrome.storage.local.set;
+                (window as any).chrome.storage.local.set = () => Promise.reject(new Error('storage failure'));
+
+                service.setUserProperties({ plan: 'pro' });
+                await service.flushStorage();
+                expect(stored()).toEqual({ plan: 'pro' });
+
+                (window as any).chrome.storage.local.set = set;
+                service.setUserProperties({ region: 'eu' });
+                await service.flushStorage();
+                expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+            });
+        });
+
+        describe('with analyticsStorage consent', () => {
+            it('deletes stored properties on withdrawal but keeps sending them, and stores nothing while denied', async () => {
+                await service.init();
+                service.setUserProperties({ plan: 'pro' });
+
+                service.setConsent({ analyticsStorage: 'denied' });
+                service.setUserProperties({ region: 'eu' });
+
+                expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+                expect(sentUserProperties()).toEqual({ plan: { value: 'pro' }, region: { value: 'eu' } });
+            });
+
+            it('writes them back when consent is granted again', async () => {
+                await service.init();
+                service.setUserProperties({ plan: 'pro' });
+                service.setConsent({ analyticsStorage: 'denied' });
+                service.setConsent({ analyticsStorage: 'granted' });
+
+                expect(stored()).toEqual({ plan: 'pro' });
+            });
+
+            it('neither uses nor keeps what a previous visit stored when booting denied', async () => {
+                mockLocalStorage['ga_user_properties'] = JSON.stringify({ plan: 'pro' });
+                reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+                await service.init();
+
+                expect(mockLocalStorage['ga_user_properties']).toBeUndefined();
+                expect(sentUserProperties()).toBeUndefined();
+            });
+
+            it('does not use properties read while consent was being withdrawn', async () => {
+                setupChromeMock({ ga_user_properties: JSON.stringify({ plan: 'pro' }) }, {});
+                reconfigureTestBed(EXT);
+                const get = (window as any).chrome.storage.local.get;
+                (window as any).chrome.storage.local.get = (keys: string[]) => {
+                    if (keys.includes('ga_user_properties')) {
+                        service.setConsent({ analyticsStorage: 'denied' });
+                    }
+                    return get(keys);
+                };
+                await service.init();
+
+                expect(sentUserProperties()).toBeUndefined();
+            });
+
+            it('keeps memory and chrome.storage in step through a quick withdraw and re-grant', async () => {
+                const chromeLocal: Record<string, any> = {};
+                setupChromeMock(chromeLocal, {});
+                reconfigureTestBed(EXT);
+                await service.init();
+                service.setUserProperties({ plan: 'pro' });
+
+                service.setConsent({ analyticsStorage: 'denied' });
+                service.setConsent({ analyticsStorage: 'granted' });
+                await service.flushStorage();
+
+                expect(stored(chromeLocal)).toEqual({ plan: 'pro' });
+                expect(sentUserProperties()).toEqual({ plan: { value: 'pro' } });
+            });
+        });
+    });
+
+    // --- timestamp_micros (#21) ---
+
+    describe('timestamp_micros', () => {
+        const NOW_MICROS = MOCK_TIMESTAMP * 1000;
+        const HOUR_MS = 60 * 60 * 1000;
+
+        beforeEach(async () => {
+            await service.init();
+        });
+
+        function takeBody(): any {
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            req.flush('', { status: 204, statusText: 'No Content' });
+            return req.request.body;
+        }
+
+        it('stamps a custom event, and the request, with the time it was tracked', () => {
+            service.trackEvent('cta_click');
+
+            const body = takeBody();
+            expect(body.timestamp_micros).toBe(NOW_MICROS);
+            expect(body.events[0].timestamp_micros).toBe(NOW_MICROS);
+        });
+
+        it('stamps a page view', () => {
+            jasmine.clock().tick(1234);
+            service.trackPageView('/a');
+
+            expect(takeBody().events[0].timestamp_micros).toBe((MOCK_TIMESTAMP + 1234) * 1000);
+        });
+
+        it('stamps the hide-time engagement event with the time the page hid', () => {
+            spyOn(service as any, 'getNavigator').and.returnValue({});
+            spyOn(service as any, 'getFetch').and.returnValue(undefined);
+            jasmine.clock().tick(5000);
+
+            (service as any).flushEngagement();
+
+            expect(takeBody().events[0].timestamp_micros).toBe((MOCK_TIMESTAMP + 5000) * 1000);
+        });
+
+        it('keeps the earlier of two event times on the request, and each event its own', () => {
+            (service as any).sendToGA4([
+                { name: 'later', timestamp_micros: NOW_MICROS - 1000 },
+                { name: 'earlier', timestamp_micros: NOW_MICROS - 5000 }
+            ]);
+
+            const body = takeBody();
+            expect(body.timestamp_micros).toBe(NOW_MICROS - 5000);
+            expect(body.events.map((e: any) => e.timestamp_micros)).toEqual([NOW_MICROS - 1000, NOW_MICROS - 5000]);
+        });
+
+        // GA4 would re-stamp it to exactly 72 hours ago, a time it did not happen at.
+        it('drops an event older than 72 hours and sends the rest', () => {
+            (service as any).sendToGA4([
+                { name: 'stale', timestamp_micros: (MOCK_TIMESTAMP - 72 * HOUR_MS - 1) * 1000 },
+                { name: 'fresh', timestamp_micros: (MOCK_TIMESTAMP - 71 * HOUR_MS) * 1000 }
+            ]);
+
+            const body = takeBody();
+            expect(body.events.map((e: any) => e.name)).toEqual(['fresh']);
+            expect(body.timestamp_micros).toBe((MOCK_TIMESTAMP - 71 * HOUR_MS) * 1000);
+        });
+
+        it('sends nothing when every event is older than 72 hours', () => {
+            (service as any).sendToGA4([{ name: 'stale', timestamp_micros: (MOCK_TIMESTAMP - 73 * HOUR_MS) * 1000 }]);
+
+            httpMock.expectNone(() => true);
+        });
+
+        it('clamps a timestamp in the future to the send time', () => {
+            (service as any).sendToGA4([{ name: 'ahead', timestamp_micros: NOW_MICROS + 60_000_000 }]);
+
+            const body = takeBody();
+            expect(body.events[0].timestamp_micros).toBe(NOW_MICROS);
+            expect(body.timestamp_micros).toBe(NOW_MICROS);
+        });
+
+        it('lets a caller-supplied timestamp_micros param through untouched as a param', () => {
+            service.trackEvent('custom', { timestamp_micros: 1 });
+
+            const body = takeBody();
+            // Params are not the event-level field; only the latter is ours.
+            expect(body.events[0].params.timestamp_micros).toBe(1);
+            expect(body.events[0].timestamp_micros).toBe(NOW_MICROS);
+        });
+    });
+
+    describe('timestamp_micros for calls queued during init()', () => {
+        it('keeps the time of the call, not the time init() finished', async () => {
+            let resolveContext!: () => void;
+            spyOn<any>(service, 'collectContext').and.returnValue(new Promise<void>(r => { resolveContext = r; }));
+
+            const initPromise = service.init();
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+
+            service.trackEvent('during_init');
+            service.trackPageView('/during-init');
+            jasmine.clock().tick(4000);
+
+            resolveContext();
+            await initPromise;
+
+            const reqs = httpMock.match((r) => r.url.includes('mp/collect'));
+            expect(reqs.length).toBe(2);
+            for (const req of reqs) {
+                expect(req.request.body.events[0].timestamp_micros).toBe(MOCK_TIMESTAMP * 1000);
+                req.flush('', { status: 204, statusText: 'No Content' });
+            }
+
+            // And the replay stamp does not leak onto calls made afterwards.
+            service.trackEvent('after_init');
+            const after = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(after.request.body.events[0].timestamp_micros).toBe((MOCK_TIMESTAMP + 4000) * 1000);
+            after.flush('', { status: 204, statusText: 'No Content' });
         });
     });
 
@@ -2172,7 +2916,9 @@ describe('NgGa4Service', () => {
 
             const { real, validation } = expectDebugPair();
             expect(real.request.body.user_agent).toBe(navigator.userAgent);
-            expect(validation.request.body).toEqual(real.request.body);
+            // The validation post adds only validation_behavior on top of the real body.
+            const { validation_behavior: _behavior, ...validated } = validation.request.body;
+            expect(validated).toEqual(real.request.body);
             real.flush('', { status: 204, statusText: 'No Content' });
             validation.flush({ validationMessages: [] });
         });
@@ -2239,7 +2985,20 @@ describe('NgGa4Service', () => {
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.url).not.toContain('debug/mp/collect');
             expect(req.request.body.events[0].params.debug_mode).toBeUndefined();
+            expect(req.request.body.validation_behavior).toBeUndefined();
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('asks the validation endpoint to ENFORCE_RECOMMENDATIONS but leaves the real hit RELAXED', async () => {
+            reconfigureTestBed({ debug: true });
+            await service.init();
+            service.trackEvent('custom_event');
+
+            const { real, validation } = expectDebugPair();
+            expect(validation.request.body['validation_behavior']).toBe('ENFORCE_RECOMMENDATIONS');
+            expect(real.request.body['validation_behavior']).toBeUndefined();
+            real.flush('', { status: 204, statusText: 'No Content' });
+            validation.flush({ validationMessages: [] });
         });
     });
 
@@ -2695,7 +3454,7 @@ describe('NgGa4Service', () => {
                 const body = sentBody();
                 expect('user_agent' in body).toBe(false);
                 expect(body.device).toBeDefined();
-                expect(body.user_location).toEqual({ country_id: 'DE' });
+                expect(body.user_location).toEqual(jasmine.objectContaining({ country_id: 'DE' }));
                 expect(warn).toHaveBeenCalledWith('[ng-ga4] user_agent collection failed', jasmine.any(Error));
             });
 
@@ -2754,15 +3513,31 @@ describe('NgGa4Service', () => {
             });
         });
 
-        it('derives user_location.country_id from the browser time zone', async () => {
+        it('derives user_location from the browser time zone', async () => {
             spyOn<any>(service, 'getTimeZone').and.returnValue('Europe/Berlin');
 
             await service.init();
             service.trackPageView('/home');
 
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
-            expect(req.request.body.user_location).toEqual({ country_id: 'DE' });
+            expect(req.request.body.user_location).toEqual({
+                country_id: 'DE',
+                continent_id: '150',
+                subcontinent_id: '155'
+            });
             expect(req.request.body.events[0].params.user_location).toBeUndefined();
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('sends only country_id when the country has no M49 region', async () => {
+            spyOn<any>(service, 'getTimeZone').and.returnValue('Antarctica/Troll');
+            spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
+
+            await service.init();
+            service.trackEvent('x');
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.user_location).toEqual({ country_id: 'AQ' });
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
@@ -2821,6 +3596,26 @@ describe('NgGa4Service', () => {
             expect(req.request.body.events[0].params.version).toBe('1.4.0');
             expect(req.request.body.client_id).toBeDefined();
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('validates a queued event once, when it is replayed', async () => {
+            spyOn(console, 'warn');
+            let resolveContext!: () => void;
+            const contextDeferred = new Promise<void>(r => { resolveContext = r; });
+            spyOn<any>(service, 'collectContext').and.returnValue(contextDeferred);
+
+            const initPromise = service.init();
+            await flushMicrotasks();
+            service.trackEvent('session_start');
+
+            resolveContext();
+            await initPromise;
+            await flushMicrotasks();
+
+            httpMock.expectNone((r) => r.url.includes('mp/collect'));
+            const warnings = (console.warn as jasmine.Spy).calls.allArgs()
+                .filter(args => /session_start/.test(String(args[0])));
+            expect(warnings.length).toBe(1);
         });
 
         it('queues trackPageView fired during init() and flushes after clientId is assigned', async () => {
@@ -2883,10 +3678,35 @@ describe('NgGa4Service', () => {
         it('should track page view on NavigationEnd', async () => {
             await service.init();
             routerEvents$.next(new NavigationEnd(1, '/test', '/test'));
+            await drainMicrotasks();
 
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.body.events[0].name).toBe('page_view');
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        // Retitling right after next() mirrors the real router's order.
+        it('reports the title set right after NavigationEnd, not the previous one', async () => {
+            document.title = 'Previous Page';
+            await service.init();
+
+            routerEvents$.next(new NavigationEnd(1, '/next', '/next'));
+            document.title = 'Next Page';
+            await drainMicrotasks();
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.page_title).toBe('Next Page');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('drops a deferred page view when the service is destroyed first', async () => {
+            await service.init();
+
+            routerEvents$.next(new NavigationEnd(1, '/gone', '/gone'));
+            service.ngOnDestroy();
+            await drainMicrotasks();
+
+            httpMock.expectNone(() => true);
         });
 
         it('should ignore NavigationStart', async () => {
@@ -2894,6 +3714,100 @@ describe('NgGa4Service', () => {
             routerEvents$.next(new NavigationStart(1, '/test'));
 
             httpMock.expectNone(() => true);
+        });
+    });
+
+    // --- config shape warnings ---
+
+    describe('config shape warnings', () => {
+        function configWarnings(): string[] {
+            return (console.warn as jasmine.Spy).calls.allArgs()
+                .map(args => String(args[0]))
+                .filter(msg => msg.includes('measurementId') || msg.includes('apiSecret'));
+        }
+
+        beforeEach(() => {
+            spyOn(console, 'warn');
+        });
+
+        // Lowercase is fine: it is uppercased before sending.
+        for (const good of ['G-ABC123XYZ9', 'g-abc123xyz9']) {
+            it(`should not warn for measurementId ${JSON.stringify(good)}`, async () => {
+                reconfigureTestBed({ measurementId: good, apiSecret: 'secret' });
+                await service.init();
+
+                expect(configWarnings()).toEqual([]);
+            });
+        }
+
+        for (const bad of ['UA-12345-1', 'G-', 'g-', 'g_abc123', ' G-ABC123', 'G-ABC123 ', '123456789', '']) {
+            it(`should warn once for measurementId ${JSON.stringify(bad)}`, async () => {
+                reconfigureTestBed({ measurementId: bad });
+                await service.init();
+                await service.init();
+
+                const warnings = configWarnings();
+                expect(warnings.length).toBe(1);
+                expect(warnings[0]).toContain('measurementId');
+                expect(warnings[0]).toContain(`"${bad}"`);
+            });
+        }
+
+        for (const bad of ['', '   ']) {
+            it(`should warn for apiSecret ${JSON.stringify(bad)} without echoing it`, async () => {
+                reconfigureTestBed({ apiSecret: bad });
+                await service.init();
+
+                const warnings = configWarnings();
+                expect(warnings.length).toBe(1);
+                expect(warnings[0]).toContain('apiSecret is empty');
+            });
+        }
+
+        it('should never include the apiSecret value in a warning', async () => {
+            reconfigureTestBed({ measurementId: 'bogus', apiSecret: 'top-secret-value' });
+            await service.init();
+
+            expect(JSON.stringify((console.warn as jasmine.Spy).calls.allArgs())).not.toContain('top-secret-value');
+        });
+
+        it('should stay silent in production builds without debug', async () => {
+            reconfigureTestBed({ measurementId: 'bogus', apiSecret: '' });
+            (service as any).warnOnInvalid = false;
+            await service.init();
+
+            expect(configWarnings()).toEqual([]);
+        });
+
+        it('should not throw on non-string measurementId or apiSecret from untyped config', async () => {
+            reconfigureTestBed({ measurementId: undefined as any, apiSecret: 12345 as any });
+            await service.init();
+
+            service.trackEvent('button_click');
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(new URL(req.request.url).searchParams.get('api_secret')).toBe('12345');
+            req.flush('', { status: 204, statusText: 'No Content' });
+            expect(configWarnings().length).toBe(1);
+        });
+
+        it('should still send hits when the config looks malformed', async () => {
+            reconfigureTestBed({ measurementId: 'UA-12345-1' });
+            await service.init();
+
+            service.trackEvent('button_click');
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.url).toContain('measurement_id=UA-12345-1');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('should not warn until a disabled service is enabled', async () => {
+            reconfigureTestBed({ enabled: false, measurementId: 'bogus' });
+            await service.init();
+            expect(configWarnings()).toEqual([]);
+
+            service.setEnabled(true);
+            await service.init();
+            expect(configWarnings().length).toBe(1);
         });
     });
 
@@ -2960,16 +3874,60 @@ describe('NgGa4Service', () => {
             req2.flush('', { status: 204, statusText: 'No Content' });
         });
 
-        it('should override caller-supplied app_version with config value', async () => {
+        // Library defaults first, caller wins (#31) — the same rule engagement_time_msec
+        // already followed.
+        it('should let a caller-supplied app_version override the config value', async () => {
             reconfigureTestBed({ appVersion: '1.0.4' });
             await service.init();
 
-            service.trackEvent('s3_connection_create', { app_version: 'spoofed', connection_type: 'S3' });
+            service.trackEvent('s3_connection_create', { app_version: '2.0.0-beta', connection_type: 'S3' });
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const params = req.request.body.events[0].params;
+            expect(params.app_version).toBe('2.0.0-beta');
+            expect(params.connection_type).toBe('S3');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('should keep library defaults when a caller param is undefined', async () => {
+            reconfigureTestBed({ appVersion: '1.0.4' });
+            await service.init();
+
+            service.trackEvent('button_click', { app_version: undefined, session_id: undefined, x: 1 });
 
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             const params = req.request.body.events[0].params;
             expect(params.app_version).toBe('1.0.4');
-            expect(params.connection_type).toBe('S3');
+            expect(params.session_id).toBeDefined();
+            expect(params.x).toBe(1);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('should send a caller-supplied app_version when config.appVersion is unset', async () => {
+            reconfigureTestBed({});
+            await service.init();
+
+            service.trackEvent('button_click', { app_version: '3.1.0' });
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(req.request.body.events[0].params.app_version).toBe('3.1.0');
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('should let caller params override every library default in trackEvent', async () => {
+            reconfigureTestBed({ appVersion: '1.0.4' });
+            await service.init();
+
+            service.trackEvent('button_click', {
+                app_version: 'a', engagement_time_msec: 7, session_id: 's', session_number: 9
+            });
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const params = req.request.body.events[0].params;
+            expect(params.app_version).toBe('a');
+            expect(params.engagement_time_msec).toBe(7);
+            expect(params.session_id).toBe('s');
+            expect(params.session_number).toBe(9);
             req.flush('', { status: 204, statusText: 'No Content' });
         });
     });
@@ -3009,6 +3967,8 @@ describe('NgGa4Service', () => {
 
             await service.init();
             service.trackEvent('extension_installed', { version: '1.4.0' });
+            // Batched: nothing leaves until the flush delay elapses.
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
             // No XHR was made — afterEach httpMock.verify() also enforces this.
             httpMock.expectNone(() => true);
@@ -3031,6 +3991,8 @@ describe('NgGa4Service', () => {
 
             await service.init();
             service.trackPageView('/home');
+            // Batched: nothing leaves until the flush delay elapses.
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
             httpMock.expectNone(() => true);
             expect(beaconCalls.length).toBe(1);
@@ -3044,6 +4006,8 @@ describe('NgGa4Service', () => {
 
             await service.init();
             service.trackEvent('file_download');
+            // Batched: nothing leaves until the flush delay elapses.
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
             httpMock.expectNone(() => true);
             expect(beaconSpy).toHaveBeenCalled();
@@ -3065,6 +4029,8 @@ describe('NgGa4Service', () => {
 
             await service.init();
             service.trackEvent('file_copy_move');
+            // Batched: nothing leaves until the flush delay elapses.
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
             httpMock.expectNone(() => true);
             expect(throwingBeacon).toHaveBeenCalled();
@@ -3078,6 +4044,8 @@ describe('NgGa4Service', () => {
 
             await service.init();
             service.trackEvent('file_upload');
+            // Batched: nothing leaves until the flush delay elapses.
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
             httpMock.expectNone(() => true);
             expect(fetchSpy).toHaveBeenCalled();
@@ -3090,6 +4058,8 @@ describe('NgGa4Service', () => {
 
             await service.init();
             service.trackEvent('file_delete');
+            // Batched: nothing leaves until the flush delay elapses.
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.body.events[0].name).toBe('file_delete');
@@ -3103,6 +4073,8 @@ describe('NgGa4Service', () => {
 
             await service.init();
             service.trackEvent('x');
+            // Batched: nothing leaves until the flush delay elapses.
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
             // The recorded hit goes out on the configured transport, so debug mode
             // exercises the same delivery path production will.
@@ -3114,6 +4086,1464 @@ describe('NgGa4Service', () => {
             // Validation is a separate XHR side channel, not a replacement.
             const req = httpMock.expectOne((r) => r.url.includes('debug/mp/collect'));
             req.flush({ validationMessages: [] });
+        });
+    });
+
+    describe('user_id', () => {
+        function nextHit(): TestRequest {
+            return httpMock.expectOne(r => r.url.includes('/mp/collect'));
+        }
+
+        it('omits user_id entirely by default', async () => {
+            await service.init();
+            service.trackEvent('test_event');
+
+            const req = nextHit();
+            expect('user_id' in req.request.body).toBeFalse();
+            req.flush({});
+        });
+
+        it('sends setUserId() as a top-level field, never as a param or user property', async () => {
+            await service.init();
+            service.setUserId('user-42');
+            service.trackEvent('test_event');
+
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('user-42');
+            expect(req.request.body['events'][0]['params']['user_id']).toBeUndefined();
+            expect(req.request.body['user_properties']).toBeUndefined();
+            req.flush({});
+        });
+
+        it('rides on page views too', async () => {
+            await service.init();
+            service.setUserId('user-42');
+            service.trackPageView('/page');
+
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('user-42');
+            req.flush({});
+        });
+
+        it('persists alongside the client id and restores it on the next load', async () => {
+            await service.init();
+            service.setUserId('user-42');
+            expect(mockLocalStorage['ga_user_id']).toBe('user-42');
+
+            reconfigureTestBed();
+            await service.init();
+            service.trackEvent('after_reload');
+
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('user-42');
+            req.flush({});
+        });
+
+        for (const signedOut of [null, '']) {
+            it(`stops sending and forgets the stored id after setUserId(${JSON.stringify(signedOut)})`, async () => {
+                mockLocalStorage['ga_user_id'] = 'user-42';
+                await service.init();
+
+                service.setUserId(signedOut);
+                service.trackEvent('signed_out');
+
+                const req = nextHit();
+                expect('user_id' in req.request.body).toBeFalse();
+                req.flush({});
+                expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+            });
+        }
+
+        it('warns and clears on a non-string value', async () => {
+            const warn = spyOn(console, 'warn');
+            await service.init();
+            service.setUserId('user-42');
+
+            service.setUserId(42 as unknown as string);
+            service.trackEvent('bad_id');
+
+            const req = nextHit();
+            expect('user_id' in req.request.body).toBeFalse();
+            req.flush({});
+            expect(warn).toHaveBeenCalledWith(jasmine.stringContaining('must be a string or null'));
+        });
+
+        it('ignores and quietly removes a junk stored value', async () => {
+            const warn = spyOn(console, 'warn');
+            const chromeLocal: Record<string, any> = { ga_client_id: 'chrome-client-id', ga_user_id: { not: 'a string' } };
+            setupChromeMock(chromeLocal);
+            reconfigureTestBed({ isExtension: true });
+            await service.init();
+            service.trackEvent('test_event');
+
+            const req = nextHit();
+            expect('user_id' in req.request.body).toBeFalse();
+            req.flush({});
+            // Not the setUserId() warning: the app never called it.
+            expect(warn).not.toHaveBeenCalledWith(jasmine.stringContaining('setUserId()'));
+            await service.flushStorage();
+            expect('ga_user_id' in chromeLocal).toBeFalse();
+        });
+
+        it('accepts 256 characters and warns and clears beyond that', async () => {
+            const warn = spyOn(console, 'warn');
+            await service.init();
+
+            service.setUserId('a'.repeat(256));
+            service.trackEvent('at_limit');
+            const ok = nextHit();
+            expect(ok.request.body['user_id'].length).toBe(256);
+            ok.flush({});
+
+            service.setUserId('a'.repeat(257));
+            service.trackEvent('over_limit');
+            const over = nextHit();
+            expect('user_id' in over.request.body).toBeFalse();
+            over.flush({});
+            expect(warn).toHaveBeenCalledWith(jasmine.stringContaining('longer than 256'));
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+        });
+
+        it('falls back to localStorage when the chrome.storage write fails', async () => {
+            spyOn(console, 'warn');
+            setupChromeMock();
+            reconfigureTestBed({ isExtension: true });
+            await service.init();
+            (window as any).chrome.storage.local.set = () => Promise.reject(new Error('storage failure'));
+
+            service.setUserId('ext-user');
+            await service.flushStorage();
+
+            expect(mockLocalStorage['ga_user_id']).toBe('ext-user');
+        });
+
+        describe('a chrome.storage write that fails after the id was cleared', () => {
+            async function initWithDeferredStorage(): Promise<ReturnType<typeof setupDeferredChromeMock>> {
+                spyOn(console, 'warn');
+                const deferred = setupDeferredChromeMock({ ga_client_id: 'chrome-client-id' });
+                reconfigureTestBed({ isExtension: true });
+                spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
+                const initDone = service.init();
+                for (let i = 0; i < 20; i++) {
+                    await drainMicrotasks();
+                }
+                await deferred.releaseAll();
+                await initDone;
+                deferred.calls.length = 0;
+                return deferred;
+            }
+
+            it('does not resurrect the id in localStorage after setUserId(null)', async () => {
+                const deferred = await initWithDeferredStorage();
+
+                service.setUserId('user-42');
+                service.setUserId(null);
+                await drainMicrotasks();
+                expect(deferred.calls[0]).toBe('local.set:ga_user_id');
+                deferred.rejectNext();
+                // releaseAll() only sees links already issued; the next one
+                // registers once the rejection has propagated.
+                await drainMicrotasks();
+                await deferred.releaseAll();
+                await service.flushStorage();
+
+                expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+            });
+
+            it('does not resurrect the id in localStorage after consent withdrawal', async () => {
+                const deferred = await initWithDeferredStorage();
+
+                service.setUserId('user-42');
+                service.setConsent({ analyticsStorage: 'denied' });
+                await drainMicrotasks();
+                expect(deferred.calls[0]).toBe('local.set:ga_user_id');
+                deferred.rejectNext();
+                // releaseAll() only sees links already issued; the next one
+                // registers once the rejection has propagated.
+                await drainMicrotasks();
+                await deferred.releaseAll();
+                await service.flushStorage();
+
+                expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+            });
+        });
+
+        it('writes a setUserId() made during init() once, not again when init() resumes', async () => {
+            const chromeLocal: Record<string, any> = { ga_client_id: 'chrome-client-id' };
+            const deferred = setupDeferredChromeMock(chromeLocal);
+            reconfigureTestBed({ isExtension: true });
+
+            // See 'init() stays pending until the queued extension writes settle':
+            // the real getHighEntropyValues() settles on a mocked-out task.
+            spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
+
+            const initDone = service.init();
+            // init() is suspended on chrome.storage reads; this call persists itself.
+            service.setUserId('early-user');
+            for (let i = 0; i < 20; i++) {
+                await drainMicrotasks();
+            }
+            await deferred.releaseAll();
+            await initDone;
+
+            expect(deferred.calls.filter(c => c === 'local.set:ga_user_id').length).toBe(1);
+            expect(chromeLocal['ga_user_id']).toBe('early-user');
+        });
+
+        it('writes nothing before init() and persists the id once init() runs', async () => {
+            reconfigureTestBed({ enabled: false });
+            service.setUserId('early-user');
+            await service.init();
+            // enabled: false promises no storage writes until collection is on.
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+
+            service.setEnabled(true);
+            await service.init();
+            expect(mockLocalStorage['ga_user_id']).toBe('early-user');
+
+            service.trackEvent('after_enable');
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('early-user');
+            req.flush({});
+        });
+
+        it('lets a setUserId() call made before init() win over the stored id', async () => {
+            mockLocalStorage['ga_user_id'] = 'previous-user';
+            service.setUserId(null);
+            await service.init();
+            service.trackEvent('test_event');
+
+            const req = nextHit();
+            expect('user_id' in req.request.body).toBeFalse();
+            req.flush({});
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+        });
+
+        it('lets a setUserId() call made during init() win over the stored id', async () => {
+            const chromeLocal: Record<string, any> = { ga_client_id: 'chrome-client-id', ga_user_id: 'previous-user' };
+            setupChromeMock(chromeLocal);
+            reconfigureTestBed({ isExtension: true });
+
+            const initDone = service.init();
+            // init() is suspended on chrome.storage reads here.
+            service.setUserId('new-user');
+            await initDone;
+            service.trackEvent('test_event');
+
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('new-user');
+            req.flush({});
+            expect(chromeLocal['ga_user_id']).toBe('new-user');
+        });
+
+        it('persists to and restores from chrome.storage.local on an extension', async () => {
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal);
+            reconfigureTestBed({ isExtension: true });
+            await service.init();
+
+            service.setUserId('ext-user');
+            await service.flushStorage();
+            expect(chromeLocal['ga_user_id']).toBe('ext-user');
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+
+            reconfigureTestBed({ isExtension: true });
+            await service.init();
+            service.trackEvent('after_restart');
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('ext-user');
+            req.flush({});
+
+            service.setUserId(null);
+            await service.flushStorage();
+            expect(chromeLocal['ga_user_id']).toBeUndefined();
+        });
+
+        it('does not throw from setUserId() when storage fails', async () => {
+            const warn = spyOn(console, 'warn');
+            await service.init();
+            (localStorage.setItem as jasmine.Spy).and.throwError('QuotaExceededError');
+
+            expect(() => service.setUserId('user-42')).not.toThrow();
+            expect(warn).toHaveBeenCalled();
+
+            // Restored so the session write on the hit path (out of scope here)
+            // does not throw too.
+            (localStorage.setItem as jasmine.Spy).and.callFake((key: string, value: string) => { mockLocalStorage[key] = value; });
+            service.trackEvent('still_sent');
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('user-42');
+            req.flush({});
+        });
+
+        it('sends but does not persist the id while storage is denied', async () => {
+            reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+            await service.init();
+            service.setUserId('user-42');
+            service.trackEvent('denied');
+
+            const req = nextHit();
+            expect(req.request.body['user_id']).toBe('user-42');
+            req.flush({});
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+        });
+
+        it('neither sends nor keeps a stored id when storage starts denied', async () => {
+            mockLocalStorage['ga_user_id'] = 'user-42';
+            reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+            await service.init();
+            service.trackEvent('denied_boot');
+
+            const req = nextHit();
+            // Written under an earlier consent; using it would tie this
+            // denied-storage visit to a known person.
+            expect('user_id' in req.request.body).toBeFalse();
+            req.flush({});
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+        });
+
+        it('deletes the stored id on withdrawal and writes it back on re-grant', async () => {
+            await service.init();
+            service.setUserId('user-42');
+
+            service.setConsent({ analyticsStorage: 'denied' });
+            expect(mockLocalStorage['ga_user_id']).toBeUndefined();
+
+            service.setConsent({ analyticsStorage: 'granted' });
+            expect(mockLocalStorage['ga_user_id']).toBe('user-42');
+        });
+
+        it('deletes the stored id from chrome.storage.local on withdrawal', async () => {
+            const chromeLocal: Record<string, any> = {};
+            setupChromeMock(chromeLocal);
+            reconfigureTestBed({ isExtension: true });
+            await service.init();
+            service.setUserId('ext-user');
+            await service.flushStorage();
+
+            service.setConsent({ analyticsStorage: 'denied' });
+            await service.flushStorage();
+            expect(chromeLocal['ga_user_id']).toBeUndefined();
+        });
+
+        it('does not touch storage on the server', async () => {
+            reconfigureTestBed({}, 'server');
+            service.setUserId('ssr-user');
+            await service.init();
+
+            expect(localStorage.getItem).not.toHaveBeenCalled();
+            expect(localStorage.setItem).not.toHaveBeenCalled();
+            httpMock.expectNone(() => true);
+        });
+    });
+
+    // --- batching (#24) ---
+
+    describe('batching', () => {
+        let beacons: any[];
+
+        function installBeacon(): void {
+            beacons = [];
+            spyOn<any>(service, 'trySendBeacon').and.callFake((url: string, payload: string) => {
+                beacons.push(JSON.parse(payload));
+                return true;
+            });
+        }
+
+        async function setup(config: Partial<NgGa4Config> = {}): Promise<void> {
+            reconfigureTestBed({ transport: 'beacon', ...config });
+            installBeacon();
+            await service.init();
+        }
+
+        const names = (b: any) => b.events.map((e: any) => e.name);
+
+        it('sends events tracked within the delay as one request, in order, each with its own time', async () => {
+            await setup();
+
+            service.trackPageView('/a');
+            jasmine.clock().tick(100);
+            service.trackEvent('one');
+            jasmine.clock().tick(100);
+            service.trackEvent('two');
+            expect(beacons.length).toBe(0);
+
+            jasmine.clock().tick(BATCH_DELAY_MS);
+
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['page_view', 'one', 'two']);
+            expect(beacons[0].events.map((e: any) => e.timestamp_micros))
+                .toEqual([0, 100, 200].map(d => (MOCK_TIMESTAMP + d) * 1000));
+            expect(beacons[0].timestamp_micros).toBe(MOCK_TIMESTAMP * 1000);
+        });
+
+        it('waits the delay from the first queued event, not the last', async () => {
+            await setup();
+
+            service.trackEvent('one');
+            jasmine.clock().tick(BATCH_DELAY_MS - 1);
+            service.trackEvent('two');
+            expect(beacons.length).toBe(0);
+            jasmine.clock().tick(1);
+
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['one', 'two']);
+        });
+
+        it('sends at once when a batch reaches 25 events, starting a new one for the 26th', async () => {
+            await setup();
+
+            for (let i = 0; i < 25; i++) {
+                service.trackEvent(`e${i}`);
+            }
+            expect(beacons.length).toBe(1);
+            expect(beacons[0].events.length).toBe(25);
+
+            service.trackEvent('e25');
+            expect(beacons.length).toBe(1);
+            jasmine.clock().tick(BATCH_DELAY_MS);
+            expect(beacons.length).toBe(2);
+            expect(names(beacons[1])).toEqual(['e25']);
+        });
+
+        it('flushes when the page is hidden', async () => {
+            await setup();
+            service.trackEvent('before_hide');
+
+            pageEngaged = false;
+            document.dispatchEvent(new Event('visibilitychange'));
+
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['before_hide']);
+        });
+
+        it('flushes on pagehide', async () => {
+            await setup();
+            service.trackEvent('before_pagehide');
+
+            window.dispatchEvent(new Event('pagehide'));
+
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['before_pagehide']);
+        });
+
+        it('does not flush when the page is shown again', async () => {
+            await setup();
+            pageEngaged = false;
+            document.dispatchEvent(new Event('visibilitychange'));
+            pageEngaged = true;
+            service.trackEvent('queued');
+
+            document.dispatchEvent(new Event('visibilitychange'));
+
+            expect(beacons.length).toBe(0);
+            jasmine.clock().tick(BATCH_DELAY_MS);
+            expect(beacons.length).toBe(1);
+        });
+
+        it('sends the hide-time engagement event in the same request as what was queued', async () => {
+            await setup({ batchDelayMs: 60_000 });
+            service.trackEvent('queued');
+            jasmine.clock().tick(5000);
+
+            pageEngaged = false;
+            document.dispatchEvent(new Event('visibilitychange'));
+
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['queued', 'page_engagement']);
+            expect(beacons[0].events[1].params.engagement_time_msec).toBe(5000);
+        });
+
+        it('sends what is queued at once when collection is disabled', async () => {
+            await setup();
+            service.trackEvent('before_disable');
+
+            service.setEnabled(false);
+
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['before_disable']);
+            jasmine.clock().tick(BATCH_DELAY_MS);
+            expect(beacons.length).toBe(1);
+        });
+
+        it('flushes when the service is destroyed', async () => {
+            await setup();
+            service.trackEvent('before_destroy');
+
+            service.ngOnDestroy();
+
+            expect(beacons.length).toBe(1);
+            jasmine.clock().tick(BATCH_DELAY_MS);
+            expect(beacons.length).toBe(1);
+        });
+
+        it('keeps each event under the consent it was tracked with', async () => {
+            await setup();
+            service.trackEvent('granted_one');
+            service.setConsent({ adUserData: 'denied' });
+            service.trackEvent('denied_one');
+            jasmine.clock().tick(BATCH_DELAY_MS);
+
+            expect(beacons.length).toBe(2);
+            expect(names(beacons[0])).toEqual(['granted_one']);
+            expect(beacons[0].consent).toBeUndefined();
+            expect(names(beacons[1])).toEqual(['denied_one']);
+            expect(beacons[1].consent.ad_user_data).toBe('DENIED');
+        });
+
+        it('keeps each event under the user_id it was tracked with', async () => {
+            await setup();
+            service.trackEvent('signed_out');
+            service.setUserId('user-42');
+            service.trackEvent('signed_in');
+            jasmine.clock().tick(BATCH_DELAY_MS);
+
+            expect(beacons.length).toBe(2);
+            expect('user_id' in beacons[0]).toBeFalse();
+            expect(beacons[1].user_id).toBe('user-42');
+        });
+
+        it('honours batchDelayMs', async () => {
+            await setup({ batchDelayMs: 2000 });
+            service.trackEvent('x');
+
+            jasmine.clock().tick(1999);
+            expect(beacons.length).toBe(0);
+            jasmine.clock().tick(1);
+            expect(beacons.length).toBe(1);
+        });
+
+        it('still batches calls made in the same task with batchDelayMs: 0', async () => {
+            await setup({ batchDelayMs: 0 });
+            service.trackEvent('a');
+            service.trackEvent('b');
+            expect(beacons.length).toBe(0);
+
+            jasmine.clock().tick(0);
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['a', 'b']);
+        });
+
+        it('falls back to the default delay for an invalid batchDelayMs', async () => {
+            await setup({ batchDelayMs: -5 });
+            service.trackEvent('x');
+
+            jasmine.clock().tick(BATCH_DELAY_MS - 1);
+            expect(beacons.length).toBe(0);
+            jasmine.clock().tick(1);
+            expect(beacons.length).toBe(1);
+        });
+
+        it('schedules the flush outside the Angular zone', async () => {
+            await setup();
+            const zone = TestBed.inject(NgZone);
+            const outside = spyOn(zone, 'runOutsideAngular').and.callThrough();
+
+            zone.run(() => service.trackEvent('x'));
+
+            expect(outside).toHaveBeenCalled();
+            jasmine.clock().tick(BATCH_DELAY_MS);
+            expect(beacons.length).toBe(1);
+        });
+
+        it('validates each batch once in debug mode, as the batch GA4 receives', async () => {
+            await setup({ debug: true });
+            service.trackEvent('a');
+            service.trackEvent('b');
+            httpMock.expectNone((r) => r.url.includes('debug/mp/collect'));
+
+            jasmine.clock().tick(BATCH_DELAY_MS);
+
+            const validation = httpMock.expectOne((r) => r.url.includes('debug/mp/collect'));
+            expect(names(validation.request.body)).toEqual(['a', 'b']);
+            expect(validation.request.body.events.every((e: any) => e.params.debug_mode === 1)).toBeTrue();
+            validation.flush({ validationMessages: [] });
+        });
+
+        // As gtag.js batches whatever its transport.
+        it('batches under transport: xhr too, sending the batch through HttpClient', async () => {
+            reconfigureTestBed({ transport: 'xhr', batchDelayMs: BATCH_DELAY_MS });
+            const beacon = spyOn<any>(service, 'trySendBeacon').and.returnValue(true);
+            await service.init();
+
+            service.trackEvent('a');
+            service.trackEvent('b');
+            httpMock.expectNone((r) => r.url.includes('mp/collect'));
+            jasmine.clock().tick(BATCH_DELAY_MS);
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(names(req.request.body)).toEqual(['a', 'b']);
+            req.flush('', { status: 204, statusText: 'No Content' });
+            expect(beacon).not.toHaveBeenCalled();
+        });
+
+        // user_agent is part of the batch envelope; it is the same for every call in
+        // a session, so it never splits a batch.
+        it('keeps batched events in one request carrying user_agent', async () => {
+            reconfigureTestBed({ transport: 'xhr', batchDelayMs: BATCH_DELAY_MS });
+            await service.init();
+
+            service.trackEvent('a');
+            service.trackPageView('/b');
+            jasmine.clock().tick(BATCH_DELAY_MS);
+
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(names(req.request.body)).toEqual(['a', 'page_view']);
+            expect(req.request.body.user_agent).toBe(navigator.userAgent);
+            req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        // An XHR in flight when the page goes away is aborted.
+        it('sends an xhr batch over the beacon chain when the page is hidden', async () => {
+            reconfigureTestBed({ transport: 'xhr', batchDelayMs: BATCH_DELAY_MS });
+            installBeacon();
+            await service.init();
+            service.trackEvent('before_hide');
+
+            pageEngaged = false;
+            document.dispatchEvent(new Event('visibilitychange'));
+
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['before_hide']);
+            httpMock.expectNone((r) => r.url.includes('mp/collect'));
+        });
+
+        it('sends an xhr batch through HttpClient when flushed by flush()', async () => {
+            reconfigureTestBed({ transport: 'xhr', batchDelayMs: 60_000 });
+            await service.init();
+            service.trackEvent('a');
+
+            const flushed = service.flush();
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(names(req.request.body)).toEqual(['a']);
+            req.flush('', { status: 204, statusText: 'No Content' });
+            await flushed;
+        });
+
+        it('schedules nothing on the server', async () => {
+            reconfigureTestBed({ transport: 'beacon' }, 'server');
+            await service.init();
+
+            service.trackEvent('x');
+
+            expect((service as any).batchTimer).toBeNull();
+            expect((service as any).batcher.isEmpty).toBeTrue();
+        });
+    });
+
+    // --- flush() and track results (#26) ---
+
+    describe('track results', () => {
+        const ok = { status: 204, statusText: 'No Content' };
+
+        it('reports accepted, then sent once the request succeeds (xhr)', async () => {
+            await service.init();
+
+            const result = service.trackEvent('x');
+            expect(result.status).toBe('accepted');
+
+            httpMock.expectOne((r) => r.url.includes('mp/collect')).flush('', ok);
+            expect(await result.delivered).toBe('sent');
+        });
+
+        it('reports stored on a network error, without rejecting', async () => {
+            await service.init();
+            spyOn(console, 'error');
+
+            const result = service.trackPageView('/a');
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .error(new ProgressEvent('error'), { status: 0, statusText: 'Unknown Error' });
+
+            expect(await result.delivered).toBe('stored');
+        });
+
+        it('reports disabled, with delivery dropped', async () => {
+            reconfigureTestBed({ enabled: false });
+            await service.init();
+
+            const result = service.trackEvent('x');
+
+            expect(result.status).toBe('disabled');
+            expect(await result.delivered).toBe('dropped');
+        });
+
+        it('reports invalid for an event name GA4 would discard', async () => {
+            await service.init();
+
+            const result = service.trackEvent('has-a-hyphen');
+
+            expect(result.status).toBe('invalid');
+            expect(await result.delivered).toBe('dropped');
+            httpMock.expectNone(() => true);
+        });
+
+        it('reports uninitialized for a call made before init() starts', async () => {
+            const result = service.trackEvent('x');
+
+            expect(result.status).toBe('uninitialized');
+            expect(await result.delivered).toBe('dropped');
+        });
+
+        it('reports server on the server platform', async () => {
+            reconfigureTestBed({}, 'server');
+
+            const result = service.trackPageView('/a');
+
+            expect(result.status).toBe('server');
+            expect(await result.delivered).toBe('dropped');
+        });
+
+        it('reports deferred during init(), then settles with the replayed call', async () => {
+            let resolveContext!: () => void;
+            spyOn<any>(service, 'collectContext').and.returnValue(new Promise<void>(r => { resolveContext = r; }));
+            const initPromise = service.init();
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+
+            const result = service.trackEvent('during_init');
+            expect(result.status).toBe('deferred');
+
+            resolveContext();
+            await initPromise;
+            httpMock.expectOne((r) => r.url.includes('mp/collect')).flush('', ok);
+
+            expect(await result.delivered).toBe('sent');
+        });
+
+        it('settles a deferred call as dropped when the service is destroyed before init() finishes', async () => {
+            spyOn<any>(service, 'collectContext').and.returnValue(new Promise<void>(() => undefined));
+            service.init();
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+
+            const result = service.trackEvent('during_init');
+            service.ngOnDestroy();
+
+            expect(await result.delivered).toBe('dropped');
+        });
+
+        it('reports dropped when an HTTP interceptor swallows the request', async () => {
+            await service.init();
+            spyOn(TestBed.inject(HttpClient), 'post').and.returnValue(EMPTY);
+
+            const result = service.trackEvent('x');
+
+            expect(await result.delivered).toBe('dropped');
+        });
+
+        it('settles a deferred call as dropped when collection is disabled before init() finishes', async () => {
+            let resolveContext!: () => void;
+            spyOn<any>(service, 'collectContext').and.returnValue(new Promise<void>(r => { resolveContext = r; }));
+            const initPromise = service.init();
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+
+            const result = service.trackEvent('during_init');
+            service.setEnabled(false);
+            resolveContext();
+            await initPromise;
+
+            expect(await result.delivered).toBe('dropped');
+        });
+
+        describe('over the beacon chain', () => {
+            beforeEach(() => {
+                reconfigureTestBed({ transport: 'beacon' });
+            });
+
+            it('reports sent once sendBeacon accepts the batch', async () => {
+                spyOn<any>(service, 'trySendBeacon').and.returnValue(true);
+                await service.init();
+
+                const a = service.trackEvent('a');
+                const b = service.trackEvent('b');
+                jasmine.clock().tick(BATCH_DELAY_MS);
+
+                expect(await a.delivered).toBe('sent');
+                expect(await b.delivered).toBe('sent');
+            });
+
+            it('stays pending until the batch is actually sent', async () => {
+                spyOn<any>(service, 'trySendBeacon').and.returnValue(true);
+                await service.init();
+                let settled = false;
+
+                service.trackEvent('a').delivered.then(() => { settled = true; });
+                for (let i = 0; i < 10; i++) { await Promise.resolve(); }
+                expect(settled).toBeFalse();
+
+                jasmine.clock().tick(BATCH_DELAY_MS);
+                for (let i = 0; i < 10; i++) { await Promise.resolve(); }
+                expect(settled).toBeTrue();
+            });
+
+            it('reports stored when the fetch(keepalive) fallback rejects', async () => {
+                spyOn<any>(service, 'getNavigator').and.returnValue({});
+                spyOn<any>(service, 'getFetch').and.returnValue(() => Promise.reject(new TypeError('Failed to fetch')));
+                spyOn(console, 'error');
+                await service.init();
+
+                const result = service.trackEvent('a');
+                jasmine.clock().tick(BATCH_DELAY_MS);
+
+                expect(await result.delivered).toBe('stored');
+            });
+
+            // Not GA4 itself, which answers 2xx to anything: a proxy or blocker.
+            it('reports failed when fetch(keepalive) gets a non-2xx response', async () => {
+                spyOn<any>(service, 'getNavigator').and.returnValue({});
+                spyOn<any>(service, 'getFetch').and.returnValue(() => Promise.resolve({ ok: false, status: 403, statusText: 'Forbidden' }));
+                const errorSpy = spyOn(console, 'error');
+                await service.init();
+
+                const result = service.trackEvent('a');
+                jasmine.clock().tick(BATCH_DELAY_MS);
+
+                expect(await result.delivered).toBe('failed');
+                expect(errorSpy.calls.mostRecent().args[1].status).toBe(403);
+            });
+
+            it('reports sent when fetch(keepalive) succeeds', async () => {
+                spyOn<any>(service, 'getNavigator').and.returnValue({});
+                spyOn<any>(service, 'getFetch').and.returnValue(() => Promise.resolve({ ok: true, status: 204 }));
+                await service.init();
+
+                const result = service.trackEvent('a');
+                jasmine.clock().tick(BATCH_DELAY_MS);
+
+                expect(await result.delivered).toBe('sent');
+            });
+        });
+    });
+
+    describe('flush()', () => {
+        const ok = { status: 204, statusText: 'No Content' };
+
+        // Falls through sendBeacon and fetch to XHR, so the test controls when
+        // the request settles.
+        function routeBeaconChainToXhr(): void {
+            spyOn<any>(service, 'getNavigator').and.returnValue({});
+            spyOn<any>(service, 'getFetch').and.returnValue(undefined);
+        }
+
+        async function settledWithin(promise: Promise<unknown>): Promise<boolean> {
+            let settled = false;
+            promise.then(() => { settled = true; });
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+            return settled;
+        }
+
+        it('sends the queued batch at once, without waiting for the timer', async () => {
+            reconfigureTestBed({ transport: 'beacon', batchDelayMs: 60_000 });
+            const beacon = spyOn<any>(service, 'trySendBeacon').and.returnValue(true);
+            await service.init();
+            service.trackEvent('a');
+            service.trackEvent('b');
+
+            const flushed = service.flush();
+            // Before any await: an unload handler that cannot wait still gets it out.
+            expect(beacon).toHaveBeenCalledTimes(1);
+            await flushed;
+
+            expect(beacon).toHaveBeenCalledTimes(1);
+            expect(JSON.parse(beacon.calls.mostRecent().args[1] as string).events.length).toBe(2);
+        });
+
+        it('resolves only once the request has settled', async () => {
+            reconfigureTestBed({ transport: 'beacon' });
+            routeBeaconChainToXhr();
+            await service.init();
+            service.trackEvent('a');
+
+            const flushed = service.flush();
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(await settledWithin(flushed)).toBeFalse();
+
+            req.flush('', ok);
+            expect(await settledWithin(flushed)).toBeTrue();
+        });
+
+        it('waits for unbatched xhr requests too', async () => {
+            await service.init();
+            service.trackEvent('a');
+
+            const flushed = service.flush();
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(await settledWithin(flushed)).toBeFalse();
+
+            req.flush('', ok);
+            expect(await settledWithin(flushed)).toBeTrue();
+        });
+
+        it('resolves, not rejects, when the request fails', async () => {
+            await service.init();
+            spyOn(console, 'error');
+            service.trackEvent('a');
+
+            const flushed = service.flush();
+            httpMock.expectOne((r) => r.url.includes('mp/collect'))
+                .error(new ProgressEvent('error'), { status: 0, statusText: 'Unknown Error' });
+
+            await expectAsync(flushed).toBeResolved();
+        });
+
+        it('includes calls made while init() is still running', async () => {
+            reconfigureTestBed({ transport: 'beacon', batchDelayMs: 60_000 });
+            const beacon = spyOn<any>(service, 'trySendBeacon').and.returnValue(true);
+            let resolveContext!: () => void;
+            spyOn<any>(service, 'collectContext').and.returnValue(new Promise<void>(r => { resolveContext = r; }));
+            service.init();
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+            service.trackEvent('during_init');
+
+            const flushed = service.flush();
+            expect(beacon).not.toHaveBeenCalled();
+            resolveContext();
+            await flushed;
+
+            expect(beacon).toHaveBeenCalledTimes(1);
+        });
+
+        it('also waits for pending chrome.storage writes', async () => {
+            reconfigureTestBed({ isExtension: true });
+            setupChromeMock({ ga_client_id: 'cid' });
+            await service.init();
+            // From here on, writes stay pending until released.
+            const mock = setupDeferredChromeMock({ ga_client_id: 'cid' });
+
+            // Writes the session's last activity to chrome.storage.session.
+            service.trackEvent('a');
+            httpMock.expectOne((r) => r.url.includes('mp/collect')).flush('', ok);
+            const flushed = service.flush();
+            expect(await settledWithin(flushed)).toBeFalse();
+
+            await mock.releaseAll();
+            expect(await settledWithin(flushed)).toBeTrue();
+        });
+
+        it('resolves at once with nothing to send', async () => {
+            await service.init();
+
+            await expectAsync(service.flush()).toBeResolved();
+        });
+
+        it('resolves at once on the server', async () => {
+            reconfigureTestBed({}, 'server');
+
+            await expectAsync(service.flush()).toBeResolved();
+        });
+    });
+
+    // --- offline outbox (#25) ---
+
+    describe('offline outbox', () => {
+        const ok = { status: 204, statusText: 'No Content' };
+        const HOUR_MS = 60 * 60 * 1000;
+        const isCollect = (r: any) => r.url.includes('mp/collect') && !r.url.includes('debug/');
+
+        function failOffline(req: TestRequest): void {
+            req.error(new ProgressEvent('error'), { status: 0, statusText: 'Unknown Error' });
+        }
+
+        function storedOutbox(): any[] {
+            return JSON.parse(mockLocalStorage['ga_outbox'] ?? '[]');
+        }
+
+        function storedBody(names: string[], ageMs: number, clientId = 'earlier-cid'): any {
+            const ts = (MOCK_TIMESTAMP - ageMs) * 1000;
+            return { client_id: clientId, events: names.map(name => ({ name, timestamp_micros: ts, params: { p: 1 } })) };
+        }
+
+        beforeEach(() => {
+            spyOn(console, 'error');
+        });
+
+        // The outbox drain starts once init() has finished, not during it, so
+        // its replay request goes out a few microtasks after init() resolves.
+        async function initAndDrain(): Promise<void> {
+            await service.init();
+            await service.flushStorage();
+            for (let i = 0; i < 10; i++) { await Promise.resolve(); }
+        }
+
+        it('stores a request that could not reach GA4, whole', async () => {
+            await initAndDrain();
+            jasmine.clock().tick(1000);
+            const result = service.trackEvent('offline_event', { a: 1 });
+
+            const req = httpMock.expectOne(isCollect);
+            failOffline(req);
+
+            expect(await result.delivered).toBe('stored');
+            await service.flushStorage();
+            const [stored] = storedOutbox();
+            // Everything but the request-level time, which is derived from the
+            // events again when the request is replayed.
+            const { timestamp_micros, ...sent } = JSON.parse(JSON.stringify(req.request.body));
+            expect(timestamp_micros).toBe((MOCK_TIMESTAMP + 1000) * 1000);
+            expect(stored).toEqual(sent);
+            expect(stored.events[0].timestamp_micros).toBe((MOCK_TIMESTAMP + 1000) * 1000);
+        });
+
+        // GA4 answers 2xx to whatever it receives; a non-2xx is not worth replaying.
+        it('does not store a request that got an HTTP error', async () => {
+            await initAndDrain();
+            const result = service.trackEvent('x');
+
+            httpMock.expectOne(isCollect).flush('', { status: 500, statusText: 'Server Error' });
+
+            expect(await result.delivered).toBe('failed');
+            await service.flushStorage();
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+        });
+
+        it('does not store anything with analyticsStorage denied', async () => {
+            reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
+            await initAndDrain();
+            const result = service.trackEvent('x');
+
+            failOffline(httpMock.expectOne(isCollect));
+
+            expect(await result.delivered).toBe('failed');
+            await service.flushStorage();
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+        });
+
+        // sendBeacon() reports success while offline and the browser then drops
+        // the hit, so the beacon chain alone would never fill the outbox.
+        it('stores instead of beaconing while the browser reports itself offline', async () => {
+            reconfigureTestBed({ transport: 'beacon' });
+            const beacon = spyOn<any>(service, 'trySendBeacon').and.returnValue(true);
+            spyOn<any>(service, 'getNavigator').and.returnValue({ onLine: false, sendBeacon: () => true });
+            await initAndDrain();
+
+            const result = service.trackEvent('offline_page_event');
+            jasmine.clock().tick(BATCH_DELAY_MS);
+
+            expect(await result.delivered).toBe('stored');
+            expect(beacon).not.toHaveBeenCalled();
+            await service.flushStorage();
+            expect(storedOutbox()[0].events[0].name).toBe('offline_page_event');
+        });
+
+        it('writes failures that arrive together in one storage write', async () => {
+            await initAndDrain();
+            service.trackEvent('one');
+            service.setConsent({ adUserData: 'denied' });
+            service.trackEvent('two');
+            httpMock.match(isCollect).forEach(failOffline);
+            await service.flush();
+
+            expect(storedOutbox().map(b => b.events[0].name)).toEqual(['one', 'two']);
+            const outboxWrites = (localStorage.setItem as jasmine.Spy).calls.allArgs().filter(([key]) => key === 'ga_outbox');
+            expect(outboxWrites.length).toBe(1);
+        });
+
+        it('merges stored requests back into full batches when replaying', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([
+                storedBody(['a'], 3 * HOUR_MS),
+                storedBody(['b'], 2 * HOUR_MS),
+                storedBody(['c'], HOUR_MS)
+            ]);
+
+            await initAndDrain();
+
+            const req = httpMock.expectOne(isCollect);
+            expect(req.request.body.events.map((e: any) => e.name)).toEqual(['a', 'b', 'c']);
+            expect(req.request.body.timestamp_micros).toBe((MOCK_TIMESTAMP - 3 * HOUR_MS) * 1000);
+            req.flush('', ok);
+        });
+
+        // A blocker or captive portal fails every request; one doomed probe per
+        // drain is enough to find out.
+        it('replays one batch as a probe and puts the rest back when it fails', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([
+                storedBody(['first'], 2 * HOUR_MS, 'cid-a'),
+                storedBody(['second'], HOUR_MS, 'cid-b')
+            ]);
+
+            await initAndDrain();
+            const probe = httpMock.expectOne(isCollect);
+            expect(probe.request.body.events[0].name).toBe('first');
+            failOffline(probe);
+            await service.flush();
+
+            httpMock.expectNone(isCollect);
+            expect(storedOutbox().map(b => b.events[0].name)).toEqual(['first', 'second']);
+        });
+
+        it('sends the rest once the probe gets through', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([
+                storedBody(['first'], 2 * HOUR_MS, 'cid-a'),
+                storedBody(['second'], HOUR_MS, 'cid-b')
+            ]);
+
+            await initAndDrain();
+            httpMock.expectOne(isCollect).flush('', ok);
+            for (let i = 0; i < 10; i++) { await Promise.resolve(); }
+
+            const rest = httpMock.expectOne(isCollect);
+            expect(rest.request.body.events[0].name).toBe('second');
+            rest.flush('', ok);
+            await service.flush();
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+        });
+
+        it('gives up the oldest half of the outbox when localStorage is full', async () => {
+            await initAndDrain();
+            mockLocalStorage['ga_outbox'] = JSON.stringify([
+                storedBody(['old1'], 3 * HOUR_MS),
+                storedBody(['old2'], 2 * HOUR_MS),
+                storedBody(['old3'], HOUR_MS)
+            ]);
+            let refused = false;
+            (localStorage.setItem as jasmine.Spy).and.callFake((key: string, value: string) => {
+                if (key === 'ga_outbox' && !refused) {
+                    refused = true;
+                    throw new DOMException('quota', 'QuotaExceededError');
+                }
+                mockLocalStorage[key] = value;
+            });
+
+            service.setConsent({ adUserData: 'denied' });
+            const result = service.trackEvent('newest');
+            failOffline(httpMock.expectOne(isCollect));
+
+            expect(await result.delivered).toBe('stored');
+            expect(storedOutbox().map(b => b.events[0].name)).toEqual(['old3', 'newest']);
+        });
+
+        it('leaves the outbox alone when init() runs offline', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['earlier'], HOUR_MS)]);
+            spyOn<any>(service, 'getNavigator').and.returnValue({ onLine: false });
+
+            await initAndDrain();
+
+            httpMock.expectNone(isCollect);
+            expect(storedOutbox().length).toBe(1);
+            expect(localStorage.setItem).not.toHaveBeenCalledWith('ga_outbox', jasmine.anything());
+        });
+
+        // A request stored while the browser still claimed to be online never
+        // gets an 'online' event; the next send that works is the signal.
+        it('replays after a later send succeeds', async () => {
+            await initAndDrain();
+            service.trackEvent('lost_then_found');
+            failOffline(httpMock.expectOne(isCollect));
+            await service.flush();
+
+            service.trackEvent('works_now');
+            httpMock.expectOne(isCollect).flush('', ok);
+            await service.flushStorage();
+            for (let i = 0; i < 10; i++) { await Promise.resolve(); }
+
+            const replay = httpMock.expectOne(isCollect);
+            expect(replay.request.body.events[0].name).toBe('lost_then_found');
+            replay.flush('', ok);
+            await service.flush();
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+        });
+
+        it('clamps a stored timestamp that is now in the future', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['ahead'], -HOUR_MS)]);
+
+            await initAndDrain();
+
+            const req = httpMock.expectOne(isCollect);
+            expect(req.request.body.events[0].timestamp_micros).toBe(MOCK_TIMESTAMP * 1000);
+            req.flush('', ok);
+        });
+
+        it('sends no validation request while offline in debug mode', async () => {
+            reconfigureTestBed({ debug: true });
+            spyOn<any>(service, 'getNavigator').and.returnValue({ onLine: false });
+            await initAndDrain();
+
+            const result = service.trackEvent('offline_debug');
+
+            expect(await result.delivered).toBe('stored');
+            httpMock.expectNone(() => true);
+        });
+
+        it('replays stored requests on init(), with their original identity and time', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['earlier'], 5 * HOUR_MS)]);
+
+            await initAndDrain();
+            const req = httpMock.expectOne(isCollect);
+
+            expect(req.request.body.client_id).toBe('earlier-cid');
+            expect(req.request.body.events[0].name).toBe('earlier');
+            expect(req.request.body.events[0].timestamp_micros).toBe((MOCK_TIMESTAMP - 5 * HOUR_MS) * 1000);
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+            req.flush('', ok);
+        });
+
+        it('drops stored events older than 72 hours instead of replaying them', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([
+                storedBody(['too_old'], 73 * HOUR_MS),
+                storedBody(['recent'], 71 * HOUR_MS)
+            ]);
+
+            await initAndDrain();
+
+            const req = httpMock.expectOne(isCollect);
+            expect(req.request.body.events.map((e: any) => e.name)).toEqual(['recent']);
+            req.flush('', ok);
+        });
+
+        it('replays when the browser comes back online', async () => {
+            await initAndDrain();
+            service.trackEvent('while_offline');
+            failOffline(httpMock.expectOne(isCollect));
+            await service.flushStorage();
+            expect(storedOutbox().length).toBe(1);
+
+            window.dispatchEvent(new Event('online'));
+            await service.flushStorage();
+
+            const replay = httpMock.expectOne(isCollect);
+            expect(replay.request.body.events[0].name).toBe('while_offline');
+            replay.flush('', ok);
+            await service.flush();
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+        });
+
+        it('puts a replay that fails again back in the outbox', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['earlier'], HOUR_MS)]);
+
+            await initAndDrain();
+            failOffline(httpMock.expectOne(isCollect));
+            await service.flush();
+
+            expect(storedOutbox().map(b => b.events[0].name)).toEqual(['earlier']);
+            // And it is not retried in a loop: only init() and 'online' drain.
+            httpMock.expectNone(isCollect);
+        });
+
+        it('keeps no more than the cap, evicting the oldest', async () => {
+            const many = Array.from({ length: 499 }, (_, i) => storedBody([`old${i}`], HOUR_MS));
+            mockLocalStorage['ga_outbox'] = JSON.stringify(many);
+            await initAndDrain();
+            const replays = httpMock.match(isCollect);
+            replays.forEach(failOffline);
+            await service.flush();
+
+            service.trackEvent('newest_1');
+            service.trackEvent('newest_2');
+            httpMock.match(isCollect).forEach(failOffline);
+            await service.flush();
+
+            const names = storedOutbox().flatMap(b => b.events.map((e: any) => e.name));
+            expect(names.length).toBe(500);
+            expect(names[0]).toBe('old1');
+            expect(names.slice(-2)).toEqual(['newest_1', 'newest_2']);
+        });
+
+        it('is deleted when analyticsStorage is withdrawn — it holds the client ID', async () => {
+            await initAndDrain();
+            service.trackEvent('x');
+            failOffline(httpMock.expectOne(isCollect));
+            await service.flushStorage();
+            expect(mockLocalStorage['ga_outbox']).toBeDefined();
+
+            service.setConsent({ analyticsStorage: 'denied' });
+            await service.flushStorage();
+
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+        });
+
+        // The write runs later on the storage chain than the failure that
+        // queued it; consent can be withdrawn in between.
+        it('does not recreate the outbox when consent is withdrawn before the write runs', async () => {
+            await initAndDrain();
+            const result = service.trackEvent('x');
+            failOffline(httpMock.expectOne(isCollect));
+            // Synchronously after the failure, before the chained write's turn.
+            service.setConsent({ analyticsStorage: 'denied' });
+
+            expect(await result.delivered).toBe('failed');
+            await service.flushStorage();
+            expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+        });
+
+        it('keeps the backlog when collection is disabled while the drain waits for storage', async () => {
+            reconfigureTestBed({ isExtension: true });
+            const chromeLocal: Record<string, any> = { ga_client_id: 'ext-cid' };
+            setupChromeMock(chromeLocal);
+            await service.init();
+            await service.flush();
+            chromeLocal['ga_outbox'] = [storedBody(['backlog'], HOUR_MS)];
+
+            // The drain's read is queued on the storage chain; the switch is
+            // turned off before that read gets its turn.
+            window.dispatchEvent(new Event('online'));
+            service.setEnabled(false);
+            await service.flush();
+
+            httpMock.expectNone(isCollect);
+            expect(chromeLocal['ga_outbox'][0].events[0].name).toBe('backlog');
+        });
+
+        it('runs each outbox read-modify-write under the outbox lock', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['earlier'], HOUR_MS)]);
+
+            await initAndDrain();
+            httpMock.expectOne(isCollect).flush('', ok);
+            await service.flush();
+
+            expect(fakeLocks.requested).toContain('ng-ga4:outbox');
+        });
+
+        describe('across extension contexts', () => {
+            // A popup and the service worker: two services sharing one chrome.storage.
+            function secondContext(): NgGa4Service {
+                return Injector.create({
+                    providers: [
+                        NgGa4Service,
+                        { provide: HttpClient, useValue: TestBed.inject(HttpClient) },
+                        { provide: Router, useValue: { events: new Subject<any>().asObservable() } },
+                        { provide: NG_GA4_CONFIG, useValue: { ...defaultConfig, isExtension: true } },
+                        { provide: PLATFORM_ID, useValue: 'browser' },
+                        { provide: NgZone, useValue: TestBed.inject(NgZone) }
+                    ]
+                }).get(NgGa4Service);
+            }
+
+            // Both contexts drain the shared outbox at once, on 'online'. Writes
+            // are held until released, as chrome.storage's are until they land,
+            // so without a lock each context's read happens before the other's
+            // clearing write.
+            async function bothDrain(): Promise<{ replays: TestRequest[]; mock: DeferredChromeMock }> {
+                reconfigureTestBed({ isExtension: true });
+                setupChromeMock({ ga_client_id: 'ext-cid' });
+                const second = secondContext();
+                await Promise.all([service.init(), second.init()]);
+                await Promise.all([service.flush(), second.flush()]);
+                const mock = setupDeferredChromeMock({ ga_client_id: 'ext-cid', ga_outbox: [storedBody(['backlog'], HOUR_MS)] });
+
+                window.dispatchEvent(new Event('online'));
+                for (let round = 0; round < 5; round++) {
+                    await mock.releaseAll();
+                    await drainMicrotasks();
+                }
+                const replays = httpMock.match(isCollect);
+                replays.forEach(r => r.flush('', ok));
+                const flushed = Promise.all([service.flush(), second.flush()]);
+                await mock.releaseAll();
+                await flushed;
+                second.ngOnDestroy();
+                return { replays, mock };
+            }
+
+            it('replays each stored request once when both drain together', async () => {
+                const { replays, mock } = await bothDrain();
+
+                expect(replays.length).toBe(1);
+                expect(mock.localStore['ga_outbox']).toBeUndefined();
+            });
+
+            // Control: proves the shared mock reproduces the race the lock closes.
+            it('replays the backlog twice without Web Locks', async () => {
+                restoreLocks();
+                restoreLocks = installLockManager(undefined);
+
+                const { replays } = await bothDrain();
+
+                expect(replays.length).toBe(2);
+            });
+        });
+
+        // setUserData() promises hashed user data is never persisted.
+        it('never stores user_data, and replays without it', async () => {
+            // user_data is only sent with adUserData granted.
+            reconfigureTestBed({ consent: { adUserData: 'granted' } });
+            await initAndDrain();
+            await service.setUserData({ email: 'someone@example.com' });
+            const result = service.trackEvent('purchase');
+            const req = httpMock.expectOne(isCollect);
+            expect(req.request.body.user_data).toBeDefined();
+            failOffline(req);
+
+            expect(await result.delivered).toBe('stored');
+            await service.flushStorage();
+            const stored = storedOutbox();
+            expect(stored[0].events[0].name).toBe('purchase');
+            expect('user_data' in stored[0]).toBeFalse();
+            expect(mockLocalStorage['ga_outbox']).not.toContain('sha256');
+        });
+
+        it('costs no storage write on init() when empty', async () => {
+            await initAndDrain();
+
+            expect(localStorage.setItem).not.toHaveBeenCalledWith('ga_outbox', jasmine.anything());
+            expect(localStorage.removeItem).not.toHaveBeenCalledWith('ga_outbox');
+        });
+
+        it('ignores a corrupt outbox rather than failing init()', async () => {
+            mockLocalStorage['ga_outbox'] = '{not json';
+
+            await expectAsync(service.init()).toBeResolved();
+            httpMock.expectNone(isCollect);
+        });
+
+        it('lets flush() wait for the replay', async () => {
+            mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['earlier'], HOUR_MS)]);
+            await initAndDrain();
+            let flushed = false;
+            service.flush().then(() => { flushed = true; });
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+            expect(flushed).toBeFalse();
+
+            httpMock.expectOne(isCollect).flush('', ok);
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+            expect(flushed).toBeTrue();
+        });
+
+        it('does not replay on online once collection is disabled', async () => {
+            await initAndDrain();
+            service.trackEvent('x');
+            failOffline(httpMock.expectOne(isCollect));
+            await service.flushStorage();
+
+            service.setEnabled(false);
+            window.dispatchEvent(new Event('online'));
+            await service.flush();
+
+            httpMock.expectNone(isCollect);
+            expect(storedOutbox().length).toBe(1);
+        });
+
+        it('stops listening for online after destroy', async () => {
+            await initAndDrain();
+            const drain = spyOn<any>(service, 'drainOutbox').and.returnValue(Promise.resolve());
+
+            service.ngOnDestroy();
+            window.dispatchEvent(new Event('online'));
+
+            expect(drain).not.toHaveBeenCalled();
+        });
+
+        describe('in an extension', () => {
+            it('stores in chrome.storage.local and replays from it on init()', async () => {
+                reconfigureTestBed({ isExtension: true });
+                const chromeLocal: Record<string, any> = { ga_client_id: 'ext-cid' };
+                setupChromeMock(chromeLocal, {});
+                await initAndDrain();
+
+                service.trackEvent('offline_in_worker');
+                failOffline(httpMock.expectOne(isCollect));
+                await service.flush();
+                expect(chromeLocal['ga_outbox'][0].events[0].name).toBe('offline_in_worker');
+                expect(mockLocalStorage['ga_outbox']).toBeUndefined();
+
+                // A later worker lifetime.
+                reconfigureTestBed({ isExtension: true });
+                setupChromeMock(chromeLocal, {});
+                await initAndDrain();
+                await service.flushStorage();
+
+                const replay = httpMock.expectOne(isCollect);
+                expect(replay.request.body.events[0].name).toBe('offline_in_worker');
+                expect(chromeLocal['ga_outbox']).toBeUndefined();
+                replay.flush('', ok);
+            });
         });
     });
 
@@ -3725,7 +6155,7 @@ describe('NgGa4Service', () => {
 
             expect(mock.calls).toEqual([
                 'local.set:ga_session_number',
-                'local.remove:ga_client_id,ga_session_number',
+                'local.remove:ga_client_id,ga_session_number,ga_user_id,ga_user_properties,ga_outbox',
                 'session.remove:ga_session_id,ga_last_activity'
             ]);
             expect(mock.localStore['ga_session_number']).toBeUndefined();
@@ -3761,6 +6191,130 @@ describe('NgGa4Service', () => {
             const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
             expect(req.request.body.client_id).toBe(mockLocalStorage['ga_client_id']);
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+    });
+
+    describe('user_data', () => {
+        const JOHNSMITH_GMAIL = '3586de92bb3636d0885a12eff961429a32e4ebd764b96f50d85d016f9338d586';
+        const PHONE_US = '910a625c4ba147b544e6bd2f267e130ae14c591b6ba9c25cb8573322dedbebd0';
+
+        function sentUserData(event = 'probe'): unknown {
+            service.trackEvent(event);
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            req.flush({});
+            return req.request.body['user_data'];
+        }
+
+        beforeEach(async () => {
+            reconfigureTestBed({ consent: { adUserData: 'granted' } });
+            await service.init();
+        });
+
+        it('is never sent unless the app calls setUserData()', () => {
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('sends hashed email and phone, never the raw values', async () => {
+            await service.setUserData({ email: 'John.Smith@gmail.com', phone: '+1 (555) 555-5555' });
+            const userData = sentUserData();
+
+            expect(userData).toEqual({ sha256_email_address: [JOHNSMITH_GMAIL], sha256_phone_number: [PHONE_US] });
+            expect(JSON.stringify(userData)).not.toContain('gmail');
+        });
+
+        it('passes addresses and pre-hashed values through', async () => {
+            await service.setUserData({ sha256EmailAddress: JOHNSMITH_GMAIL, address: { country: 'US' } });
+            expect(sentUserData()).toEqual({ sha256_email_address: [JOHNSMITH_GMAIL], address: [{ country: 'US' }] });
+        });
+
+        it('stops sending after setUserData(null)', async () => {
+            await service.setUserData({ email: 'a@x.com' });
+            await service.setUserData(null);
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('lets a later clear win over an earlier call that is still hashing', async () => {
+            const pending = service.setUserData({ email: 'a@x.com' });
+            await service.setUserData(null);
+            await pending;
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('is withheld until ad_user_data consent is explicitly granted', async () => {
+            reconfigureTestBed();
+            await service.init();
+            await service.setUserData({ email: 'a@x.com' });
+
+            expect(sentUserData('unset')).toBeUndefined();
+            service.setConsent({ adUserData: 'denied' });
+            expect(sentUserData('denied')).toBeUndefined();
+            service.setConsent({ adUserData: 'denied' });
+            service.setConsent({ adUserData: 'granted' });
+            expect(sentUserData('granted')).toBeDefined();
+        });
+
+        it('is cleared when ad_user_data is denied, and stays cleared after a new grant', async () => {
+            await service.setUserData({ email: 'a@x.com' });
+            service.setConsent({ adUserData: 'denied' });
+            service.setConsent({ adUserData: 'granted' });
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('is cleared when analytics_storage is denied', async () => {
+            await service.setUserData({ email: 'a@x.com' });
+            service.setConsent({ analyticsStorage: 'denied' });
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('is kept when signing in or repeating the same user ID', async () => {
+            await service.setUserData({ email: 'a@x.com' });
+            service.setUserId(null);
+            service.setUserId('u1');
+            service.setUserId('u1');
+            expect(sentUserData()).toBeDefined();
+        });
+
+        it('is cleared on sign-out via setUserId(null)', async () => {
+            service.setUserId('u1');
+            await service.setUserData({ email: 'a@x.com' });
+            service.setUserId(null);
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('is cleared when switching to another user ID', async () => {
+            service.setUserId('u1');
+            await service.setUserData({ email: 'a@x.com' });
+            service.setUserId('u2');
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('discards hashing still in flight when cleared', async () => {
+            service.setUserId('u1');
+            const pending = service.setUserData({ email: 'a@x.com' });
+            service.setUserId(null);
+            await pending;
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('is kept across unrelated consent updates', async () => {
+            await service.setUserData({ email: 'a@x.com' });
+            service.setConsent({ adPersonalization: 'denied' });
+            expect(sentUserData()).toBeDefined();
+        });
+
+        it('warns instead of rejecting when hashing fails', async () => {
+            spyOn(crypto.subtle, 'digest').and.returnValue(Promise.reject(new Error('boom')));
+            spyOn(console, 'warn');
+
+            await expectAsync(service.setUserData({ email: 'a@x.com' })).toBeResolved();
+            expect(console.warn).toHaveBeenCalled();
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('is never written to storage', async () => {
+            const before = JSON.stringify(mockLocalStorage);
+            await service.setUserData({ email: 'a@x.com' });
+            expect(JSON.stringify(mockLocalStorage)).toBe(before);
         });
     });
 });
