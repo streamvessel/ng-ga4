@@ -23,7 +23,7 @@ Events fired while disabled are dropped, not queued, so the first page view befo
 
 | Signal | Sent to GA4 | Effect |
 |---|---|---|
-| `adUserData` | as `consent.ad_user_data` | GA4 acts on it; [user-provided data](identity.md#user-provided-data) is only sent while it is `'granted'` |
+| `adUserData` | as `consent.ad_user_data` | GA4 acts on it; [user-provided data](identity.md#user-provided-data) is only sent while it is `'granted'`, and `'denied'` clears it |
 | `adPersonalization` | as `consent.ad_personalization` | GA4 acts on it |
 | `analyticsStorage` | no | Whether this library stores identifiers |
 

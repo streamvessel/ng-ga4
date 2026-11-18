@@ -4559,10 +4559,42 @@ describe('NgGa4Service', () => {
             await service.setUserData({ email: 'a@x.com' });
 
             expect(sentUserData('unset')).toBeUndefined();
-            service.setConsent({ adUserData: 'denied' });
-            expect(sentUserData('denied')).toBeUndefined();
             service.setConsent({ adUserData: 'granted' });
             expect(sentUserData('granted')).toBeDefined();
+        });
+
+        it('is cleared when ad_user_data is denied, and stays cleared after a new grant', async () => {
+            await service.setUserData({ email: 'a@x.com' });
+            service.setConsent({ adUserData: 'denied' });
+            service.setConsent({ adUserData: 'granted' });
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('is cleared when analytics_storage is denied', async () => {
+            await service.setUserData({ email: 'a@x.com' });
+            service.setConsent({ analyticsStorage: 'denied' });
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('is cleared on sign-out via setUserId(null), but not by setting a user ID', async () => {
+            await service.setUserData({ email: 'a@x.com' });
+            service.setUserId('u1');
+            expect(sentUserData('signed_in')).toBeDefined();
+            service.setUserId(null);
+            expect(sentUserData('signed_out')).toBeUndefined();
+        });
+
+        it('discards hashing still in flight when cleared', async () => {
+            const pending = service.setUserData({ email: 'a@x.com' });
+            service.setUserId(null);
+            await pending;
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('is kept across unrelated consent updates', async () => {
+            await service.setUserData({ email: 'a@x.com' });
+            service.setConsent({ adPersonalization: 'denied' });
+            expect(sentUserData()).toBeDefined();
         });
 
         it('warns instead of rejecting when hashing fails', async () => {

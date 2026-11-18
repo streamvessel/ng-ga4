@@ -229,7 +229,7 @@ export class NgGa4Service implements OnDestroy {
     /**
      * Set the signed-in user's ID, sent as the top-level `user_id` of every hit
      * from here on — the equivalent of `gtag('config', id, { user_id })`. Pass
-     * `null` on sign-out to stop sending it.
+     * `null` on sign-out to stop sending it; that also clears `setUserData()`.
      *
      * Persisted alongside the client ID, so it survives reloads, and subject to
      * the same `analyticsStorage` consent: while that is denied it is held in
@@ -237,6 +237,9 @@ export class NgGa4Service implements OnDestroy {
      */
     setUserId(userId: string | null): void {
         const next = this.normaliseUserId(userId);
+        if (next === null) {
+            this.clearUserData();
+        }
         this.userId = next;
         this.userIdSetByApp = true;
         // Before init() starts nothing is written — `enabled: false` promises no
@@ -249,12 +252,16 @@ export class NgGa4Service implements OnDestroy {
     /**
      * Update consent at runtime. Merges into the current state — keys you omit are
      * left alone. Call this on every app boot from your own consent store; this
-     * library deliberately does not persist consent itself.
+     * library deliberately does not persist consent itself. Denying `adUserData`
+     * or `analyticsStorage` also clears `setUserData()`.
      */
     setConsent(consent: NgGa4Consent): void {
         const wasAllowed = this.consent.storageAllowed;
         this.consent.merge(consent);
         const isAllowed = this.consent.storageAllowed;
+        if ((consent.adUserData !== undefined && !this.consent.userDataAllowed) || !isAllowed) {
+            this.clearUserData();
+        }
         if (wasAllowed && !isAllowed) {
             this.clearPersistedIdentity();
             return;
@@ -270,8 +277,7 @@ export class NgGa4Service implements OnDestroy {
      * that go without it. A later call wins over one still hashing. Never rejects.
      */
     async setUserData(userData: NgGa4UserData | null): Promise<void> {
-        const generation = ++this.userDataGeneration;
-        this.userData = null;
+        const generation = this.clearUserData();
         if (!userData || !this.isBrowser) {
             return;
         }
@@ -279,6 +285,12 @@ export class NgGa4Service implements OnDestroy {
         if (generation === this.userDataGeneration) {
             this.userData = hashed;
         }
+    }
+
+    /** Drops the hashes and any hashing still in flight; returns the new generation. */
+    private clearUserData(): number {
+        this.userData = null;
+        return ++this.userDataGeneration;
     }
 
     /**
