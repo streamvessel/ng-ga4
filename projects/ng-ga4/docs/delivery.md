@@ -34,11 +34,11 @@ console.log(status, await delivered);
 | `'uninitialized'` | `init()` hasn't started; dropped |
 | `'server'` | Running on the server; dropped |
 
-`delivered` resolves, and never rejects, to `'sent'` (the transport accepted the request), `'stored'` (GA4 was unreachable; saved to the [offline outbox](#offline-outbox) for retry), `'failed'` (a network error, or a non-2xx from something between you and GA4) or `'dropped'` (never sent). GA4 answers 2xx even to payloads it discards, so `'sent'` is as much as any transport can confirm; use [debug mode](engagement.md#debug-mode) to see what GA4 makes of a payload.
+`delivered` resolves, and never rejects, to `'sent'` (the transport accepted the request), `'stored'` (GA4 was unreachable; saved to the [offline outbox](#offline-outbox) for retry), `'failed'` (a network error, or a non-2xx from something between you and GA4) or `'dropped'` (never sent: the call wasn't accepted, the event was older than 72 hours, an HTTP interceptor swallowed it under `transport: 'xhr'`, or the service was destroyed before `init()` finished). GA4 answers 2xx even to payloads it discards, so `'sent'` is as much as any transport can confirm; use [debug mode](engagement.md#debug-mode) to see what GA4 makes of a payload.
 
 ## Offline outbox
 
-A request that can't reach GA4 at all (no network, DNS failure, connection reset) is saved and sent again on the next `init()` and when the browser comes back `online`. Its `delivered` resolves to `'stored'`. A replay is the original request: same client ID, user ID, user properties, consent and event times.
+A request that can't reach GA4 at all (the browser reports itself offline, or a DNS failure or connection reset) is saved and sent again on the next `init()` and when the browser comes back `online`. Its `delivered` resolves to `'stored'`. A replay is the original request: same client ID, user ID, user properties, consent and event times.
 
 - It lives in `chrome.storage.local` in an extension and `localStorage` on the web, under `ga_outbox`.
 - It holds at most 500 events, dropping the oldest first. Events older than 72 hours are dropped, since GA4 would record them at the wrong time.

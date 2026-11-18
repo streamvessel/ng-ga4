@@ -57,6 +57,7 @@ export class EventBatcher<B extends BatchableBody, T = never> {
         const tickets = ticket === undefined ? [] : [ticket];
         const key = envelopeKey(body);
         const bytes = jsonBytes(body);
+        const eventBytes = jsonBytes(body.events);
         // Only the newest batch is a merge candidate: merging into an older one
         // would send a later event ahead of an earlier one with a different envelope.
         const last = this.batches[this.batches.length - 1];
@@ -65,10 +66,13 @@ export class EventBatcher<B extends BatchableBody, T = never> {
             && last.key === key
             && last.body.events.length + body.events.length <= this.maxEvents
             // Envelope bytes are counted once; only the events are added.
-            && last.bytes + jsonBytes(body.events) <= this.maxBytes
+            && last.bytes + eventBytes <= this.maxBytes
         ) {
             last.body = merge(last.body, body);
-            last.bytes = jsonBytes(last.body);
+            // An upper bound, not exact: the merged array saves the incoming
+            // array's brackets. Re-stringifying the batch per add would be
+            // quadratic over a burst.
+            last.bytes += eventBytes;
             last.tickets.push(...tickets);
         } else {
             this.batches.push({ body: { ...body, events: [...body.events] }, key, bytes, tickets });

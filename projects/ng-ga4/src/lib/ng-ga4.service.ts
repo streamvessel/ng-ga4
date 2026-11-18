@@ -54,9 +54,9 @@ interface Ga4UserLocation {
 interface Ga4Event {
     name: string;
     params?: Record<string, any>;
-    // When the event happened, not when it was sent. Stamped in sendToGA4(),
-    // which every track path reaches synchronously, so the two only differ for a
-    // call replayed from pendingCalls — see replayTimestampMicros.
+    // When the event happened, not when it was sent. The track methods capture
+    // it on entry and carry it through a replay from pendingCalls; anything
+    // else is stamped in sendToGA4(), which it reaches synchronously.
     timestamp_micros?: number;
 }
 
@@ -99,17 +99,14 @@ export class NgGa4Service implements OnDestroy {
     private userIdSetByApp = false;
     private device: Ga4Device | null = null;
     private userLocation: Ga4UserLocation | null = null;
-    private pendingCalls: Array<() => void> = [];
+    // Calls made while init() runs. `drop` settles the caller's `delivered`
+    // when the call will never be replayed (the service is destroyed first).
+    private pendingCalls: Array<{ replay: () => void; drop: () => void }> = [];
     // What this context sends as user_properties. Loaded from storage in init().
     private userProperties: UserProperties = {};
     // setUserProperties() calls made before that load, folded together and
     // applied on top of what was stored. `null` once loaded.
     private pendingUserProperties: UserPropertyUpdate | null = emptyUserPropertyUpdate();
-    // Set only while drainPendingCalls() replays a call buffered during init(),
-    // so the event keeps the time it was tracked rather than the time init()
-    // finished. Ambient rather than threaded through as a parameter to keep the
-    // public track* signatures, and their bodies, untouched.
-    private replayTimestampMicros: number | null = null;
     private engagement: EngagementTimer | null = null;
     private enhancedMeasurement: EnhancedMeasurement | null = null;
     // Resolved once, in init(), by resolveEngagementEventName() — validating on
@@ -246,10 +243,6 @@ export class NgGa4Service implements OnDestroy {
 
         this.registerSessionSyncListener();
         this.registerOnlineListener();
-        // Events that failed to send in an earlier page or worker lifetime. Not
-        // awaited: init() is an APP_INITIALIZER and must not wait on the network.
-        // flush() waits for it.
-        this.track(this.drainOutbox());
         // Closes the gap between "another context wrote during the awaits above"
         // and "the listener just registered above can observe it" — see
         // catchUpSessionState() for why this can't simply be moved earlier instead.
@@ -271,6 +264,12 @@ export class NgGa4Service implements OnDestroy {
         // settles would stall bootstrap — but loadOrCreateClientIdFromChromeStorage
         // already awaits one above, so this adds no new class of hazard.
         await this.flushStorage();
+
+        // Events that failed to send in an earlier page or worker lifetime.
+        // Started after the flush above and not awaited: init() is an
+        // APP_INITIALIZER, and must wait neither on the network nor on an extra
+        // storage read. flush() waits for it.
+        this.trackInFlight(this.drainOutbox());
     }
 
     /**
@@ -329,6 +328,10 @@ export class NgGa4Service implements OnDestroy {
             // accrued before this point was collected under consent and stays in
             // the accumulator to ride out on a later hit.
             this.engagement?.setEngaged(false);
+            // Queued events were tracked while enabled, and before batching they
+            // would already have been sent. Send them now rather than up to
+            // batchDelayMs after the switch was turned off.
+            this.flushQueue();
             return;
         }
         if (!this.isBrowser) {
@@ -556,6 +559,10 @@ export class NgGa4Service implements OnDestroy {
         // Whatever is still waiting was collected while enabled; an injector torn
         // down (an MV3 popup closing, an app destroyed) should not take it along.
         this.flushQueue();
+        // Never replayed now; a caller awaiting `delivered` must not hang.
+        for (const call of this.pendingCalls.splice(0)) {
+            call.drop();
+        }
         this.routerSubscription?.unsubscribe();
         this.enhancedMeasurement?.stop();
         if (this.visibilityListener && typeof document !== 'undefined') {
@@ -582,6 +589,16 @@ export class NgGa4Service implements OnDestroy {
     }
 
     trackPageView(pagePath: string, pageTitle?: string): NgGa4TrackResult {
+        return this.recordPageView(pagePath, pageTitle, toTimestampMicros(Date.now()));
+    }
+
+    trackEvent(name: string, params?: Record<string, any>): NgGa4TrackResult {
+        return this.recordEvent(name, params, toTimestampMicros(Date.now()));
+    }
+
+    // The track methods' bodies, taking the time of the original call so that a
+    // call replayed after init() keeps it rather than the time init() finished.
+    private recordPageView(pagePath: string, pageTitle: string | undefined, timestampMicros: number): NgGa4TrackResult {
         // Dropped, not queued: the server has no client identity to attach a hit to,
         // and replaying queued events after hydration would double-count the view.
         if (!this.isBrowser || !this.enabled) {
@@ -589,7 +606,7 @@ export class NgGa4Service implements OnDestroy {
         }
         if (!this.clientId) {
             return this.initialized
-                ? this.deferCall(() => this.trackPageView(pagePath, pageTitle))
+                ? this.deferCall(() => this.recordPageView(pagePath, pageTitle, timestampMicros))
                 : this.notAccepted('uninitialized');
         }
         this.lastPagePath = pagePath;
@@ -609,19 +626,19 @@ export class NgGa4Service implements OnDestroy {
             ...(this.config.appVersion ? { app_version: this.config.appVersion } : {})
         };
 
-        const delivered = this.sendToGA4([{ name: 'page_view', params }]);
+        const delivered = this.sendToGA4([{ name: 'page_view', params, timestamp_micros: timestampMicros }]);
         this.enhancedMeasurement?.pageViewed(pagePath);
         return this.accepted(delivered);
     }
 
-    trackEvent(name: string, params?: Record<string, any>): NgGa4TrackResult {
-        // See trackPageView: inert on the server, and deliberately not queued.
+    private recordEvent(name: string, params: Record<string, any> | undefined, timestampMicros: number): NgGa4TrackResult {
+        // See recordPageView: inert on the server, and deliberately not queued.
         if (!this.isBrowser || !this.enabled) {
             return this.notAccepted(this.isBrowser ? 'disabled' : 'server');
         }
         if (!this.clientId) {
             return this.initialized
-                ? this.deferCall(() => this.trackEvent(name, params))
+                ? this.deferCall(() => this.recordEvent(name, params, timestampMicros))
                 : this.notAccepted('uninitialized');
         }
 
@@ -655,7 +672,7 @@ export class NgGa4Service implements OnDestroy {
             this.reportProblems(name, appOnly ? [appOnly, ...validation.problems] : validation.problems);
         }
 
-        return this.accepted(this.sendToGA4([{ name, params: validation.params }]));
+        return this.accepted(this.sendToGA4([{ name, params: validation.params, timestamp_micros: timestampMicros }]));
     }
 
     // The dev-only warning policy for trackEvent() validation. Not used by
@@ -670,19 +687,6 @@ export class NgGa4Service implements OnDestroy {
         }
     }
 
-    // Captures the time of the call now, for drainPendingCalls() to restore.
-    private replayLater(call: () => void): () => void {
-        const timestampMicros = toTimestampMicros(Date.now());
-        return () => {
-            this.replayTimestampMicros = timestampMicros;
-            try {
-                call();
-            } finally {
-                this.replayTimestampMicros = null;
-            }
-        };
-    }
-
     private accepted(delivered: Promise<NgGa4Delivery>): NgGa4TrackResult {
         return { status: 'accepted', delivered };
     }
@@ -692,11 +696,12 @@ export class NgGa4Service implements OnDestroy {
     }
 
     // Held until init() finishes; `delivered` follows whatever the replayed
-    // call does then — sent, or dropped if collection was disabled meanwhile.
+    // call does then — sent, or dropped if collection was disabled meanwhile,
+    // or if the service is destroyed before init() finishes.
     private deferCall(call: () => NgGa4TrackResult): NgGa4TrackResult {
-        let settle!: (outcome: Promise<NgGa4Delivery>) => void;
+        let settle!: (outcome: NgGa4Delivery | Promise<NgGa4Delivery>) => void;
         const delivered = new Promise<NgGa4Delivery>(resolve => { settle = resolve; });
-        this.pendingCalls.push(this.replayLater(() => settle(call().delivered)));
+        this.pendingCalls.push({ replay: () => settle(call().delivered), drop: () => settle('dropped') });
         return { status: 'deferred', delivered };
     }
 
@@ -704,7 +709,7 @@ export class NgGa4Service implements OnDestroy {
         const calls = this.pendingCalls;
         this.pendingCalls = [];
         for (const call of calls) {
-            call();
+            call.replay();
         }
     }
 
@@ -715,7 +720,7 @@ export class NgGa4Service implements OnDestroy {
         // Without a timestamp GA4 stamps each event with its arrival time, which
         // is wrong for anything delayed between the call and the request.
         const now = Date.now();
-        const stamp = this.replayTimestampMicros ?? toTimestampMicros(now);
+        const stamp = toTimestampMicros(now);
         const timed = events
             .map(event => ({ ...event, timestamp_micros: clampToNow(event.timestamp_micros ?? stamp, now) }))
             // GA4 re-stamps an event backdated past 72 hours to a time it did not
@@ -829,12 +834,12 @@ export class NgGa4Service implements OnDestroy {
     // One request on the wire: a single event under 'xhr', a batch otherwise.
     // The promise never rejects, and is tracked until it settles for flush().
     private dispatch(body: Ga4RequestBody, transport: 'beacon' | 'xhr'): Promise<NgGa4Delivery> {
-        return this.track(this.send(body, transport).then(outcome =>
+        return this.trackInFlight(this.send(body, transport).then(outcome =>
             outcome === 'unreachable' ? this.storeInOutbox(body) : outcome));
     }
 
     // Registers work for flush() to wait on, until it settles.
-    private track<T>(work: Promise<T>): Promise<T> {
+    private trackInFlight<T>(work: Promise<T>): Promise<T> {
         this.inFlight.add(work);
         work.then(() => this.inFlight.delete(work), () => this.inFlight.delete(work));
         return work;
@@ -850,6 +855,15 @@ export class NgGa4Service implements OnDestroy {
         // request, so a batch is validated as the batch GA4 actually receives.
         if (this.config.debug) {
             this.sendForValidation(body);
+        }
+
+        // sendBeacon() returns true even offline — it only refuses on size —
+        // and the browser then drops the hit, so the outbox would never see an
+        // offline page. navigator.onLine is unreliable only in the other
+        // direction (true without a working network), which the transports
+        // below still catch.
+        if (this.getNavigator()?.onLine === false) {
+            return Promise.resolve('unreachable');
         }
 
         if (transport === 'xhr') {
@@ -895,9 +909,11 @@ export class NgGa4Service implements OnDestroy {
                     // offline, DNS, connection reset — as status 0.
                     resolve(err?.status === 0 ? 'unreachable' : 'failed');
                 },
-                // An interceptor that completes without emitting sent nothing we
-                // can see; resolve() after next() is a no-op.
-                complete: () => resolve('sent')
+                // Completing without a response means an interceptor swallowed
+                // the request (returned EMPTY): nothing left the browser, and
+                // retrying would only be swallowed again. resolve() after
+                // next() is a no-op.
+                complete: () => resolve('dropped')
             });
         });
     }
@@ -1049,7 +1065,7 @@ export class NgGa4Service implements OnDestroy {
             return;
         }
         this.onlineListener = () => {
-            this.track(this.drainOutbox());
+            this.trackInFlight(this.drainOutbox());
         };
         // Outside Angular for the same reason as the engagement listeners.
         this.zone.runOutsideAngular(() => scope.addEventListener('online', this.onlineListener!));

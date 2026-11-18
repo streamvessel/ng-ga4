@@ -3,7 +3,7 @@ import { TestBed } from '@angular/core/testing';
 import { HttpClient } from '@angular/common/http';
 import { HttpClientTestingModule, HttpTestingController, TestRequest } from '@angular/common/http/testing';
 import { Router, NavigationEnd, NavigationStart } from '@angular/router';
-import { Subject } from 'rxjs';
+import { EMPTY, Subject } from 'rxjs';
 import { NgGa4Service } from './ng-ga4.service';
 import { NG_GA4_CONFIG, NgGa4Config } from './ng-ga4.config';
 import { isGtagClientId } from './ga-cookie';
@@ -3842,6 +3842,18 @@ describe('NgGa4Service', () => {
             expect(beacons[0].events[1].params.engagement_time_msec).toBe(5000);
         });
 
+        it('sends what is queued at once when collection is disabled', async () => {
+            await setup();
+            service.trackEvent('before_disable');
+
+            service.setEnabled(false);
+
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['before_disable']);
+            jasmine.clock().tick(BATCH_DELAY_MS);
+            expect(beacons.length).toBe(1);
+        });
+
         it('flushes when the service is destroyed', async () => {
             await setup();
             service.trackEvent('before_destroy');
@@ -4036,6 +4048,26 @@ describe('NgGa4Service', () => {
             httpMock.expectOne((r) => r.url.includes('mp/collect')).flush('', ok);
 
             expect(await result.delivered).toBe('sent');
+        });
+
+        it('settles a deferred call as dropped when the service is destroyed before init() finishes', async () => {
+            spyOn<any>(service, 'collectContext').and.returnValue(new Promise<void>(() => undefined));
+            service.init();
+            for (let i = 0; i < 20; i++) { await Promise.resolve(); }
+
+            const result = service.trackEvent('during_init');
+            service.ngOnDestroy();
+
+            expect(await result.delivered).toBe('dropped');
+        });
+
+        it('reports dropped when an HTTP interceptor swallows the request', async () => {
+            await service.init();
+            spyOn(TestBed.inject(HttpClient), 'post').and.returnValue(EMPTY);
+
+            const result = service.trackEvent('x');
+
+            expect(await result.delivered).toBe('dropped');
         });
 
         it('settles a deferred call as dropped when collection is disabled before init() finishes', async () => {
@@ -4264,8 +4296,16 @@ describe('NgGa4Service', () => {
             spyOn(console, 'error');
         });
 
-        it('stores a request that could not reach GA4, whole', async () => {
+        // The outbox drain starts once init() has finished, not during it, so
+        // its replay request goes out a few microtasks after init() resolves.
+        async function initAndDrain(): Promise<void> {
             await service.init();
+            await service.flushStorage();
+            for (let i = 0; i < 10; i++) { await Promise.resolve(); }
+        }
+
+        it('stores a request that could not reach GA4, whole', async () => {
+            await initAndDrain();
             jasmine.clock().tick(1000);
             const result = service.trackEvent('offline_event', { a: 1 });
 
@@ -4281,7 +4321,7 @@ describe('NgGa4Service', () => {
 
         // GA4 answers 2xx to whatever it receives; a non-2xx is not worth replaying.
         it('does not store a request that got an HTTP error', async () => {
-            await service.init();
+            await initAndDrain();
             const result = service.trackEvent('x');
 
             httpMock.expectOne(isCollect).flush('', { status: 500, statusText: 'Server Error' });
@@ -4293,7 +4333,7 @@ describe('NgGa4Service', () => {
 
         it('does not store anything with analyticsStorage denied', async () => {
             reconfigureTestBed({ consent: { analyticsStorage: 'denied' } });
-            await service.init();
+            await initAndDrain();
             const result = service.trackEvent('x');
 
             failOffline(httpMock.expectOne(isCollect));
@@ -4303,10 +4343,27 @@ describe('NgGa4Service', () => {
             expect(mockLocalStorage['ga_outbox']).toBeUndefined();
         });
 
+        // sendBeacon() reports success while offline and the browser then drops
+        // the hit, so the beacon chain alone would never fill the outbox.
+        it('stores instead of beaconing while the browser reports itself offline', async () => {
+            reconfigureTestBed({ transport: 'beacon' });
+            const beacon = spyOn<any>(service, 'trySendBeacon').and.returnValue(true);
+            spyOn<any>(service, 'getNavigator').and.returnValue({ onLine: false, sendBeacon: () => true });
+            await initAndDrain();
+
+            const result = service.trackEvent('offline_page_event');
+            jasmine.clock().tick(BATCH_DELAY_MS);
+
+            expect(await result.delivered).toBe('stored');
+            expect(beacon).not.toHaveBeenCalled();
+            await service.flushStorage();
+            expect(storedOutbox()[0].events[0].name).toBe('offline_page_event');
+        });
+
         it('replays stored requests on init(), with their original identity and time', async () => {
             mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['earlier'], 5 * HOUR_MS)]);
 
-            await service.init();
+            await initAndDrain();
             const req = httpMock.expectOne(isCollect);
 
             expect(req.request.body.client_id).toBe('earlier-cid');
@@ -4322,7 +4379,7 @@ describe('NgGa4Service', () => {
                 storedBody(['recent'], 71 * HOUR_MS)
             ]);
 
-            await service.init();
+            await initAndDrain();
 
             const req = httpMock.expectOne(isCollect);
             expect(req.request.body.events.map((e: any) => e.name)).toEqual(['recent']);
@@ -4330,7 +4387,7 @@ describe('NgGa4Service', () => {
         });
 
         it('replays when the browser comes back online', async () => {
-            await service.init();
+            await initAndDrain();
             service.trackEvent('while_offline');
             failOffline(httpMock.expectOne(isCollect));
             await service.flushStorage();
@@ -4349,7 +4406,7 @@ describe('NgGa4Service', () => {
         it('puts a replay that fails again back in the outbox', async () => {
             mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['earlier'], HOUR_MS)]);
 
-            await service.init();
+            await initAndDrain();
             failOffline(httpMock.expectOne(isCollect));
             await service.flush();
 
@@ -4361,7 +4418,7 @@ describe('NgGa4Service', () => {
         it('keeps no more than the cap, evicting the oldest', async () => {
             const many = Array.from({ length: 499 }, (_, i) => storedBody([`old${i}`], HOUR_MS));
             mockLocalStorage['ga_outbox'] = JSON.stringify(many);
-            await service.init();
+            await initAndDrain();
             const replays = httpMock.match(isCollect);
             replays.forEach(failOffline);
             await service.flush();
@@ -4378,7 +4435,7 @@ describe('NgGa4Service', () => {
         });
 
         it('is deleted when analyticsStorage is withdrawn — it holds the client ID', async () => {
-            await service.init();
+            await initAndDrain();
             service.trackEvent('x');
             failOffline(httpMock.expectOne(isCollect));
             await service.flushStorage();
@@ -4391,7 +4448,7 @@ describe('NgGa4Service', () => {
         });
 
         it('costs no storage write on init() when empty', async () => {
-            await service.init();
+            await initAndDrain();
 
             expect(localStorage.setItem).not.toHaveBeenCalledWith('ga_outbox', jasmine.anything());
             expect(localStorage.removeItem).not.toHaveBeenCalledWith('ga_outbox');
@@ -4406,7 +4463,7 @@ describe('NgGa4Service', () => {
 
         it('lets flush() wait for the replay', async () => {
             mockLocalStorage['ga_outbox'] = JSON.stringify([storedBody(['earlier'], HOUR_MS)]);
-            await service.init();
+            await initAndDrain();
             let flushed = false;
             service.flush().then(() => { flushed = true; });
             for (let i = 0; i < 20; i++) { await Promise.resolve(); }
@@ -4418,7 +4475,7 @@ describe('NgGa4Service', () => {
         });
 
         it('does not replay on online once collection is disabled', async () => {
-            await service.init();
+            await initAndDrain();
             service.trackEvent('x');
             failOffline(httpMock.expectOne(isCollect));
             await service.flushStorage();
@@ -4432,7 +4489,7 @@ describe('NgGa4Service', () => {
         });
 
         it('stops listening for online after destroy', async () => {
-            await service.init();
+            await initAndDrain();
             const drain = spyOn<any>(service, 'drainOutbox').and.returnValue(Promise.resolve());
 
             service.ngOnDestroy();
@@ -4446,7 +4503,7 @@ describe('NgGa4Service', () => {
                 reconfigureTestBed({ isExtension: true });
                 const chromeLocal: Record<string, any> = { ga_client_id: 'ext-cid' };
                 setupChromeMock(chromeLocal, {});
-                await service.init();
+                await initAndDrain();
 
                 service.trackEvent('offline_in_worker');
                 failOffline(httpMock.expectOne(isCollect));
@@ -4457,7 +4514,7 @@ describe('NgGa4Service', () => {
                 // A later worker lifetime.
                 reconfigureTestBed({ isExtension: true });
                 setupChromeMock(chromeLocal, {});
-                await service.init();
+                await initAndDrain();
                 await service.flushStorage();
 
                 const replay = httpMock.expectOne(isCollect);

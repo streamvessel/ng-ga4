@@ -25,8 +25,10 @@ export type NgGa4TrackStatus = 'accepted' | 'deferred' | 'invalid' | 'disabled' 
  * - `'failed'`: not sent and not stored: a non-2xx response (a proxy or
  *   blocker, since GA4 itself answers 2xx), or no network with
  *   `analyticsStorage` denied or storage unavailable.
- * - `'dropped'`: never sent — the call was not accepted (see the status), or
- *   the event was older than the Measurement Protocol's 72-hour window.
+ * - `'dropped'`: never sent — the call was not accepted (see the status), the
+ *   event was older than the Measurement Protocol's 72-hour window, an HTTP
+ *   interceptor swallowed the request under `transport: 'xhr'`, or the
+ *   service was destroyed before `init()` finished.
  */
 export type NgGa4Delivery = 'sent' | 'stored' | 'failed' | 'dropped';
 
