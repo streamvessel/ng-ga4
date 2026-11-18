@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   calls, go out as `user_properties` on every hit, and are stored next to the client
   ID so they survive a reload; denying `analyticsStorage` deletes them along with it.
   Names and values GA4 would reject are dropped, with a warning in dev mode.
+- `enhancedMeasurement` config: opt-in `scroll`, outbound `click`, `file_download`,
+  `view_search_results`, `form_start`, `form_submit`, `video_start`, `video_progress`
+  and `video_complete` events with `gtag.js`'s names and parameters
+  ([#28](https://github.com/streamvessel/ng-ga4/issues/28)). Everything is off by
+  default, so nothing you send changes on upgrade. Video tracking covers native
+  `<video>` elements, not embedded YouTube players; `data-ng-ga4-ignore` on a video
+  or its container leaves it out, for decorative background loops.
 - `user_location` now carries `continent_id` and `subcontinent_id` (UN M49) next to
   `country_id`, looked up from the country the time zone resolves to. GA4's Continent
   and Subcontinent dimensions used to read `(not set)`

@@ -12,6 +12,7 @@ Used in production in the [Stream Vessel](https://streamvessel.com) Chrome exten
 
 - No `gtag.js` and no external scripts
 - Automatic page views from the Angular Router
+- Opt-in Enhanced Measurement events: scrolls, outbound clicks, file downloads, site search, forms and video
 - Persistent client ID and 30-minute sessions, kept in step across tabs
 - User-ID for cross-device reporting (`setUserId()`)
 - Real engagement time: visible and focused time since the last hit
@@ -129,7 +130,7 @@ export class MyComponent {
 
 Calls made while collection is off are dropped. Calls made after `init()` has started but before it finishes are queued and sent once it does; calls made before it starts (for example from an earlier `APP_INITIALIZER`) are dropped.
 
-Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md)), `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState`, `NgGa4UserPropertyValue` and `NG_GA4_CONFIG`.
+Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md)), `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState`, `NgGa4UserPropertyValue`, `NgGa4EnhancedMeasurement` and `NG_GA4_CONFIG`.
 
 ## Documentation
 
@@ -138,6 +139,7 @@ Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](https://github.com
 - [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md)
 - [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md): setup, service-worker teardown, sessions across tabs
 - [Engagement time and debug mode](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md)
+- [Enhanced measurement](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/enhanced-measurement.md): opt-in scroll, outbound click, file download, site search, form and video events
 - [Event validation](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/event-validation.md): the event and parameter name rules `trackEvent()` checks
 - [Limitations](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/limitations.md): what the Measurement Protocol can't do, with measurements
 
