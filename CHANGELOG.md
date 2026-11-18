@@ -69,6 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `_ga` cookie this library wrote (`writeGaCookie`, or `clientIdSource: 'cookie'`) is
+  now rewritten with the same client ID on each page load, so its two-year expiry
+  counts from the user's last visit, as gtag.js's does. Before, it lapsed two years
+  after it was first written, however active the user was. A `_ga` adopted from
+  gtag.js is still never written back ([#40](https://github.com/streamvessel/ng-ga4/issues/40)).
 - An extension's service worker and a popup that start together with no client
   ID stored no longer each create their own: `NgGa4Service` and
   `seedNgGa4ClientId()` now share a Web Lock around creating it. Falls back to
