@@ -123,6 +123,7 @@ export class MyComponent {
 | `trackPageView(path, title?)` | Send a page view. Called for you on navigation. `title` defaults to `document.title`. |
 | `setUserId(userId)` | Send `user_id` on every hit from now on; `null` on sign-out. See [User ID](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-id). |
 | `setUserProperties(properties)` | Set user properties, sent with every later hit. See [User properties](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-properties). |
+| `setUserData(data)` | Opt-in, hashed email, phone and address for Google Ads enhanced conversions; `null` clears it. See [User-provided data](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-provided-data). |
 | `setConsent(consent)` | Update consent. Keys you leave out stay as they are. See [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md). |
 | `setEnabled(enabled)` | Turn collection on or off. The first `true` runs the initialisation that `enabled: false` skipped. See [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md). |
 | `flushStorage()` | Resolves once pending `chrome.storage` writes have landed. Resolves at once on the web. See [Service-worker teardown](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md#service-worker-teardown). |
@@ -130,12 +131,12 @@ export class MyComponent {
 
 Calls made while collection is off are dropped. Calls made after `init()` has started but before it finishes are queued and sent once it does; calls made before it starts (for example from an earlier `APP_INITIALIZER`) are dropped.
 
-Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md)), `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState`, `NgGa4UserPropertyValue`, `NgGa4EnhancedMeasurement` and `NG_GA4_CONFIG`.
+Also exported: `seedNgGa4ClientId()` (see [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md)), `NgGa4Config`, `NgGa4CookieOptions`, `NgGa4Consent`, `NgGa4ConsentState`, `NgGa4UserPropertyValue`, `NgGa4UserData`, `NgGa4UserAddress`, `NgGa4EnhancedMeasurement` and `NG_GA4_CONFIG`.
 
 ## Documentation
 
 - [Configuration](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/configuration.md): every option
-- [Identity](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md): client ID and `gtag.js`, user ID, user properties
+- [Identity](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md): client ID and `gtag.js`, user ID, user properties, user-provided data
 - [Consent](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/consent.md)
 - [Chrome extensions](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/chrome-extensions.md): setup, service-worker teardown, contexts starting together, sessions across tabs
 - [Engagement time and debug mode](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/engagement.md)

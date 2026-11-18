@@ -2730,7 +2730,20 @@ describe('NgGa4Service', () => {
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.url).not.toContain('debug/mp/collect');
             expect(req.request.body.events[0].params.debug_mode).toBeUndefined();
+            expect(req.request.body.validation_behavior).toBeUndefined();
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('asks the validation endpoint to ENFORCE_RECOMMENDATIONS but leaves the real hit RELAXED', async () => {
+            reconfigureTestBed({ debug: true });
+            await service.init();
+            service.trackEvent('custom_event');
+
+            const { real, validation } = expectDebugPair();
+            expect(validation.request.body['validation_behavior']).toBe('ENFORCE_RECOMMENDATIONS');
+            expect(real.request.body['validation_behavior']).toBeUndefined();
+            real.flush('', { status: 204, statusText: 'No Content' });
+            validation.flush({ validationMessages: [] });
         });
     });
 
@@ -4491,6 +4504,80 @@ describe('NgGa4Service', () => {
             const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
             expect(req.request.body.client_id).toBe(mockLocalStorage['ga_client_id']);
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+    });
+
+    describe('user_data', () => {
+        const JOHNSMITH_GMAIL = '3586de92bb3636d0885a12eff961429a32e4ebd764b96f50d85d016f9338d586';
+        const PHONE_US = '910a625c4ba147b544e6bd2f267e130ae14c591b6ba9c25cb8573322dedbebd0';
+
+        function sentUserData(event = 'probe'): unknown {
+            service.trackEvent(event);
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            req.flush({});
+            return req.request.body['user_data'];
+        }
+
+        beforeEach(async () => {
+            reconfigureTestBed({ consent: { adUserData: 'granted' } });
+            await service.init();
+        });
+
+        it('is never sent unless the app calls setUserData()', () => {
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('sends hashed email and phone, never the raw values', async () => {
+            await service.setUserData({ email: 'John.Smith@gmail.com', phone: '+1 (555) 555-5555' });
+            const userData = sentUserData();
+
+            expect(userData).toEqual({ sha256_email_address: [JOHNSMITH_GMAIL], sha256_phone_number: [PHONE_US] });
+            expect(JSON.stringify(userData)).not.toContain('gmail');
+        });
+
+        it('passes addresses and pre-hashed values through', async () => {
+            await service.setUserData({ sha256EmailAddress: JOHNSMITH_GMAIL, address: { country: 'US' } });
+            expect(sentUserData()).toEqual({ sha256_email_address: [JOHNSMITH_GMAIL], address: [{ country: 'US' }] });
+        });
+
+        it('stops sending after setUserData(null)', async () => {
+            await service.setUserData({ email: 'a@x.com' });
+            await service.setUserData(null);
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('lets a later clear win over an earlier call that is still hashing', async () => {
+            const pending = service.setUserData({ email: 'a@x.com' });
+            await service.setUserData(null);
+            await pending;
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('is withheld until ad_user_data consent is explicitly granted', async () => {
+            reconfigureTestBed();
+            await service.init();
+            await service.setUserData({ email: 'a@x.com' });
+
+            expect(sentUserData('unset')).toBeUndefined();
+            service.setConsent({ adUserData: 'denied' });
+            expect(sentUserData('denied')).toBeUndefined();
+            service.setConsent({ adUserData: 'granted' });
+            expect(sentUserData('granted')).toBeDefined();
+        });
+
+        it('warns instead of rejecting when hashing fails', async () => {
+            spyOn(crypto.subtle, 'digest').and.returnValue(Promise.reject(new Error('boom')));
+            spyOn(console, 'warn');
+
+            await expectAsync(service.setUserData({ email: 'a@x.com' })).toBeResolved();
+            expect(console.warn).toHaveBeenCalled();
+            expect(sentUserData()).toBeUndefined();
+        });
+
+        it('is never written to storage', async () => {
+            const before = JSON.stringify(mockLocalStorage);
+            await service.setUserData({ email: 'a@x.com' });
+            expect(JSON.stringify(mockLocalStorage)).toBe(before);
         });
     });
 });

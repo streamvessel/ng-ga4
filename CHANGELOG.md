@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `setUserData()` sends opt-in, SHA-256-hashed email, phone and address as
+  `user_data` for Google Ads enhanced conversions, only while `adUserData` is
+  granted. Needs user-provided data collection turned on in GA4. See
+  [User-provided data](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-provided-data).
+  ([#23](https://github.com/streamvessel/ng-ga4/issues/23))
+- In debug mode, the validation request uses
+  `validation_behavior: 'ENFORCE_RECOMMENDATIONS'`; real hits are unchanged.
 - `trackEvent()` checks event and parameter names against the Measurement
   Protocol's rules ([#29](https://github.com/streamvessel/ng-ga4/issues/29)).
   `/mp/collect` returns 204 for a payload it discards, so a bad name used to be
