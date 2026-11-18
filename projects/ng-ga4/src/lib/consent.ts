@@ -2,9 +2,10 @@
 //
 // Note the asymmetry, which the whole design turns on: `adUserData` and
 // `adPersonalization` are *declarative* — we put them in the request body and GA4
-// acts on them. `analyticsStorage` is never sent anywhere; it governs whether
-// *we* are allowed to persist identifiers locally. gtag.js treats all three as
-// one concept because it owns both sides; we only own one.
+// acts on them (except that `user_data` waits for `adUserData`). `analyticsStorage`
+// is never sent anywhere; it governs whether *we* are allowed to persist
+// identifiers locally. gtag.js treats all three as one concept because it owns
+// both sides; we only own one.
 //
 // Pure by design — no browser globals — so the merge and projection rules can be
 // tested without a TestBed.
@@ -45,6 +46,11 @@ export class ConsentState {
      */
     get storageAllowed(): boolean {
         return this.state.analyticsStorage !== 'denied';
+    }
+
+    /** Needs an explicit grant, unlike storageAllowed: Google Ads only uses user_data when ad_user_data is granted. */
+    get userDataAllowed(): boolean {
+        return this.state.adUserData === 'granted';
     }
 
     merge(partial: NgGa4Consent): void {

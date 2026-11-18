@@ -9,6 +9,7 @@ import { regionFromCountry } from './country-region';
 import { countryFromTimeZone } from './tz-country';
 import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
+import { Ga4UserDataPayload, hashUserData, NgGa4UserData } from './user-data';
 import { EnhancedMeasurement } from './enhanced-measurement';
 import { appOnlyEventNameProblem, eventNameProblem, validateEventParams } from './ga4-validation';
 import {
@@ -83,6 +84,7 @@ interface Ga4RequestBody {
     device?: Ga4Device;
     user_location?: Ga4UserLocation;
     consent?: Ga4ConsentPayload;
+    user_data?: Ga4UserDataPayload;
     user_properties?: Ga4UserPropertiesPayload;
 }
 
@@ -120,6 +122,8 @@ export class NgGa4Service implements OnDestroy {
     // applied on top of what was stored. `null` once loaded.
     private pendingUserProperties: UserPropertyUpdate | null = emptyUserPropertyUpdate();
     private engagement: EngagementTimer | null = null;
+    private userData: Ga4UserDataPayload | null = null;
+    private userDataGeneration = 0;
     private enhancedMeasurement: EnhancedMeasurement | null = null;
     // Resolved once, in init(), by resolveEngagementEventName() — validating on
     // every flush would warn on every window switch for a misconfigured name.
@@ -329,6 +333,23 @@ export class NgGa4Service implements OnDestroy {
         }
         if (!wasAllowed && isAllowed && this.clientId) {
             this.repersistIdentity(this.clientId);
+        }
+    }
+
+    /**
+     * Attach hashed email/phone/address (`user_data`) to later hits, or clear it
+     * with `null`. Kept in memory only. Resolves once hashed; hits sent before
+     * that go without it. A later call wins over one still hashing. Never rejects.
+     */
+    async setUserData(userData: NgGa4UserData | null): Promise<void> {
+        const generation = ++this.userDataGeneration;
+        this.userData = null;
+        if (!userData || !this.isBrowser) {
+            return;
+        }
+        const hashed = await hashUserData(userData, globalThis.crypto?.subtle);
+        if (generation === this.userDataGeneration) {
+            this.userData = hashed;
         }
     }
 
@@ -776,6 +797,9 @@ export class NgGa4Service implements OnDestroy {
         if (consentPayload) {
             body.consent = consentPayload;
         }
+        if (this.userData && this.consent.userDataAllowed) {
+            body.user_data = this.userData;
+        }
         // Omitted when empty, for the same byte-identical reason as `consent`.
         const userPropertiesPayload = toUserPropertiesPayload(this.userProperties);
         if (userPropertiesPayload) {
@@ -928,7 +952,9 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private sendForValidation(body: object): void {
-        this.http.post<{ validationMessages?: unknown[] }>(this.collectUrl(this.GA4_DEBUG_ENDPOINT), body).subscribe({
+        // Validation copy only: on real hits it would make GA4 drop data RELAXED keeps.
+        const validationBody = { ...body, validation_behavior: 'ENFORCE_RECOMMENDATIONS' };
+        this.http.post<{ validationMessages?: unknown[] }>(this.collectUrl(this.GA4_DEBUG_ENDPOINT), validationBody).subscribe({
             next: (response) => {
                 // Only speak up when something is actually wrong. Logging the whole
                 // envelope either way made a clean payload and a rejected one look
@@ -1032,7 +1058,13 @@ export class NgGa4Service implements OnDestroy {
             return Promise.resolve('failed');
         }
         const { promise, settle } = deferred();
-        this.outboxAppends.push({ body, settle });
+        // Hashed user_data is held in memory only and never persisted (see
+        // setUserData()), so it is not stored here either. The replay goes
+        // without it: its events lose enhanced-conversion matching, not the
+        // events themselves.
+        const storable: Ga4RequestBody = { ...body };
+        delete storable.user_data;
+        this.outboxAppends.push({ body: storable, settle });
         // One write takes every append that arrived before its turn on the
         // storage chain; later ones queue the next.
         if (this.outboxAppends.length === 1) {

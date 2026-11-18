@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `setUserData()` sends opt-in, SHA-256-hashed email, phone and address as
+  `user_data` for Google Ads enhanced conversions, only while `adUserData` is
+  granted. Needs user-provided data collection turned on in GA4. See
+  [User-provided data](https://github.com/streamvessel/ng-ga4/blob/master/projects/ng-ga4/docs/identity.md#user-provided-data).
+  ([#23](https://github.com/streamvessel/ng-ga4/issues/23))
+- In debug mode, the validation request uses
+  `validation_behavior: 'ENFORCE_RECOMMENDATIONS'`; real hits are unchanged.
 - `trackEvent()` checks event and parameter names against the Measurement
   Protocol's rules ([#29](https://github.com/streamvessel/ng-ga4/issues/29)).
   `/mp/collect` returns 204 for a payload it discards, so a bad name used to be
@@ -89,7 +96,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it (an extension's popup and service worker, a site's tabs) take turns under
   the `ng-ga4:outbox` Web Lock, so a stored request is replayed once and one
   context's drain never overwrites a request another has just stored.
-  Events older than the 72-hour backdating window are dropped. With
+  Events older than the 72-hour backdating window are dropped. Hashed
+  `user_data` is never stored; a replayed request goes without it. With
   `analyticsStorage` denied nothing is stored, and withdrawing it deletes the
   outbox along with the client ID. Such calls now resolve `delivered` to the new
   `'stored'` outcome.
