@@ -2202,7 +2202,20 @@ describe('NgGa4Service', () => {
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.url).not.toContain('debug/mp/collect');
             expect(req.request.body.events[0].params.debug_mode).toBeUndefined();
+            expect(req.request.body.validation_behavior).toBeUndefined();
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('asks the validation endpoint to ENFORCE_RECOMMENDATIONS but leaves the real hit RELAXED', async () => {
+            reconfigureTestBed({ debug: true });
+            await service.init();
+            service.trackEvent('custom_event');
+
+            const { real, validation } = expectDebugPair();
+            expect(validation.request.body['validation_behavior']).toBe('ENFORCE_RECOMMENDATIONS');
+            expect(real.request.body['validation_behavior']).toBeUndefined();
+            real.flush('', { status: 204, statusText: 'No Content' });
+            validation.flush({ validationMessages: [] });
         });
     });
 
@@ -3490,31 +3503,6 @@ describe('NgGa4Service', () => {
             const before = JSON.stringify(mockLocalStorage);
             await service.setUserData({ email: 'a@x.com' });
             expect(JSON.stringify(mockLocalStorage)).toBe(before);
-        });
-    });
-
-    describe('validation_behavior', () => {
-        it('asks the validation endpoint to ENFORCE_RECOMMENDATIONS but leaves the real hit RELAXED', async () => {
-            reconfigureTestBed({ debug: true });
-            await service.init();
-            service.trackEvent('custom_event');
-
-            const all = httpMock.match(r => r.url.includes('mp/collect'));
-            const real = all.find(r => !r.request.url.includes('debug/mp/collect'))!;
-            const validation = all.find(r => r.request.url.includes('debug/mp/collect'))!;
-            expect(validation.request.body['validation_behavior']).toBe('ENFORCE_RECOMMENDATIONS');
-            expect(real.request.body['validation_behavior']).toBeUndefined();
-            real.flush('', { status: 204, statusText: 'No Content' });
-            validation.flush({ validationMessages: [] });
-        });
-
-        it('is not sent outside debug mode', async () => {
-            await service.init();
-            service.trackEvent('custom_event');
-
-            const req = httpMock.expectOne(r => r.url.includes('mp/collect'));
-            expect(req.request.body['validation_behavior']).toBeUndefined();
-            req.flush({});
         });
     });
 });

@@ -46,7 +46,7 @@ export class NgGa4Service implements OnDestroy {
     private userLocation: Ga4UserLocation | null = null;
     private pendingCalls: Array<() => void> = [];
     private engagement: EngagementTimer | null = null;
-    // Hashed only, memory only — never persisted. See setUserData().
+    // See setUserData().
     private userData: Ga4UserDataPayload | null = null;
     private userDataGeneration = 0;
     // Resolved once, in init(), by resolveEngagementEventName() — validating on
@@ -207,13 +207,13 @@ export class NgGa4Service implements OnDestroy {
         if (!userData) {
             return;
         }
-        const subtle = typeof crypto !== 'undefined' ? crypto.subtle : undefined;
-        if (!this.isBrowser || !subtle) {
-            // crypto.subtle only exists in secure contexts. Sending the raw values
-            // instead is not an option, so the data is dropped.
-            if (this.isBrowser) {
-                console.warn('[ng-ga4] setUserData() needs crypto.subtle (a secure context); user_data will not be sent.');
-            }
+        if (!this.isBrowser) {
+            return;
+        }
+        // crypto.subtle only exists in secure contexts. Raw values are never sent instead.
+        const subtle = crypto?.subtle;
+        if (!subtle) {
+            console.warn('[ng-ga4] setUserData() needs crypto.subtle (a secure context); user_data will not be sent.');
             return;
         }
         const hashed = await hashUserData(userData, subtle);
@@ -527,9 +527,8 @@ export class NgGa4Service implements OnDestroy {
         if (consentPayload) {
             body.consent = consentPayload;
         }
-        // Withheld, not just flagged, when the user has denied ad_user_data: the
-        // hashes are personal data, and GA4 would not use them for ads anyway.
-        if (this.userData && consentPayload?.ad_user_data !== 'DENIED') {
+        // Withheld, not just flagged: the hashes are personal data.
+        if (this.userData && this.consent.userDataAllowed) {
             body.user_data = this.userData;
         }
 

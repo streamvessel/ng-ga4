@@ -9,6 +9,12 @@ describe('ConsentState', () => {
         expect(new ConsentState().toPayload()).toBeNull();
     });
 
+    it('allows user_data unless adUserData is denied', () => {
+        expect(new ConsentState().userDataAllowed).toBe(true);
+        expect(new ConsentState({ adUserData: 'granted' }).userDataAllowed).toBe(true);
+        expect(new ConsentState({ adUserData: 'denied' }).userDataAllowed).toBe(false);
+    });
+
     it('denies storage when the initial state says so', () => {
         expect(new ConsentState({ analyticsStorage: 'denied' }).storageAllowed).toBe(false);
     });

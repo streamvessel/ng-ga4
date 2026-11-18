@@ -1,9 +1,4 @@
 // User-provided data (`user_data`) for Google Ads enhanced conversions.
-//
-// Strictly opt-in: nothing here is collected automatically. A consumer has to
-// hand us the raw values, we normalise and hash them in memory, and only the
-// SHA-256 digests ever leave this module. Nothing is persisted.
-//
 // Normalisation follows the Measurement Protocol "user-provided data" reference
 // (https://developers.google.com/analytics/devguides/collection/ga4/uid-data):
 // GA4 matches on the hash, so any drift from these rules silently breaks matching.
@@ -23,7 +18,7 @@ export interface Ga4UserDataPayload {
 }
 
 /** The MP limit for both email and phone. */
-export const MAX_USER_DATA_VALUES = 3;
+const MAX_USER_DATA_VALUES = 3;
 
 /**
  * Lowercase, remove all spaces, and drop the periods in the local part of
@@ -67,16 +62,18 @@ export async function sha256Hex(value: string, subtle: SubtleCrypto): Promise<st
  * so the key is omitted from the body entirely.
  */
 export async function hashUserData(data: NgGa4UserData, subtle: SubtleCrypto): Promise<Ga4UserDataPayload | null> {
-    const payload: Ga4UserDataPayload = {};
-    const emails = prepare('email', data.email, normalizeEmail);
-    if (emails.length) {
-        payload.sha256_email_address = await Promise.all(emails.map(v => sha256Hex(v, subtle)));
+    const hashAll = (values: string[]) => values.length ? Promise.all(values.map(v => sha256Hex(v, subtle))) : undefined;
+    const [emails, phones] = await Promise.all([
+        hashAll(prepare('email', data.email, normalizeEmail)),
+        hashAll(prepare('phone', data.phone, normalizePhone))
+    ]);
+    if (!emails && !phones) {
+        return null;
     }
-    const phones = prepare('phone', data.phone, normalizePhone);
-    if (phones.length) {
-        payload.sha256_phone_number = await Promise.all(phones.map(v => sha256Hex(v, subtle)));
-    }
-    return payload.sha256_email_address || payload.sha256_phone_number ? payload : null;
+    return {
+        ...(emails ? { sha256_email_address: emails } : {}),
+        ...(phones ? { sha256_phone_number: phones } : {})
+    };
 }
 
 function prepare(
@@ -84,9 +81,9 @@ function prepare(
     value: string | string[] | undefined,
     normalize: (raw: string) => string | null
 ): string[] {
-    const raw = value === undefined ? [] : Array.isArray(value) ? value : [value];
     const unique: string[] = [];
-    for (const item of raw) {
+    for (const item of ([] as string[]).concat(value ?? [])) {
+        // Untyped callers can pass anything; skip rather than throw.
         const normalized = typeof item === 'string' ? normalize(item) : null;
         if (normalized && !unique.includes(normalized)) {
             unique.push(normalized);
@@ -94,7 +91,6 @@ function prepare(
     }
     if (unique.length > MAX_USER_DATA_VALUES) {
         console.warn(`[ng-ga4] user_data accepts at most ${MAX_USER_DATA_VALUES} ${field} values; sending the first ${MAX_USER_DATA_VALUES}.`);
-        return unique.slice(0, MAX_USER_DATA_VALUES);
     }
-    return unique;
+    return unique.slice(0, MAX_USER_DATA_VALUES);
 }
