@@ -179,13 +179,12 @@ async function hashAddress(address: NgGa4UserAddress, subtle: SubtleCrypto): Pro
         return null;
     }
     const payload: Ga4UserAddressPayload = {};
-    const hashed = await Promise.all(HASHED_ADDRESS_FIELDS.map(([rawKey, hashedKey, , normalize]) =>
-        digestOf(preferHashed(address[hashedKey], address[rawKey]), normalize, subtle)));
-    HASHED_ADDRESS_FIELDS.forEach(([, , payloadKey], i) => {
-        if (hashed[i]) {
-            payload[payloadKey] = hashed[i]!;
+    await Promise.all(HASHED_ADDRESS_FIELDS.map(async ([rawKey, hashedKey, payloadKey, normalize]) => {
+        const value = await digestOf(preferHashed(address[hashedKey], address[rawKey]), normalize, subtle);
+        if (value) {
+            payload[payloadKey] = value;
         }
-    });
+    }));
     for (const [rawKey, payloadKey, normalize] of PLAIN_ADDRESS_FIELDS) {
         const value = normalizeIfString(address[rawKey], normalize);
         if (value) {
