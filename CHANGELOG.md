@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `trackEvent()` checks event and parameter names against the Measurement
+  Protocol's rules ([#29](https://github.com/streamvessel/ng-ga4/issues/29)).
+  `/mp/collect` returns 204 for a payload it discards, so a bad name used to be
+  lost without a trace. An event with an invalid or reserved name is no longer
+  sent; a parameter with an invalid or reserved name is removed from the event.
+  In development (or with `debug: true`) each one logs a `console.warn` naming
+  the rule; production stays silent. App-stream event names, over-long string
+  values and more than 25 parameters are warned about but sent unchanged.
+- `setUserId(userId)` sends a top-level `user_id` on every hit, for GA4's User-ID
+  reporting identity and cross-device analysis ([#18](https://github.com/streamvessel/ng-ga4/issues/18)).
+  Pass `null` on sign-out. The ID is stored next to the client ID, so it survives
+  reloads, and follows `analyticsStorage` consent like the client ID does.
+- `setUserProperties()`, the equivalent of `gtag('set', 'user_properties', { ... })`
+  ([#19](https://github.com/streamvessel/ng-ga4/issues/19)). Properties merge across
+  calls, go out as `user_properties` on every hit, and are stored next to the client
+  ID so they survive a reload; denying `analyticsStorage` deletes them along with it.
+  Names and values GA4 would reject are dropped, with a warning in dev mode.
+- `enhancedMeasurement` config: opt-in `scroll`, outbound `click`, `file_download`,
+  `view_search_results`, `form_start`, `form_submit`, `video_start`, `video_progress`
+  and `video_complete` events with `gtag.js`'s names and parameters
+  ([#28](https://github.com/streamvessel/ng-ga4/issues/28)). Everything is off by
+  default, so nothing you send changes on upgrade. Video tracking covers native
+  `<video>` elements, not embedded YouTube players; `data-ng-ga4-ignore` on a video
+  or its container leaves it out, for decorative background loops.
+- `user_location` now carries `continent_id` and `subcontinent_id` (UN M49) next to
+  `country_id`, looked up from the country the time zone resolves to. GA4's Continent
+  and Subcontinent dimensions used to read `(not set)`
+  ([#22](https://github.com/streamvessel/ng-ga4/issues/22)).
+
 ### Changed
 
 - A caller-supplied `app_version` in `trackEvent()` params now replaces the
@@ -14,6 +45,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default (`engagement_time_msec`, `session_id`, `session_number`, `app_version`)
   now follows the same rule: defaults first, caller wins
   ([#31](https://github.com/streamvessel/ng-ga4/issues/31)).
+- `engagementEventName` is validated against the same, fuller reserved-name
+  list, and its warning now says which rule the name broke.
+- The README is now a short overview: the pitch, features, what you give up,
+  install, the required options, one usage example and the API table. The
+  reference material moved to topic docs under
+  [`projects/ng-ga4/docs/`](https://github.com/streamvessel/ng-ga4/tree/master/projects/ng-ga4/docs),
+  which the README links by absolute GitHub URL ([#84](https://github.com/streamvessel/ng-ga4/issues/84)).
+  The text is the same; the docs only gained a note on which version they describe,
+  section headings for the required and optional options, and links between files.
+  `LIMITATIONS.md` is now `docs/limitations.md`, and like the other topic docs it
+  is no longer included in the npm package. A short `LIMITATIONS.md` stays at the
+  old path and points to the new one, so the link in the READMEs already published
+  for 0.2.x keeps working.
 
 ### Fixed
 
@@ -21,10 +65,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   secret containing `&`, `#`, `+` or similar no longer corrupts the request.
 - `measurementId` is uppercased before sending, so `g-abc123` is sent as
   `G-ABC123`, the form GA4 shows in Admin → Data Streams.
-- In dev mode (and whenever `debug` is on), `init()` logs a one-time warning when
-  `measurementId` (after uppercasing) does not look like `G-` followed by letters and digits, or when
-  `apiSecret` is empty. GA4 answers both with a normal 2xx and records nothing.
-  Hits are still sent.
+- In dev mode (and whenever `debug` is on), `init()` logs a warning when the
+  uppercased `measurementId` does not look like `G-` followed by letters and
+  digits, or when `apiSecret` is empty. GA4 answers both with a normal 2xx and
+  records nothing. Hits are still sent.
+- Visitors in 13 time zones sent no `user_location`, so GA4 showed their country as
+  `(not set)`. Chrome reports these zones under older names than the ones the
+  library knew, such as `America/Godthab` for Greenland and `America/Indianapolis`,
+  plus Chile's new `America/Coyhaique`.
+
+### Fixed
+
+- Page views now default `page_title` to `document.title` when no title is passed,
+  as `gtag.js` does, instead of leaving it unset — every automatic router page view
+  used to show up as `(not set)` in GA4's Pages and screens report. The router
+  page view is sent one microtask after `NavigationEnd`, so it picks up the title
+  the router's `TitleStrategy` sets for the new route rather than the previous one.
 
 ## [0.2.2] - 2026-10-27
 

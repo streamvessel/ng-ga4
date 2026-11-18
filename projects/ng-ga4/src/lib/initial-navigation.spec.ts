@@ -73,10 +73,10 @@ describe('initial navigation', () => {
         host.remove();
     });
 
-    async function bootstrap(blocking: boolean): Promise<void> {
+    async function bootstrap(blocking: boolean, appRoutes: Routes = routes): Promise<void> {
         appRef = await bootstrapApplication(RootComponent, {
             providers: [
-                provideRouter(...(blocking ? [routes, withEnabledBlockingInitialNavigation()] : [routes]) as [Routes]),
+                provideRouter(...(blocking ? [appRoutes, withEnabledBlockingInitialNavigation()] : [appRoutes]) as [Routes]),
                 provideHttpClient(withInterceptors([recorder])),
                 provideNgGa4({
                     measurementId: 'G-RACE',
@@ -147,6 +147,35 @@ describe('initial navigation', () => {
             await bootstrap(true);
 
             expect(pageViews().length).toBe(0);
+        });
+    });
+
+    // Real router and default TitleStrategy: guards the ordering the service relies on.
+    describe('page_title from route titles', () => {
+        let originalTitle: string;
+
+        beforeEach(() => {
+            originalTitle = document.title;
+        });
+
+        afterEach(() => {
+            document.title = originalTitle;
+        });
+
+        it('reports each route\'s own title on the automatic page_view', async () => {
+            const titled: Routes = [
+                { path: 'about', component: HomeComponent, title: 'About Title' },
+                // Wildcard, like `routes` above: Karma's page URL is not '/'.
+                { path: '**', component: HomeComponent, title: 'Home Title' }
+            ];
+            await bootstrap(false, titled);
+
+            await appRef.injector.get(Router).navigateByUrl('/about');
+            await appRef.whenStable();
+
+            const titles = pageViews().map(r =>
+                r.body.events.find((e: any) => e.name === 'page_view').params.page_title);
+            expect(titles).toEqual(['Home Title', 'About Title']);
         });
     });
 

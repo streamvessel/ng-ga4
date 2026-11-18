@@ -27,10 +27,31 @@ describe('countryFromTimeZone', () => {
         expect(countryFromTimeZone('Pacific/Ponape')).toBe('FM');
     });
 
+    it('maps the CLDR IDs Chrome reports where IANA has since renamed or moved the zone', () => {
+        expect(countryFromTimeZone('America/Godthab')).toBe('GL');
+        expect(countryFromTimeZone('Atlantic/Faeroe')).toBe('FO');
+        expect(countryFromTimeZone('America/Indianapolis')).toBe('US');
+        expect(countryFromTimeZone('America/Cordoba')).toBe('AR');
+        expect(countryFromTimeZone('Pacific/Enderbury')).toBe('KI');
+    });
+
+    it('maps every country zone the browser can report', () => {
+        const zones: string[] = (Intl as any).supportedValuesOf?.('timeZone') ?? [];
+        expect(zones.length).toBeGreaterThan(0);
+        const unmapped = zones.filter(zone => !/^(UTC$|GMT$|Etc\/)/.test(zone) && !countryFromTimeZone(zone));
+        expect(unmapped).toEqual([]);
+    });
+
     it('returns undefined for country-less or unknown zones', () => {
         expect(countryFromTimeZone('UTC')).toBeUndefined();
         expect(countryFromTimeZone('Etc/GMT')).toBeUndefined();
         expect(countryFromTimeZone('Not/AZone')).toBeUndefined();
+    });
+
+    it('returns undefined for keys inherited from Object.prototype', () => {
+        expect(countryFromTimeZone('constructor')).toBeUndefined();
+        expect(countryFromTimeZone('toString')).toBeUndefined();
+        expect(countryFromTimeZone('__proto__')).toBeUndefined();
     });
 
     it('returns undefined for empty, null or undefined input', () => {
