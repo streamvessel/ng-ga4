@@ -22,30 +22,29 @@ const MAX_USER_DATA_VALUES = 3;
 
 /**
  * Lowercase, remove all spaces, and drop the periods in the local part of
- * gmail.com / googlemail.com addresses. Returns `null` for an empty result.
+ * gmail.com / googlemail.com addresses. Returns `null` for anything without a
+ * local part and a domain, so a placeholder such as 'N/A' never takes a slot.
  */
 export function normalizeEmail(email: string): string | null {
     const normalized = email.replace(/\s+/g, '').toLowerCase();
-    if (!normalized) {
+    const at = normalized.lastIndexOf('@');
+    if (at <= 0 || at === normalized.length - 1) {
         return null;
     }
-    const at = normalized.lastIndexOf('@');
-    if (at > 0) {
-        const domain = normalized.slice(at + 1);
-        if (domain === 'gmail.com' || domain === 'googlemail.com') {
-            return normalized.slice(0, at).replace(/\./g, '') + '@' + domain;
-        }
+    const domain = normalized.slice(at + 1);
+    if (domain === 'gmail.com' || domain === 'googlemail.com') {
+        return normalized.slice(0, at).replace(/\./g, '') + '@' + domain;
     }
     return normalized;
 }
 
 /**
- * Strip every non-digit and add a `+` prefix. We cannot infer a missing country
- * code, so a national-format number hashes to something GA4 will never match;
- * callers must pass E.164. Returns `null` when no digits remain.
+ * Strip every non-digit and add a `+` prefix. A leading `00` international
+ * prefix is dropped (no E.164 number starts with 0). We cannot infer a missing
+ * country code, so callers must pass E.164. Returns `null` when no digits remain.
  */
 export function normalizePhone(phone: string): string | null {
-    const digits = phone.replace(/\D/g, '');
+    const digits = phone.replace(/\D/g, '').replace(/^00/, '');
     return digits ? `+${digits}` : null;
 }
 

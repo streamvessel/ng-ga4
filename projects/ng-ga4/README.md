@@ -218,10 +218,11 @@ await this.ga4.setUserData(null);
 ```
 
 - Values are normalised the way Google requires and SHA-256 hashed in the browser. Emails are lowercased, spaces are removed, and dots before the `@` are dropped for `gmail.com` and `googlemail.com`. Phones keep only their digits, with `+` added in front. Only the hex digests go into the request, as `user_data.sha256_email_address` and `user_data.sha256_phone_number`. Each takes up to 3 values; more are cut with a warning.
-- Include the country code in phone numbers. The library can't guess it, and a number without one never matches.
+- Include the country code in phone numbers (a leading `00` is accepted in place of `+`). The library can't guess it, and a number without one never matches. Values that aren't email addresses (no `@`) are skipped.
 - Nothing is stored. The hashes live in memory only, so call `setUserData()` again on every start-up and in every tab or extension context.
 - Hits sent before the returned promise resolves go without `user_data`.
 - `user_data` is left out while `adUserData` consent is `'denied'`, and it comes back once consent is granted.
+- With `debug: true`, the copy posted to the validation endpoint carries the same hashes.
 - It needs `crypto.subtle`, which only exists in a secure context (HTTPS or `localhost`). Elsewhere the call does nothing and logs a warning; raw values are never sent.
 
 **Your obligations.** A hashed email address is still personal data. Before you send it you must:

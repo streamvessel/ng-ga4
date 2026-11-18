@@ -20,8 +20,11 @@ describe('user-data', () => {
             expect(normalizeEmail('john.smith@notgmail.com')).toBe('john.smith@notgmail.com');
         });
 
-        it('returns null for a blank value', () => {
+        it('returns null for a blank value or anything that is not an address', () => {
             expect(normalizeEmail('   ')).toBeNull();
+            expect(normalizeEmail('N/A')).toBeNull();
+            expect(normalizeEmail('@example.com')).toBeNull();
+            expect(normalizeEmail('jane@')).toBeNull();
         });
     });
 
@@ -29,6 +32,10 @@ describe('user-data', () => {
         it('strips non-digits and adds a + prefix', () => {
             expect(normalizePhone('+1 (555) 555-5555')).toBe('+15555555555');
             expect(normalizePhone('1.555.555.5555')).toBe('+15555555555');
+        });
+
+        it('drops a leading 00 international prefix', () => {
+            expect(normalizePhone('0044 20 7946 0958')).toBe('+442079460958');
         });
 
         it('returns null when no digits remain', () => {

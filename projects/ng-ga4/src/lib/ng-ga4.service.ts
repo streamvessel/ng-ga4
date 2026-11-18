@@ -198,25 +198,31 @@ export class NgGa4Service implements OnDestroy {
      * persisted, so call this again on every start-up (e.g. after login).
      *
      * Resolves once the hashes are ready; hits sent before that go without
-     * `user_data`. A later call (including `null`) always wins over an earlier
-     * one that is still hashing.
+     * `user_data` (also when replacing earlier data, so one user's hashes never
+     * ride on another's hits). A later call (including `null`) always wins over
+     * an earlier one that is still hashing. Never rejects.
      */
     async setUserData(userData: NgGa4UserData | null): Promise<void> {
         const generation = ++this.userDataGeneration;
         this.userData = null;
-        if (!userData) {
-            return;
-        }
-        if (!this.isBrowser) {
+        if (!userData || !this.isBrowser) {
             return;
         }
         // crypto.subtle only exists in secure contexts. Raw values are never sent instead.
-        const subtle = crypto?.subtle;
+        const subtle = globalThis.crypto?.subtle;
         if (!subtle) {
             console.warn('[ng-ga4] setUserData() needs crypto.subtle (a secure context); user_data will not be sent.');
             return;
         }
-        const hashed = await hashUserData(userData, subtle);
+        // Callers often fire-and-forget this from a login handler, so a failure
+        // must not surface as an unhandled rejection.
+        let hashed: Ga4UserDataPayload | null;
+        try {
+            hashed = await hashUserData(userData, subtle);
+        } catch (err) {
+            console.warn('[ng-ga4] Hashing user_data failed; it will not be sent.', err);
+            return;
+        }
         if (generation === this.userDataGeneration) {
             this.userData = hashed;
         }

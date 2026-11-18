@@ -3498,6 +3498,20 @@ describe('NgGa4Service', () => {
             granted.flush({});
         });
 
+        it('warns instead of rejecting when hashing fails', async () => {
+            await service.init();
+            spyOn(crypto.subtle, 'digest').and.returnValue(Promise.reject(new Error('boom')));
+            spyOn(console, 'warn');
+
+            await expectAsync(service.setUserData({ email: 'a@x.com' })).toBeResolved();
+            expect(console.warn).toHaveBeenCalled();
+            service.trackEvent('probe');
+
+            const req = httpMock.expectOne(r => r.url.includes('/mp/collect'));
+            expect(req.request.body['user_data']).toBeUndefined();
+            req.flush({});
+        });
+
         it('is never written to storage', async () => {
             await service.init();
             const before = JSON.stringify(mockLocalStorage);
