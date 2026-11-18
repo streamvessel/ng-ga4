@@ -143,8 +143,7 @@ export class NgGa4Service implements OnDestroy {
     private enabled: boolean;
     private initPromise: Promise<void> | null = null;
     private storageWrites: Promise<void> = Promise.resolve();
-    // Events waiting to go out together (#24). Only the 'beacon' transport
-    // batches; 'xhr' sends each call as its own request, as it always has.
+    // Events waiting to go out together (#24), over either transport.
     // Each ticket settles one call's `delivered` with its batch's outcome.
     private readonly batcher = new EventBatcher<Ga4RequestBody, Settle>();
     // Requests on the wire, for flush() to wait on.
@@ -158,6 +157,9 @@ export class NgGa4Service implements OnDestroy {
     private outboxMayHaveItems = true;
     private batchTimer: ReturnType<typeof setTimeout> | null = null;
     private readonly DEFAULT_BATCH_DELAY_MS = 300;
+    // The configured transport for an ordinary send; anything but 'xhr' is the
+    // default beacon chain.
+    private readonly transport: 'beacon' | 'xhr';
 
     constructor(
         private http: HttpClient,
@@ -171,6 +173,7 @@ export class NgGa4Service implements OnDestroy {
         // config.enabled is only the *initial* value now: a consent banner has to be
         // able to turn collection on after the injector is built.
         this.enabled = config.enabled;
+        this.transport = config.transport === 'xhr' ? 'xhr' : 'beacon';
         this.warnOnInvalid = !!config.debug || isDevMode();
     }
 
@@ -574,7 +577,7 @@ export class NgGa4Service implements OnDestroy {
     ngOnDestroy(): void {
         // Whatever is still waiting was collected while enabled; an injector torn
         // down (an MV3 popup closing, an app destroyed) should not take it along.
-        this.flushQueue();
+        this.flushQueue(true);
         // Never replayed now; a caller awaiting `delivered` must not hang.
         for (const call of this.pendingCalls.splice(0)) {
             call.drop();
@@ -772,34 +775,32 @@ export class NgGa4Service implements OnDestroy {
             body.user_properties = userPropertiesPayload;
         }
 
+        // Batched over either transport, as gtag.js batches: a route change plus
+        // a few custom events becomes one request instead of one (plus a CORS
+        // preflight) each. A full batch, or a send as the page goes away, goes
+        // immediately; anything else waits briefly for company.
+        //
         // forceBeacon is for sends as the page goes away, where XHR would be aborted
         // and the hit lost — losing the event outright is worse than skipping interceptors.
-        // 'xhr' is also the escape hatch from batching: one call, one request,
-        // through the app's interceptors, exactly as before #24.
-        if (this.config.transport === 'xhr' && !forceBeacon) {
-            return this.dispatch(body, 'xhr');
-        }
-
-        // Batched: a route change plus a few custom events becomes one request
-        // instead of one (plus a CORS preflight) each. A full batch, or a send as
-        // the page goes away, goes immediately; anything else waits briefly for
-        // company.
         const { promise, settle } = deferred();
         const full = this.batcher.add(body, settle);
         if (full || forceBeacon) {
-            this.flushQueue();
+            this.flushQueue(forceBeacon);
         } else {
             this.scheduleFlush();
         }
         return promise;
     }
 
-    // Sends everything queued, now, over the unload-safe chain. Safe to call
-    // with nothing queued, and from an unload handler.
-    private flushQueue(): void {
+    // Sends everything queued, now, over the configured transport — or, when
+    // the page or context is going away, over the unload-safe beacon chain,
+    // since an XHR in flight then is aborted and the hit lost. Safe to call
+    // with nothing queued.
+    private flushQueue(unloading = false): void {
         this.cancelScheduledFlush();
+        const transport = unloading ? 'beacon' : this.transport;
         for (const { body, tickets } of this.batcher.drain()) {
-            const outcome = this.dispatch(body, 'beacon');
+            const outcome = this.dispatch(body, transport);
             tickets.forEach(settle => settle(outcome));
         }
     }
@@ -833,8 +834,7 @@ export class NgGa4Service implements OnDestroy {
             : this.DEFAULT_BATCH_DELAY_MS;
     }
 
-    // One request on the wire: a single event under 'xhr', a batch or a
-    // replayed request otherwise. Every send, live or replayed, passes here,
+    // One request on the wire: a batch, or a replayed request. Every send, live or replayed, passes here,
     // so the timestamp rules live here too. The promise never rejects, and is
     // tracked until it settles for flush().
     private dispatch(body: Ga4RequestBody, transport: 'beacon' | 'xhr'): Promise<NgGa4Delivery> {
@@ -1059,7 +1059,7 @@ export class NgGa4Service implements OnDestroy {
         // Stored requests are as small as the batches that failed. Merged back
         // into full batches, a long outage replays in a few requests, not
         // hundreds. Each one that fails again goes back in through dispatch().
-        const transport = this.config.transport === 'xhr' ? 'xhr' : 'beacon';
+        const transport = this.transport;
         const batcher = new EventBatcher<Ga4RequestBody, null>();
         for (const body of pending) {
             batcher.add(body, null);
@@ -1445,7 +1445,7 @@ export class NgGa4Service implements OnDestroy {
     // the trailing engagement time nor the batch timer can wait.
     private onPageLeave(): void {
         this.flushEngagement();
-        this.flushQueue();
+        this.flushQueue(true);
     }
 
     // Flushes the trailing chunk of foreground time a page_view-only visit

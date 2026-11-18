@@ -101,6 +101,16 @@ describe('NgGa4Service', () => {
         // jasmine.clock().tick() keeps driving the existing specs unchanged.
         spyOn(service as any, 'monotonicNow').and.callFake(() => Date.now());
 
+        // 'xhr' batches like 'beacon' does, so every call would otherwise wait
+        // for the batch timer. The bulk of the suite asserts one request per
+        // call on the default XHR-pinned config, so there the queue is flushed
+        // as soon as it is scheduled. The batching specs set transport or
+        // batchDelayMs explicitly and get the real timer.
+        const effective = { ...defaultConfig, ...config };
+        if (effective.transport === 'xhr' && effective.batchDelayMs === undefined) {
+            spyOn(service as any, 'scheduleFlush').and.callFake(() => (service as any).flushQueue());
+        }
+
         // The service reads and writes cookies through seams precisely so tests can
         // stub them; mutating document.cookie for real would leak between specs and
         // make results depend on what the Karma browser already holds on localhost.
@@ -1723,7 +1733,9 @@ describe('NgGa4Service', () => {
             // Both instances now hold the same session read from shared storage.
             // Advance past the timeout so second's own roll, below, is a real one.
             jasmine.clock().tick(31 * 60 * 1000);
+            // Built outside configureTestBed, so it has the real batch timer.
             second.trackEvent('tab_b_rolls');
+            jasmine.clock().tick(BATCH_DELAY_MS);
             httpMock.expectOne((r) => r.url.includes('mp/collect'))
                 .flush('', { status: 204, statusText: 'No Content' });
 
@@ -3948,17 +3960,48 @@ describe('NgGa4Service', () => {
             validation.flush({ validationMessages: [] });
         });
 
-        // The escape hatch: one call, one request, through HttpClient, now.
-        it('does not batch under transport: xhr', async () => {
-            reconfigureTestBed({ transport: 'xhr' });
+        // As gtag.js batches whatever its transport.
+        it('batches under transport: xhr too, sending the batch through HttpClient', async () => {
+            reconfigureTestBed({ transport: 'xhr', batchDelayMs: BATCH_DELAY_MS });
+            const beacon = spyOn<any>(service, 'trySendBeacon').and.returnValue(true);
             await service.init();
 
             service.trackEvent('a');
             service.trackEvent('b');
+            httpMock.expectNone((r) => r.url.includes('mp/collect'));
+            jasmine.clock().tick(BATCH_DELAY_MS);
 
-            const reqs = httpMock.match((r) => r.url.includes('mp/collect'));
-            expect(reqs.map(r => names(r.request.body))).toEqual([['a'], ['b']]);
-            reqs.forEach(r => r.flush('', { status: 204, statusText: 'No Content' }));
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(names(req.request.body)).toEqual(['a', 'b']);
+            req.flush('', { status: 204, statusText: 'No Content' });
+            expect(beacon).not.toHaveBeenCalled();
+        });
+
+        // An XHR in flight when the page goes away is aborted.
+        it('sends an xhr batch over the beacon chain when the page is hidden', async () => {
+            reconfigureTestBed({ transport: 'xhr', batchDelayMs: BATCH_DELAY_MS });
+            installBeacon();
+            await service.init();
+            service.trackEvent('before_hide');
+
+            pageEngaged = false;
+            document.dispatchEvent(new Event('visibilitychange'));
+
+            expect(beacons.length).toBe(1);
+            expect(names(beacons[0])).toEqual(['before_hide']);
+            httpMock.expectNone((r) => r.url.includes('mp/collect'));
+        });
+
+        it('sends an xhr batch through HttpClient when flushed by flush()', async () => {
+            reconfigureTestBed({ transport: 'xhr', batchDelayMs: 60_000 });
+            await service.init();
+            service.trackEvent('a');
+
+            const flushed = service.flush();
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            expect(names(req.request.body)).toEqual(['a']);
+            req.flush('', { status: 204, statusText: 'No Content' });
+            await flushed;
         });
 
         it('schedules nothing on the server', async () => {

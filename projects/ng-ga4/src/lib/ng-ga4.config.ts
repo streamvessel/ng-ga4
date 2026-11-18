@@ -40,8 +40,9 @@ export interface NgGa4Config {
      * The hide-time engagement event always takes the 'beacon' chain. In debug mode the
      * validation request is a separate HttpClient call.
      *
-     * Only 'beacon' batches (see `batchDelayMs`); 'xhr' sends every call as its own
-     * request, immediately, as earlier versions did.
+     * Both batch events (see `batchDelayMs`). Under 'xhr' a batch goes out through
+     * HttpClient, but a batch sent as the page is hidden or closed takes the 'beacon'
+     * chain, like the hide-time engagement event.
      */
     transport?: 'beacon' | 'xhr';
 
@@ -54,7 +55,7 @@ export interface NgGa4Config {
      * A batch is sent sooner when it reaches 25 events, when the page is hidden or
      * torn down (`visibilitychange` → hidden, `pagehide`), and when the service is
      * destroyed. `0` still batches calls made in the same task. A negative or
-     * non-numeric value falls back to the default. Ignored under `transport: 'xhr'`.
+     * non-numeric value falls back to the default.
      */
     batchDelayMs?: number;
     /**
