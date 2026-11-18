@@ -1,7 +1,4 @@
-// Extension-page bundle: the seed, plus the real NgGa4Service from this branch's
-// source, constructed directly (no injector) with stubs for everything that is
-// not the client-ID path. Nothing is sent: no event is tracked, and the stub
-// HttpClient would swallow it if one were.
+// Page bundle: the seed and NgGa4Service, built directly with stubs. Sends nothing.
 import { Subject, of } from 'rxjs';
 import { seedNgGa4ClientId } from '../../projects/ng-ga4/src/lib/seed-client-id';
 import { NgGa4Service } from '../../projects/ng-ga4/src/lib/ng-ga4.service';

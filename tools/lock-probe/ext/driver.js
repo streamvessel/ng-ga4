@@ -1,5 +1,4 @@
-// Driven by run.js through Playwright. Never a caller itself, so it never
-// takes part in a race.
+// Coordinates the race from run.js; never mints itself.
 const bc = new BroadcastChannel('probe');
 const waiters = new Set();
 bc.onmessage = (e) => { for (const w of [...waiters]) w(e.data); };
@@ -23,7 +22,6 @@ self.pingAll = async (contexts) => {
   return [...seen];
 };
 
-// holder takes the lock; asker asks for it with ifAvailable from its own context.
 self.crossTry = async (holder, asker) => {
   bc.postMessage({ cmd: 'hold', ctx: holder });
   await waitFor((d) => d.cmd === 'holding' && d.ctx === holder);
@@ -34,7 +32,6 @@ self.crossTry = async (holder, asker) => {
   return result;
 };
 
-// One race: empty storage, then every caller starts at once.
 self.race = async (run, useLocks, callers) => {
   await chrome.storage.local.clear();
   await chrome.storage.session.clear();

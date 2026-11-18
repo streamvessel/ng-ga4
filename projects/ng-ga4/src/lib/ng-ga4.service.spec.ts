@@ -277,10 +277,7 @@ describe('NgGa4Service', () => {
         // Save original chrome.storage (if any) for restoration
         originalChromeStorage = (window as any).chrome?.storage;
 
-        // The extension client-ID path takes a Web Lock (#51). A real grant lands
-        // on a task, which specs that drain only microtasks under jasmine.clock()
-        // never reach; this fake grants on a microtask with the same exclusive,
-        // FIFO semantics.
+        // Real lock grants land on a task, which microtask-only specs never reach.
         fakeLocks = new FakeLockManager();
         restoreLocks = installLockManager(fakeLocks);
 
@@ -379,8 +376,7 @@ describe('NgGa4Service', () => {
     // --- client ID lock (#51) ---
 
     describe('client ID lock across extension contexts', () => {
-        // A second, independently constructed service over the same mocked
-        // chrome.storage: the popup to `service`'s worker, both starting cold.
+        // A second context sharing the same mocked chrome.storage.
         function secondExtensionService(): NgGa4Service {
             return Injector.create({
                 providers: [
@@ -396,8 +392,7 @@ describe('NgGa4Service', () => {
 
         beforeEach(() => {
             reconfigureTestBed({ isExtension: true });
-            // Distinct IDs per mint, so a double mint is visible rather than
-            // hidden behind the suite-wide constant MOCK_UUID.
+            // Distinct IDs per mint, so a double mint is visible.
             (crypto.randomUUID as jasmine.Spy).and.returnValues(
                 'aaaaaaaa-0000-4000-8000-000000000001' as any,
                 'bbbbbbbb-0000-4000-8000-000000000002' as any
@@ -428,9 +423,7 @@ describe('NgGa4Service', () => {
             second.ngOnDestroy();
         });
 
-        // Control arm: the same two cold starts with Web Locks unavailable fall
-        // back to the pre-#51 behaviour, and this mock reproduces the double
-        // mint. If this stops reproducing it, the spec above proves nothing.
+        // Control: proves the mock reproduces the race the lock prevents.
         it('falls back to unlocked minting where navigator.locks is unavailable', async () => {
             restoreLocks();
             restoreLocks = installLockManager(undefined);

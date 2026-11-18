@@ -49,15 +49,11 @@ chrome.action.onClicked.addListener(async () => {
 
 ## Contexts starting together
 
-The service worker and a popup or options page can start at the same moment with no client ID stored yet. Without coordination, both would create an ID and the user would be counted twice. The library prevents that with a [Web Lock](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API) named `ng-ga4:client-id`: the second context waits for the first, then reads the ID the first one saved. `NgGa4Service` and `seedNgGa4ClientId()` take the same lock, in any combination of worker and pages. You don't need to do anything for this ([#51](https://github.com/streamvessel/ng-ga4/issues/51)).
+If the service worker and a popup start at the same moment with no client ID stored, the second waits for the first (via the [Web Lock](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API) `ng-ga4:client-id`) and reuses its ID. Nothing to set up ([#51](https://github.com/streamvessel/ng-ga4/issues/51)).
 
-What it doesn't cover:
+It doesn't help with service-worker teardown (keep seeding, above), or when `analyticsStorage` is denied (nothing is saved to share). Without Web Locks, or if the lock isn't granted within 3 seconds, the ID is created without it.
 
-- **Teardown.** The lock doesn't stop Chrome from stopping a worker between creating the ID and saving it. Keep calling `seedNgGa4ClientId()` from `onInstalled`, as described above.
-- **Denied storage.** With `analyticsStorage` denied, nothing is saved, so there is no shared ID to read. Each context uses its own ID in memory, by design.
-- **A stuck lock.** If the lock isn't granted within 3 seconds, or the browser has no Web Locks, the ID is created without it, as before. A context that times out this way can still end up with its own ID.
-
-How we know: the specification says pages and workers of one origin share their locks, but doesn't mention extensions. We measured it in a scratch MV3 extension on Chromium 153 under Linux, with the library's own code racing in the worker and two extension pages; the tool and its results are in [`tools/lock-probe`](https://github.com/streamvessel/ng-ga4/tree/master/tools/lock-probe). It has not been run on branded Chrome, on other operating systems, or from a real install, where the contexts start cold rather than already running.
+Measured on Chromium 153 under Linux with [`tools/lock-probe`](https://github.com/streamvessel/ng-ga4/tree/master/tools/lock-probe); not yet on branded Chrome or other platforms.
 
 ## Sessions across tabs
 

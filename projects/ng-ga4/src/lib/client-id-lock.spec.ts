@@ -68,8 +68,6 @@ describe('withClientIdLock', () => {
         restoreLocks = installLockManager(locks);
         spyOn(console, 'warn');
         const stuck = deferred();
-        // A holder that never releases: init() is an APP_INITIALIZER, so waiting
-        // on this unboundedly would stop the extension booting.
         const holder = locks.request(CLIENT_ID_LOCK_NAME, () => stuck.promise);
 
         const critical = jasmine.createSpy('critical').and.resolveTo('id');
@@ -79,8 +77,6 @@ describe('withClientIdLock', () => {
 
         stuck.resolve();
         await holder;
-        // The aborted request must not run critical a second time once the
-        // holder finally lets go.
         for (let i = 0; i < 10; i++) { await Promise.resolve(); }
         expect(critical).toHaveBeenCalledTimes(1);
     });
@@ -91,15 +87,11 @@ describe('withClientIdLock', () => {
         const critical = jasmine.createSpy('critical').and.rejectWith(new Error('storage failed'));
 
         await expectAsync(withClientIdLock(critical)).toBeRejectedWithError('storage failed');
-        // Running it again unlocked would be a second mint — the bug, not a fallback.
         expect(critical).toHaveBeenCalledTimes(1);
         expect(console.warn).not.toHaveBeenCalled();
     });
 
-    // Against the browser's own LockManager rather than the fake: Karma's Chrome
-    // implements Web Locks, so this checks the request shape we send is one the
-    // real API accepts and serialises. Same page, one agent — it says nothing
-    // about cross-context sharing, which is what the PR's extension run measures.
+    // Same page only; cross-context sharing is measured by tools/lock-probe.
     it('serialises against the real navigator.locks', async () => {
         expect(navigator.locks).toBeDefined();
         let inside = 0;

@@ -56,18 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- An extension's service worker and a popup or options page that start together
-  with no client ID stored no longer each create their own. Reading, creating and
-  saving the ID now happen under a [Web Lock](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API)
-  (`ng-ga4:client-id`) taken by both `NgGa4Service` and `seedNgGa4ClientId()`, so
-  the second context reads the first one's ID. Measured in a scratch MV3 extension
-  on Chromium 153 under Linux, with contexts already running rather than starting
-  from an install: in 200 forced races per pairing of worker and pages, nearly every
-  race produced two IDs without the lock and none did with it
-  ([`tools/lock-probe`](https://github.com/streamvessel/ng-ga4/tree/master/tools/lock-probe)).
-  If the lock isn't granted within 3 seconds, or the browser has no Web Locks, the
-  ID is created without it, as before. Seeding at install is still needed against
-  service-worker teardown.
+- An extension's service worker and a popup that start together with no client
+  ID stored no longer each create their own: `NgGa4Service` and
+  `seedNgGa4ClientId()` now share a Web Lock around creating it. Falls back to
+  the old behaviour without Web Locks or after a 3-second wait. Measured on
+  Chromium 153 under Linux with `tools/lock-probe`.
   ([#51](https://github.com/streamvessel/ng-ga4/issues/51))
 - Visitors in 13 time zones sent no `user_location`, so GA4 showed their country as
   `(not set)`. Chrome reports these zones under older names than the ones the

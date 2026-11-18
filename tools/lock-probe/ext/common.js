@@ -1,7 +1,4 @@
-// Loaded by the worker and by each probe page. Listens on a BroadcastChannel:
-//   go      - optionally hide Web Locks in this context, run probeMint[fn](), report the ID
-//   hold    - take the client-ID lock and keep it until 'release'
-//   try     - ask for the client-ID lock with ifAvailable and report whether it was granted
+// Runs in the worker and each probe page; takes commands over a BroadcastChannel.
 const ctxName = typeof window === 'undefined'
   ? 'worker'
   : (new URLSearchParams(location.search).get('ctx') || 'page');

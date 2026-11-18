@@ -123,9 +123,8 @@ describe('seedNgGa4ClientId', () => {
         expect(console.warn).toHaveBeenCalled();
     });
 
-    // Concurrent cold start (#51): a worker's seed and a popup booting at the
-    // same moment. Storage here is asynchronous on a real task, as
-    // chrome.storage is, so both callers' reads can land before either write.
+    // Storage resolves on a task, as chrome.storage does, so both reads can
+    // land before either write (#51).
     describe('concurrent cold start', () => {
         let restoreLocks: (() => void) | undefined;
 
@@ -168,10 +167,7 @@ describe('seedNgGa4ClientId', () => {
             expect(locks.maxHeld).toBe(1);
         });
 
-        // The control arm: without Web Locks the fallback is the pre-#51
-        // behaviour, and this mock reproduces the race the lock closes. If this
-        // ever starts passing with one ID, the spec above has stopped proving
-        // anything.
+        // Control: proves the mock reproduces the race the lock prevents.
         it('still works, but can mint twice, where navigator.locks is unavailable', async () => {
             restoreLocks = installLockManager(undefined);
             const store: Record<string, any> = {};

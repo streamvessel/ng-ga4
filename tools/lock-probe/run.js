@@ -1,11 +1,6 @@
 #!/usr/bin/env node
-// Two-context MV3 test for the client-ID Web Lock (issue #51). See README.md.
-//
-//   node run.js [runs-per-arm]      default 200
-//
-// Builds this branch's real seedNgGa4ClientId() and NgGa4Service into a scratch
-// extension, loads it into Chromium, and races client-ID creation between the
-// service worker and extension pages with the lock on and off.
+// Two-context MV3 test for the client-ID lock (#51). See README.md.
+// Usage: node run.js [runs-per-arm]   (default 200)
 'use strict';
 
 const fs = require('fs');
@@ -22,17 +17,13 @@ const EXT = path.join(HERE, 'ext');
 const ROOT = path.resolve(HERE, '../..');
 const RUNS = Number(process.argv[2] || 200);
 
-// Babel and the Angular linker come from the workspace's own install, so they
-// match the Angular version the library builds against. Run `pnpm install` at
-// the repository root first.
+// Babel and the Angular linker come from the root install (`pnpm install`).
 const rootRequire = createRequire(path.join(ROOT, 'package.json'));
 const cliRequire = createRequire(rootRequire.resolve('@angular/compiler-cli/package.json'));
 const babel = cliRequire('@babel/core');
 
-// Angular's published packages carry partial ("ɵɵngDeclare*") declarations that
-// are normally finished at build time by this linker. Without it they would be
-// compiled at runtime with `new Function`, which an MV3 extension page's CSP
-// forbids. This is what the Angular CLI does to node_modules on every build.
+// Links Angular's partial declarations at build time; the runtime JIT needs
+// `new Function`, which an extension page's CSP forbids.
 function angularLinkerPlugin(linkerBabelPlugin) {
     return {
         name: 'angular-linker',
@@ -64,9 +55,6 @@ async function build() {
         format: 'iife',
         target: 'es2022',
         logLevel: 'warning',
-        // ng-ga4 is written with Angular's legacy decorators. They only register
-        // lazy JIT getters here, which are never read: the service is constructed
-        // directly, not through an injector.
         tsconfigRaw: { compilerOptions: { experimentalDecorators: true, useDefineForClassFields: false } },
         plugins: [angularLinkerPlugin(linker.default)]
     };
@@ -74,8 +62,7 @@ async function build() {
     await esbuild.build({ ...common, entryPoints: [path.join(HERE, 'entry-page.ts')], outfile: path.join(EXT, 'page.bundle.js') });
 }
 
-// Each arm names which context runs which caller. 'seed' is
-// seedNgGa4ClientId(); 'service' is NgGa4Service.init() on the extension path.
+// Which caller each context runs: seedNgGa4ClientId() or NgGa4Service.init().
 const ARMS = [
     { name: 'seed (worker) vs seed (page)', callers: { worker: 'seed', page: 'seed' } },
     { name: 'seed (worker) vs service (page)', callers: { worker: 'seed', page: 'service' } },

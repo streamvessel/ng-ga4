@@ -1743,9 +1743,7 @@ export class NgGa4Service implements OnDestroy {
             return this.loadOrCreateClientIdFromLocalStorage();
         }
         try {
-            // Held across the read as well as the write: a second context that
-            // queued behind us re-reads here and finds our ID instead of minting
-            // its own (#51). Fails open where Web Locks are unavailable.
+            // Serialised across extension contexts (#51).
             return await withClientIdLock(() => this.readOrMintChromeClientId());
         } catch (err) {
             console.warn('[ng-ga4] chrome.storage.local failed, falling back to localStorage', err);
@@ -1753,9 +1751,7 @@ export class NgGa4Service implements OnDestroy {
         }
     }
 
-    // Runs inside the client-ID lock; must stay a single get-miss-mint-set with
-    // nothing awaited outside it. Throws on storage failure so the caller's
-    // localStorage fallback applies.
+    // Runs under the client-ID lock. Throws on storage failure.
     private async readOrMintChromeClientId(): Promise<string> {
         const result = await chrome.storage.local.get(['ga_client_id']);
         if (result['ga_client_id']) {
@@ -1769,9 +1765,7 @@ export class NgGa4Service implements OnDestroy {
             // persisted nowhere. enqueueStorageWrite's returned promise keeps
             // the rejection for exactly this reason.
             //
-            // The await is also what keeps the lock held until the write has
-            // landed; release it any earlier and the context queued behind us
-            // reads before our ID is there, and mints its own (#51).
+            // The await also keeps the lock held until the write has landed.
             //
             // Awaiting does not defeat MV3 teardown: it makes our code wait,
             // not Chrome. seedNgGa4ClientId() is the fix that does — see #32.

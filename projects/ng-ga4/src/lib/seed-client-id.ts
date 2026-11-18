@@ -19,12 +19,10 @@ import { withClientIdLock } from './client-id-lock';
  * issue #32. Without a seed, the first context to run has to mint an ID and
  * persist it — and an MV3 service worker can be terminated between those two
  * steps, so the next wake mints a *second* ID and the user is counted twice.
- * Teardown is not preventable from inside the service: awaiting the write makes
+ * That is not preventable from inside the service: awaiting the write makes
  * our code wait, not Chrome. Seeding at install time removes the mint path
- * entirely, so there is nothing left to lose. (Two contexts starting cold at the
- * same moment — worker plus popup — could also both miss and both mint; both
- * this function and the service now serialise that sequence with a Web Lock,
- * see #51, but seeding remains the fix for teardown.)
+ * entirely, so there is nothing left to lose. (Contexts starting together are
+ * handled separately, by the client-ID lock — see #51.)
  *
  * Deliberately standalone — no Angular imports — so it can be called at worker
  * top level, before any injector exists.
@@ -51,10 +49,7 @@ export async function seedNgGa4ClientId(): Promise<string | null> {
             console.warn('[ng-ga4] seedNgGa4ClientId: chrome.storage.local is unavailable.');
             return null;
         }
-        // Same lock as the service's own mint path, so this seed and a service
-        // booting cold in a popup at the same moment cannot both miss and both
-        // mint (#51). The re-read happens inside the lock; where Web Locks are
-        // unavailable this runs unlocked, as before.
+        // Same lock as the service's mint path (#51).
         return await withClientIdLock(async () => {
             const result = await chrome.storage.local.get(['ga_client_id']);
             const existing = result['ga_client_id'];

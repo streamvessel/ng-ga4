@@ -1,17 +1,9 @@
-/**
- * Test double for `navigator.locks`. Specs only — nothing in the public API
- * imports it, so it never reaches the published bundle.
- *
- * Exclusive, FIFO per name, like the real LockManager, but grants on a
- * microtask. A real grant arrives on a task, which a spec that drains only
- * microtasks under jasmine.clock() can never reach.
- */
+// Test double for navigator.locks: exclusive and FIFO per name like the real
+// one, but grants on a microtask so specs that only drain microtasks under
+// jasmine.clock() still progress.
 export class FakeLockManager {
-    /** Lock names requested, in request order. */
     readonly requested: string[] = [];
-    /** Callbacks currently running under a lock, across all names. */
     held = 0;
-    /** The most callbacks ever running under one name at once. 1 means serialised. */
     maxHeld = 0;
 
     private readonly tails = new Map<string, Promise<void>>();
@@ -31,21 +23,19 @@ export class FakeLockManager {
         this.tails.set(name, previous.then(() => mine));
 
         return new Promise<T>((resolve, reject) => {
+            const aborted = () => new DOMException('The lock request was aborted.', 'AbortError');
             if (signal?.aborted) {
                 release();
-                reject(new DOMException('The lock request was aborted.', 'AbortError'));
+                reject(aborted());
                 return;
             }
             let granted = false;
-            // Aborting after the grant has no effect, per the Web Locks spec.
             signal?.addEventListener('abort', () => {
-                if (granted) {
-                    return;
+                if (!granted) {
+                    reject(aborted());
                 }
-                reject(new DOMException('The lock request was aborted.', 'AbortError'));
             });
             previous.then(async () => {
-                // Aborted while queued: never granted, matching the spec.
                 if (signal?.aborted) {
                     release();
                     return;
@@ -66,13 +56,8 @@ export class FakeLockManager {
     }
 }
 
-/**
- * Replace `navigator.locks` for the current spec. `undefined` simulates a
- * browser without Web Locks. Returns the restore function.
- *
- * Shadowed with an own property rather than reassigned: the real one is a
- * getter on Navigator.prototype, so deleting the own property restores it.
- */
+// Shadows navigator.locks for one spec; `undefined` simulates no Web Locks.
+// Returns a restore function.
 export function installLockManager(locks: unknown): () => void {
     Object.defineProperty(navigator, 'locks', { value: locks, configurable: true });
     return () => { delete (navigator as unknown as { locks?: unknown }).locks; };
