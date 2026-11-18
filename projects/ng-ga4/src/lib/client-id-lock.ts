@@ -24,6 +24,12 @@ export const CLIENT_ID_LOCK_NAME = 'ng-ga4:client-id';
  * milliseconds, so this only matters when something is already broken — and
  * then failing open to the pre-lock behaviour is the right trade: the worst
  * case is the duplicate identity this lock exists to prevent, not a hang.
+ *
+ * Concretely, a waiter that times out reads and writes without the lock. If the
+ * stuck holder's write lands after that read, the waiter mints a second ID and
+ * its write can replace the holder's in storage while the holder keeps its own
+ * in memory — the same split as before this lock existed, now confined to a
+ * holder that has already stalled for this long.
  */
 export const CLIENT_ID_LOCK_TIMEOUT_MS = 3000;
 
