@@ -9,20 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `device.model` and `device.brand`, which GA4 previously always reported as
-  `(not set)`. Model is requested from Client Hints (`getHighEntropyValues`, in
-  the same call as the other device hints) and otherwise read from the user
-  agent. Android models are sent as the raw token (`SM-S918B`); no
-  marketing-name mapping until GA4's expectation is checked against a real
-  property. Brand is only sent where the user agent is unambiguous: `Apple` for
-  iPhone, iPad and iPod. Chrome's reduced-UA placeholder model `K` is never
-  reported ([#36](https://github.com/streamvessel/ng-ga4/issues/36)).
-- Every hit also carries the browser's user-agent string as `user_agent`.
-  Google documents that GA4 ignores it whenever `device` is present, and the
-  library always sends `device`, so today it changes nothing in reports. It is
-  sent so a hit without `device` still has device data, and in case GA4's
-  precedence differs in practice; that is being checked in
-  [#89](https://github.com/streamvessel/ng-ga4/issues/89).
+- `device.model` and `device.brand`, previously always `(not set)`. Model comes
+  from Client Hints or the user agent, and Android models are sent as the raw
+  token (`SM-S918B`). Brand is sent only for Apple devices. Chrome's reduced-UA
+  placeholder `K` is never reported
+  ([#36](https://github.com/streamvessel/ng-ga4/issues/36)).
+- Every request carries the user-agent string as `user_agent`. GA4 documents it
+  as ignored when `device` is present, which is every hit, so reports are
+  unchanged ([#89](https://github.com/streamvessel/ng-ga4/issues/89)).
 - `setUserData()` sends opt-in, SHA-256-hashed email, phone and address as
   `user_data` for Google Ads enhanced conversions, only while `adUserData` is
   granted. Cleared on sign-out or a user ID switch, and when a granted `adUserData`
@@ -171,14 +165,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page view is sent one microtask after `NavigationEnd`, so it picks up the title
   the router's `TitleStrategy` sets for the new route rather than the previous one.
 - Chromium on an Android tablet reported `device.category` as `desktop`, while
-  Firefox on the same tablet reported `tablet`. The Client Hints path derived
-  category from `userAgentData.mobile` alone. Chrome drops that bit on Android
-  at a 600dp smallest screen width, by the same rule that drops the `Mobile`
-  token the user-agent parser reads as tablet, so Android with `mobile` false
-  is now reported as `tablet`. `formFactors` is requested in the same
-  `getHighEntropyValues` call, for an explicit `Tablet` and to keep Android XR
-  headsets out. Stock Chrome reports `["Desktop"]` for tablets, so it cannot
-  be used on its own. No touch-point guessing on this path
+  Firefox reported `tablet`. Android with `userAgentData.mobile` false is now
+  `tablet`, as the user-agent parser already said
   ([#37](https://github.com/streamvessel/ng-ga4/issues/37)).
 
 ## [0.2.2] - 2026-10-27

@@ -7,7 +7,7 @@ import { NG_GA4_CONFIG, NgGa4Config, NgGa4CookieOptions } from './ng-ga4.config'
 import { ConsentState, Ga4ConsentPayload, NgGa4Consent } from './consent';
 import { regionFromCountry } from './country-region';
 import { countryFromTimeZone } from './tz-country';
-import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
+import { deviceCategory, deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
 import { Ga4UserDataPayload, hashUserData, NgGa4UserData } from './user-data';
 import { EnhancedMeasurement } from './enhanced-measurement';
@@ -47,16 +47,12 @@ function deferred(): { promise: Promise<NgGa4Delivery>; settle: Settle } {
     return { promise, settle };
 }
 
-interface Ga4Device {
+// Defensive cap, not a Google limit.
+const MAX_USER_AGENT_LENGTH = 512;
+
+interface Ga4Device extends UaDeviceInfo {
     language?: string;
     screen_resolution?: string;
-    category?: string;
-    operating_system?: string;
-    operating_system_version?: string;
-    browser?: string;
-    browser_version?: string;
-    model?: string;
-    brand?: string;
 }
 
 interface Ga4UserLocation {
@@ -84,7 +80,6 @@ interface Ga4RequestBody {
     user_id?: string;
     events: Array<Ga4Event & { timestamp_micros: number }>;
     device?: Ga4Device;
-    user_agent?: string;
     user_location?: Ga4UserLocation;
     consent?: Ga4ConsentPayload;
     user_data?: Ga4UserDataPayload;
@@ -115,9 +110,6 @@ export class NgGa4Service implements OnDestroy {
     // init() must not overwrite it with a value it loads afterwards.
     private userIdSetByApp = false;
     private device: Ga4Device | null = null;
-    // Sent as the request-level `user_agent` on every hit. Per Google's MP reference,
-    // GA4 ignores it whenever `device` is present — which in a browser is effectively
-    // always — so today it is inert. See collectUserAgent() and #89.
     private userAgent: string | null = null;
     private userLocation: Ga4UserLocation | null = null;
     // Calls made while init() runs. `drop` settles the caller's `delivered`
@@ -802,17 +794,11 @@ export class NgGa4Service implements OnDestroy {
         if (this.userId) {
             body.user_id = this.userId;
         }
-        // `device`, `user_agent` and `user_location` are request-level fields (siblings
-        // of `client_id`/`events`), not per-event params. /mp/collect never reads the
-        // User-Agent *header*, so device data has to be in the body. We send both forms:
-        // `device` is what GA4 uses — its reference says `user_agent` "is ignored if the
-        // request also includes `device`" — and `user_agent` only takes effect on a hit
-        // without `device`. Whether that precedence holds in practice is #89.
+        // `device` and `user_location` are request-level fields (siblings of
+        // `client_id`/`events`), not per-event params. /mp/collect does not infer
+        // device/geo from the request, so we supply them explicitly.
         if (this.device) {
             body.device = this.device;
-        }
-        if (this.userAgent) {
-            body.user_agent = this.userAgent;
         }
         if (this.userLocation) {
             body.user_location = this.userLocation;
@@ -939,9 +925,16 @@ export class NgGa4Service implements OnDestroy {
         }
 
         const url = this.collectUrl(this.GA4_ENDPOINT);
-        // Request-level, the earliest in the request. Each event's own takes
-        // precedence, so a batch spanning time keeps each event's real time.
-        const body = { ...queued, timestamp_micros: Math.min(...queued.events.map(event => event.timestamp_micros)) };
+        // Added at send time, not kept in the batch envelope or the outbox:
+        // - timestamp_micros: the earliest in the request. Each event's own takes
+        //   precedence, so a batch spanning time keeps each event's real time.
+        // - user_agent: the same for every request. GA4 documents it as ignored
+        //   when `device` is present (#89).
+        const body = {
+            ...queued,
+            ...(this.userAgent ? { user_agent: this.userAgent } : {}),
+            timestamp_micros: Math.min(...queued.events.map(event => event.timestamp_micros))
+        };
 
         // The validation endpoint records nothing — "events sent to the validation
         // server don't show up in reports" — so it can only ever be a side channel.
@@ -1372,14 +1365,8 @@ export class NgGa4Service implements OnDestroy {
     // --- Device & location context (request-level GA4 fields) ---
 
     private async collectContext(): Promise<void> {
-        // Its own block, first: if device collection fails, user_agent is the one
-        // device signal GA4 would still use, so it must not share that failure.
-        try {
-            this.userAgent = this.collectUserAgent();
-        } catch (err) {
-            console.warn('[ng-ga4] user_agent collection failed', err);
-            this.userAgent = null;
-        }
+        // First: collectDevice() parses it.
+        this.userAgent = this.getUserAgentString()?.trim().slice(0, MAX_USER_AGENT_LENGTH) || null;
         try {
             this.userLocation = this.collectUserLocation();
         } catch (err) {
@@ -1392,19 +1379,6 @@ export class NgGa4Service implements OnDestroy {
             console.warn('[ng-ga4] device collection failed', err);
             this.device = null;
         }
-    }
-
-    // A defensive cap, not a documented Google limit: real UAs, including verbose in-app
-    // browsers, stay well under it, and anything longer is not a UA worth parsing.
-    private readonly MAX_USER_AGENT_LENGTH = 512;
-
-    private collectUserAgent(): string | null {
-        const ua = this.getUserAgentString();
-        if (typeof ua !== 'string') {
-            return null;
-        }
-        const trimmed = ua.trim();
-        return trimmed ? trimmed.slice(0, this.MAX_USER_AGENT_LENGTH) : null;
     }
 
     private collectUserLocation(): Ga4UserLocation | null {
@@ -1442,17 +1416,16 @@ export class NgGa4Service implements OnDestroy {
                     device.browser = browser.brand;
                     device.browser_version = browser.version;
                 }
-                // Chromium reports "" for model on desktops; only a real value is kept.
-                // No brand: Client Hints do not expose the maker, and inferring it from
-                // the model token would be a guess (see ua-device.ts).
-                if (typeof high.model === 'string' && high.model.trim()) {
-                    device.model = high.model.trim();
+                // "" on desktops. No brand: Client Hints don't name the maker.
+                const model = typeof high.model === 'string' ? high.model.trim() : '';
+                if (model) {
+                    device.model = model;
                 }
             } catch {
                 // High-entropy hints unavailable (blocked, or a permissions policy denies
                 // them) — the UA-string fallback below fills what we did not get.
             }
-            device.category = this.categoryFromClientHints(uaData, formFactors);
+            device.category = deviceCategory(!!uaData.mobile, uaData.platform, Array.isArray(formFactors) ? formFactors : []);
         }
 
         // Client Hints are authoritative where present; the UA string only fills gaps.
@@ -1464,42 +1437,15 @@ export class NgGa4Service implements OnDestroy {
     }
 
     private fillDeviceGapsFromUserAgent(device: Ga4Device): void {
-        const ua = this.getUserAgentString();
-        if (!ua) {
+        if (!this.userAgent) {
             return;
         }
-        const parsed = deviceFromUserAgent(ua, navigator.maxTouchPoints ?? 0);
+        const parsed = deviceFromUserAgent(this.userAgent, navigator.maxTouchPoints ?? 0);
         for (const key of Object.keys(parsed) as Array<keyof UaDeviceInfo>) {
             if (device[key] === undefined && parsed[key] !== undefined) {
                 device[key] = parsed[key];
             }
         }
-    }
-
-    // `mobile` alone can only say mobile or desktop, and `formFactors` does not fill the
-    // gap: stock Chrome derives it from the same bit, so an Android tablet reports
-    // ["Desktop"]. What Chrome does state is the rule behind the bit: on Android,
-    // `mobile` is dropped when the smallest screen width is 600dp or more — the same
-    // decision that drops the "Mobile" token from the UA string, which ua-device.ts
-    // reads as tablet. So Android + !mobile is the browser's own tablet signal, not a
-    // touch-point guess, and both paths now agree. Both inputs are low-entropy, so this
-    // holds on Chromium without formFactors and when high-entropy hints are withheld.
-    //
-    // formFactors only refines the edges: "Tablet" is reported for ChromeOS's "Request
-    // tablet site" (and by any browser that follows the spec more closely), and "XR"
-    // marks Android XR headsets, which also run Android with `mobile` false.
-    private categoryFromClientHints(uaData: { mobile?: boolean; platform?: string }, formFactors: unknown): string {
-        const factors = Array.isArray(formFactors) ? formFactors : [];
-        if (factors.includes('Tablet')) {
-            return 'tablet';
-        }
-        if (uaData.mobile) {
-            return 'mobile';
-        }
-        if (uaData.platform === 'Android' && !factors.includes('XR')) {
-            return 'tablet';
-        }
-        return 'desktop';
     }
 
     private pickBrowser(list: Array<{ brand: string; version: string }> | undefined): { brand: string; version: string } | null {

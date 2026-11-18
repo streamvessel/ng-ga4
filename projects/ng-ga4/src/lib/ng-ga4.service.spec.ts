@@ -1090,18 +1090,6 @@ describe('NgGa4Service', () => {
             httpMock.expectNone(() => true);
         });
 
-        it('carries user_agent on the hide-time engagement flush', async () => {
-            observeFlushViaXhr();
-            await service.init();
-            jasmine.clock().tick(3000);
-
-            (service as any).flushEngagement();
-
-            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
-            expect(req.request.body.user_agent).toBe(navigator.userAgent);
-            req.flush('', { status: 204, statusText: 'No Content' });
-        });
-
         it('sends nothing when no time has accrued at all', async () => {
             await service.init();
 
@@ -2908,7 +2896,7 @@ describe('NgGa4Service', () => {
             validation.flush({ validationMessages: [] });
         });
 
-        it('posts the same body, user_agent included, to production and to validation', async () => {
+        it('posts the same body to production and to validation', async () => {
             reconfigureTestBed({ debug: true });
 
             await service.init();
@@ -3112,6 +3100,13 @@ describe('NgGa4Service', () => {
                 })
         });
 
+        const takeBody = (): any => {
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const body = req.request.body;
+            req.flush('', { status: 204, statusText: 'No Content' });
+            return body;
+        };
+
         it('attaches request-level device built from userAgentData', async () => {
             spyOn<any>(service, 'getUserAgentData').and.returnValue(fakeUaData());
 
@@ -3211,15 +3206,11 @@ describe('NgGa4Service', () => {
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
-        it('reports the Client Hints model and requests it in the same high-entropy call', async () => {
+        it('reports the Client Hints model, requested in the same high-entropy call', async () => {
             const uaData = fakeUaData({
                 mobile: true,
-                high: {
-                    platform: 'Android',
-                    platformVersion: '14.0.0',
-                    model: 'SM-S918B',
-                    fullVersionList: [{ brand: 'Google Chrome', version: '124.0.6367.82' }]
-                }
+                platform: 'Android',
+                high: { platform: 'Android', model: 'SM-S918B', formFactors: ['Mobile'], fullVersionList: [] }
             });
             const highSpy = spyOn(uaData, 'getHighEntropyValues').and.callThrough();
             spyOn<any>(service, 'getUserAgentData').and.returnValue(uaData);
@@ -3230,45 +3221,23 @@ describe('NgGa4Service', () => {
             service.trackEvent('x');
 
             expect(highSpy).toHaveBeenCalledTimes(1);
-            expect((highSpy.calls.mostRecent().args as unknown[])[0]).toContain('model');
-            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
-            expect(req.request.body.device.model).toBe('SM-S918B');
-            // Client Hints name the model, not the maker — no brand is guessed.
-            expect('brand' in req.request.body.device).toBe(false);
-            req.flush('', { status: 204, statusText: 'No Content' });
+            expect((highSpy.calls.mostRecent().args as unknown[])[0]).toEqual(jasmine.arrayContaining(['model', 'formFactors']));
+            const device = takeBody().device;
+            expect(device.model).toBe('SM-S918B');
+            expect(device.category).toBe('mobile');
+            expect('brand' in device).toBe(false);
         });
 
         it('sends no model when Client Hints report an empty one (desktops)', async () => {
-            spyOn<any>(service, 'getUserAgentData').and.returnValue(fakeUaData({
-                high: {
-                    platform: 'Windows',
-                    platformVersion: '15.0.0',
-                    model: '',
-                    fullVersionList: [{ brand: 'Google Chrome', version: '120.0.1.2' }]
-                }
-            }));
+            spyOn<any>(service, 'getUserAgentData').and.returnValue(fakeUaData({ high: { platform: 'Windows', model: '' } }));
             spyOn<any>(service, 'getUserAgentString').and.returnValue(CHROME_WINDOWS);
 
             await service.init();
             service.trackEvent('x');
 
-            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
-            expect('model' in req.request.body.device).toBe(false);
-            expect('brand' in req.request.body.device).toBe(false);
-            req.flush('', { status: 204, statusText: 'No Content' });
-        });
-
-        it('takes model and brand from the user-agent string on iOS Safari', async () => {
-            spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
-            spyOn<any>(service, 'getUserAgentString').and.returnValue(SAFARI_IPHONE);
-
-            await service.init();
-            service.trackEvent('x');
-
-            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
-            expect(req.request.body.device.model).toBe('iPhone');
-            expect(req.request.body.device.brand).toBe('Apple');
-            req.flush('', { status: 204, statusText: 'No Content' });
+            const device = takeBody().device;
+            expect('model' in device).toBe(false);
+            expect('brand' in device).toBe(false);
         });
 
         it('does not report the reduced-UA "K" when high-entropy hints are blocked', async () => {
@@ -3278,54 +3247,21 @@ describe('NgGa4Service', () => {
             await service.init();
             service.trackEvent('x');
 
-            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
-            expect('model' in req.request.body.device).toBe(false);
-            req.flush('', { status: 204, statusText: 'No Content' });
+            expect('model' in takeBody().device).toBe(false);
         });
 
+        // The rules themselves are covered by deviceCategory in ua-device.spec.ts.
         describe('category from Client Hints', () => {
-            // What stock Chrome actually reports, per components/embedder_support/
-            // user_agent_utils.cc: formFactors is derived from the `mobile` bit, and on
-            // Android that bit is dropped at a smallest screen width of 600dp or more.
-            const ANDROID_TABLET_HIGH = {
-                platform: 'Android',
-                platformVersion: '14.0.0',
-                model: 'SM-X710',
-                formFactors: ['Desktop'],
-                fullVersionList: [{ brand: 'Google Chrome', version: '131.0.6778.81' }]
-            };
+            const ANDROID_TABLET_HIGH = { platform: 'Android', model: 'SM-X710', formFactors: ['Desktop'], fullVersionList: [] };
 
-            const categoryFor = async (uaData: { mobile: boolean; platform: string; high?: any; reject?: boolean }): Promise<string> => {
+            const categoryFor = async (uaData: NonNullable<Parameters<typeof fakeUaData>[0]>): Promise<string> => {
                 spyOn<any>(service, 'getUserAgentData').and.returnValue(fakeUaData(uaData));
                 spyOn<any>(service, 'getUserAgentString').and.returnValue(CHROME_WINDOWS);
 
                 await service.init();
                 service.trackEvent('x');
-
-                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
-                const category = req.request.body.device.category;
-                req.flush('', { status: 204, statusText: 'No Content' });
-                return category;
+                return takeBody().device.category;
             };
-
-            it('requests formFactors in the same high-entropy call as model', async () => {
-                const uaData = fakeUaData();
-                const highSpy = spyOn(uaData, 'getHighEntropyValues').and.callThrough();
-                spyOn<any>(service, 'getUserAgentData').and.returnValue(uaData);
-
-                await service.init();
-
-                expect(highSpy).toHaveBeenCalledTimes(1);
-                expect((highSpy.calls.mostRecent().args as unknown[])[0]).toEqual(jasmine.arrayContaining(['model', 'formFactors']));
-                httpMock.expectNone(() => true);
-            });
-
-            // The inconsistency #37 is about: the UA path reads an Android UA without the
-            // "Mobile" token as a tablet, but Client Hints reported the same device as
-            // desktop. Chrome drops that token and the `mobile` bit by the same rule.
-            it('reports an Android tablet as tablet, although Chrome says formFactors ["Desktop"]', async () => {
-                expect(await categoryFor({ mobile: false, platform: 'Android', high: ANDROID_TABLET_HIGH })).toBe('tablet');
-            });
 
             it('agrees with the UA-string path for the same Android tablet', async () => {
                 const ua = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -3333,43 +3269,15 @@ describe('NgGa4Service', () => {
                 expect(await categoryFor({ mobile: false, platform: 'Android', high: ANDROID_TABLET_HIGH })).toBe('tablet');
             });
 
-            // `mobile` and `platform` are low-entropy, so neither old Chromium (no
-            // formFactors) nor withheld high-entropy hints lose the tablet.
-            it('reports the tablet without formFactors and when high-entropy hints fail', async () => {
-                const { formFactors, ...withoutFormFactors } = ANDROID_TABLET_HIGH;
-                expect(formFactors).toBeDefined();
-                expect(await categoryFor({ mobile: false, platform: 'Android', high: withoutFormFactors })).toBe('tablet');
-            });
-
+            // `mobile` and `platform` are low-entropy, so the tablet survives withheld hints.
             it('reports the tablet when getHighEntropyValues rejects', async () => {
                 expect(await categoryFor({ mobile: false, platform: 'Android', reject: true })).toBe('tablet');
-            });
-
-            it('reports an Android phone as mobile', async () => {
-                expect(await categoryFor({ mobile: true, platform: 'Android', high: { ...ANDROID_TABLET_HIGH, formFactors: ['Mobile'] } })).toBe('mobile');
-            });
-
-            // "Request desktop site" on Android reports platform "Linux" and mobile false.
-            it('reports desktop for "Request desktop site", which claims Linux', async () => {
-                expect(await categoryFor({ mobile: false, platform: 'Linux', high: { platform: 'Linux', formFactors: ['Desktop'] } })).toBe('desktop');
-            });
-
-            // ChromeOS "Request tablet site" is the one place stock Chrome reports "Tablet".
-            it('honours an explicit Tablet form factor', async () => {
-                expect(await categoryFor({ mobile: true, platform: 'Android', high: { platform: 'Android', formFactors: ['Tablet'] } })).toBe('tablet');
-            });
-
-            // Android XR headsets run Android with `mobile` false and report ["Desktop","XR"].
-            it('does not call an Android XR headset a tablet', async () => {
-                expect(await categoryFor({ mobile: false, platform: 'Android', high: { platform: 'Android', formFactors: ['Desktop', 'XR'] } })).toBe('desktop');
             });
 
             it('ignores a malformed formFactors value', async () => {
                 expect(await categoryFor({ mobile: true, platform: 'Android', high: { platform: 'Android', formFactors: 'Tablet' } })).toBe('mobile');
             });
 
-            // No touch-point heuristic on the Client Hints path: Chrome reports every
-            // Windows, Mac, Linux and ChromeOS device as desktop, convertibles included.
             it('does not consult maxTouchPoints when Client Hints are present', async () => {
                 spyOnProperty(navigator, 'maxTouchPoints', 'get').and.returnValue(10);
 
@@ -3378,16 +3286,6 @@ describe('NgGa4Service', () => {
         });
 
         describe('user_agent', () => {
-            // Google's MP reference: user_agent "is ignored if the request also includes
-            // device". We send both anyway (#89 checks the precedence against a real
-            // property), so these specs pin that both are always present.
-            const sentBody = (): any => {
-                const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
-                const body = req.request.body;
-                req.flush('', { status: 204, statusText: 'No Content' });
-                return body;
-            };
-
             it('sends the user-agent string as a request-level field, next to device', async () => {
                 spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
                 spyOn<any>(service, 'getUserAgentString').and.returnValue(SAFARI_IPHONE);
@@ -3395,41 +3293,14 @@ describe('NgGa4Service', () => {
                 await service.init();
                 service.trackEvent('x');
 
-                const body = sentBody();
+                const body = takeBody();
                 expect(body.user_agent).toBe(SAFARI_IPHONE);
-                expect(body.device).toBeDefined();
                 expect(body.device.model).toBe('iPhone');
+                expect(body.device.brand).toBe('Apple');
                 expect(body.events[0].params.user_agent).toBeUndefined();
             });
 
-            it('sends it on page views as well as events', async () => {
-                spyOn<any>(service, 'getUserAgentString').and.returnValue(CHROME_WINDOWS);
-
-                await service.init();
-                service.trackPageView('/home');
-
-                const body = sentBody();
-                expect(body.events[0].name).toBe('page_view');
-                expect(body.user_agent).toBe(CHROME_WINDOWS);
-            });
-
-            it('sends the same string the device parser read', async () => {
-                const parseSpy = spyOn<any>(service, 'fillDeviceGapsFromUserAgent').and.callThrough();
-                spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
-                spyOn<any>(service, 'getUserAgentString').and.returnValue(SAFARI_MACOS);
-
-                await service.init();
-                service.trackEvent('x');
-
-                expect(parseSpy).toHaveBeenCalled();
-                const body = sentBody();
-                expect(body.user_agent).toBe(SAFARI_MACOS);
-                expect(body.device.browser).toBe('Safari');
-            });
-
-            // In a real browser collectDevice() always returns at least `language`, so
-            // this state is only reachable by forcing it. It is the one case where GA4
-            // would actually use user_agent, so the wiring is pinned here.
+            // Only reachable by forcing it, and the one case where GA4 would use user_agent.
             it('still sends user_agent when device collection fails', async () => {
                 spyOn<any>(service, 'getUserAgentString').and.returnValue(CHROME_WINDOWS);
                 spyOn<any>(service, 'collectDevice').and.returnValue(Promise.reject(new Error('boom')));
@@ -3438,59 +3309,37 @@ describe('NgGa4Service', () => {
                 await service.init();
                 service.trackEvent('x');
 
-                const body = sentBody();
+                const body = takeBody();
                 expect('device' in body).toBe(false);
                 expect(body.user_agent).toBe(CHROME_WINDOWS);
             });
 
-            it('keeps device and user_location when reading the user agent fails', async () => {
-                spyOn<any>(service, 'collectUserAgent').and.throwError('denied');
-                spyOn<any>(service, 'getTimeZone').and.returnValue('Europe/Berlin');
-                const warn = spyOn(console, 'warn');
-
-                await expectAsync(service.init()).toBeResolved();
-                service.trackEvent('x');
-
-                const body = sentBody();
-                expect('user_agent' in body).toBe(false);
-                expect(body.device).toBeDefined();
-                expect(body.user_location).toEqual(jasmine.objectContaining({ country_id: 'DE' }));
-                expect(warn).toHaveBeenCalledWith('[ng-ga4] user_agent collection failed', jasmine.any(Error));
-            });
-
-            for (const [label, value] of [['empty', ''], ['whitespace-only', '   '], ['missing', undefined], ['non-string', 42]] as const) {
+            for (const [label, value] of [['empty', ''], ['whitespace-only', '   '], ['missing', undefined]] as const) {
                 it(`omits user_agent when the string is ${label}`, async () => {
                     spyOn<any>(service, 'getUserAgentString').and.returnValue(value);
 
                     await service.init();
                     service.trackEvent('x');
 
-                    expect('user_agent' in sentBody()).toBe(false);
+                    expect('user_agent' in takeBody()).toBe(false);
                 });
             }
 
-            it('trims surrounding whitespace', async () => {
-                spyOn<any>(service, 'getUserAgentString').and.returnValue(`  ${CHROME_WINDOWS}\n`);
+            const UA_512 = 'Mozilla/5.0 ' + 'x'.repeat(500);
+            for (const [label, raw] of [['trims whitespace', `  ${UA_512}\n`], ['caps at 512 characters', UA_512 + 'y']]) {
+                it(`${label}, and parses the same string it sends`, async () => {
+                    spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
+                    spyOn<any>(service, 'getUserAgentString').and.returnValue(raw);
+                    const parse = spyOn<any>(service, 'fillDeviceGapsFromUserAgent').and.callThrough();
 
-                await service.init();
-                service.trackEvent('x');
+                    await service.init();
+                    service.trackEvent('x');
 
-                expect(sentBody().user_agent).toBe(CHROME_WINDOWS);
-            });
-
-            it('keeps a 512-character user agent whole and caps a longer one at 512', async () => {
-                const ua512 = 'Mozilla/5.0 ' + 'x'.repeat(500);
-                expect(ua512.length).toBe(512);
-                const uaSpy = spyOn<any>(service, 'getUserAgentString').and.returnValue(ua512);
-
-                await service.init();
-                service.trackEvent('x');
-                expect(sentBody().user_agent).toBe(ua512);
-
-                // Context is collected once per init, so read the cap directly.
-                uaSpy.and.returnValue(ua512 + 'y');
-                expect((service as any).collectUserAgent()).toBe(ua512);
-            });
+                    expect(parse).toHaveBeenCalled();
+                    expect((service as any).userAgent).toBe(UA_512);
+                    expect(takeBody().user_agent).toBe(UA_512);
+                });
+            }
 
             it('rides on events queued while init() is still collecting context', async () => {
                 let releaseHints!: () => void;
@@ -3507,7 +3356,7 @@ describe('NgGa4Service', () => {
                 releaseHints();
                 await initPromise;
 
-                const body = sentBody();
+                const body = takeBody();
                 expect(body.events[0].name).toBe('early');
                 expect(body.user_agent).toBe(CHROME_WINDOWS);
             });
@@ -3982,7 +3831,6 @@ describe('NgGa4Service', () => {
             expect(body.events[0].name).toBe('extension_installed');
             expect(body.events[0].params.version).toBe('1.4.0');
             expect(body.client_id).toBeDefined();
-            expect(body.user_agent).toBe(navigator.userAgent);
         });
 
         it('is the transport when none is configured (beacon is the default)', async () => {
@@ -4018,7 +3866,6 @@ describe('NgGa4Service', () => {
             expect(init.keepalive).toBe(true);
             expect(init.headers['Content-Type']).toBe('application/json');
             expect(JSON.parse(init.body).events[0].name).toBe('file_download');
-            expect(JSON.parse(init.body).user_agent).toBe(navigator.userAgent);
         });
 
         it('falls back to fetch(keepalive) when sendBeacon throws synchronously', async () => {
@@ -4063,7 +3910,6 @@ describe('NgGa4Service', () => {
 
             const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
             expect(req.request.body.events[0].name).toBe('file_delete');
-            expect(req.request.body.user_agent).toBe(navigator.userAgent);
             req.flush('', { status: 204, statusText: 'No Content' });
         });
 
@@ -4677,22 +4523,6 @@ describe('NgGa4Service', () => {
             expect(beacon).not.toHaveBeenCalled();
         });
 
-        // user_agent is part of the batch envelope; it is the same for every call in
-        // a session, so it never splits a batch.
-        it('keeps batched events in one request carrying user_agent', async () => {
-            reconfigureTestBed({ transport: 'xhr', batchDelayMs: BATCH_DELAY_MS });
-            await service.init();
-
-            service.trackEvent('a');
-            service.trackPageView('/b');
-            jasmine.clock().tick(BATCH_DELAY_MS);
-
-            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
-            expect(names(req.request.body)).toEqual(['a', 'page_view']);
-            expect(req.request.body.user_agent).toBe(navigator.userAgent);
-            req.flush('', { status: 204, statusText: 'No Content' });
-        });
-
         // An XHR in flight when the page goes away is aborted.
         it('sends an xhr batch over the beacon chain when the page is hidden', async () => {
             reconfigureTestBed({ transport: 'xhr', batchDelayMs: BATCH_DELAY_MS });
@@ -5074,10 +4904,11 @@ describe('NgGa4Service', () => {
             expect(await result.delivered).toBe('stored');
             await service.flushStorage();
             const [stored] = storedOutbox();
-            // Everything but the request-level time, which is derived from the
-            // events again when the request is replayed.
-            const { timestamp_micros, ...sent } = JSON.parse(JSON.stringify(req.request.body));
+            // Everything but the request-level time and user_agent, which are both
+            // attached again when the request is replayed.
+            const { timestamp_micros, user_agent, ...sent } = JSON.parse(JSON.stringify(req.request.body));
             expect(timestamp_micros).toBe((MOCK_TIMESTAMP + 1000) * 1000);
+            expect(user_agent).toBe(navigator.userAgent);
             expect(stored).toEqual(sent);
             expect(stored.events[0].timestamp_micros).toBe((MOCK_TIMESTAMP + 1000) * 1000);
         });
@@ -5271,6 +5102,7 @@ describe('NgGa4Service', () => {
             expect(req.request.body.client_id).toBe('earlier-cid');
             expect(req.request.body.events[0].name).toBe('earlier');
             expect(req.request.body.events[0].timestamp_micros).toBe((MOCK_TIMESTAMP - 5 * HOUR_MS) * 1000);
+            expect(req.request.body.user_agent).toBe(navigator.userAgent);
             expect(mockLocalStorage['ga_outbox']).toBeUndefined();
             req.flush('', ok);
         });

@@ -156,11 +156,8 @@ built-in user-agent parser elsewhere. It also sends the raw string as `user_agen
 | What | Status | Basis |
 |---|---|---|
 | `device` (category, OS, browser, model, language, screen resolution) | Sent on every hit and used by GA4 | Documented |
-| `user_agent` | Sent on every hit, but **ignored**: Google says GA4 ignores it whenever `device` is present, and in a browser `device` is always present | Documented |
-| Device brand for Android, marketing name ("Galaxy S23 Ultra") | Not sent. Whether GA4 derives them from the raw model is untested | Not yet measured ([#89](https://github.com/streamvessel/ng-ga4/issues/89)) |
-
-The documented behaviour, and what GA4 actually derives from each field, are checked
-against a real property in [#89](https://github.com/streamvessel/ng-ga4/issues/89).
+| `user_agent` | Sent on every hit, but **ignored**: GA4 ignores it when `device` is present | Documented |
+| Device brand for Android, marketing name ("Galaxy S23 Ultra") | Not sent; Android models go out as the raw token (`SM-S918B`). Whether GA4 derives them is untested | Not yet measured ([#89](https://github.com/streamvessel/ng-ga4/issues/89)) |
 
 ## Not yet built
 
