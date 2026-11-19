@@ -64,8 +64,8 @@ importers:
         specifier: ^0.3.7
         version: 0.3.7
       '@types/jasmine':
-        specifier: ~6.0.0
-        version: 6.0.0
+        specifier: ~7.0.0
+        version: 7.0.0
       '@types/node':
         specifier: ^26.6.6
         version: 26.6.6
@@ -2172,8 +2172,8 @@ packages:
   '@types/http-proxy@1.17.17':
     resolution: {integrity: sha512-ED6LB+Z1AVylNTu7hdzuBqOgMnvG/ld6wGCG8wFnAzKX5uyW2K3WD52v0gnLCTK/VLpXtKckgWuyScYK6cSPaw==}
 
-  '@types/jasmine@6.0.0':
-    resolution: {integrity: sha512-18lgGsLmEh3VJk9eZ5wAjTISxdqzl6YOwu8UdMpolajN57QOCNbl+AbHUd+Yu9ItrsFdB+c8LSZSGNg8nHaguw==}
+  '@types/jasmine@7.0.0':
+    resolution: {integrity: sha512-6yNx9BsBSKiXO2yqLXs/GZDuD58Gkn6Ty26254FFOuw6B4XU5Xq8mAR0xFy8zHgAhqQd++y41fSJ8BdwrWXhqQ==}
 
   '@types/json-schema@7.0.15':
     resolution: {integrity: sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==}
@@ -5295,7 +5295,7 @@ snapshots:
       watchpack: 2.4.1
       webpack: 5.94.0(esbuild@0.23.0)(postcss@8.4.41)
       webpack-dev-middleware: 7.4.2(tslib@2.6.3)(webpack@5.94.0(esbuild@0.23.0)(postcss@8.4.41))
-      webpack-dev-server: 5.2.2(tslib@2.9.1)(webpack@5.94.0(esbuild@0.23.0)(postcss@8.4.41))
+      webpack-dev-server: 5.2.2(tslib@2.6.3)(webpack@5.94.0(esbuild@0.23.0)(postcss@8.4.41))
       webpack-merge: 6.0.1
       webpack-subresource-integrity: 5.1.0(webpack@5.94.0(esbuild@0.23.0)(postcss@8.4.41))
     optionalDependencies:
@@ -5332,7 +5332,7 @@ snapshots:
       '@angular-devkit/architect': 0.1802.21(chokidar@3.6.0)
       rxjs: 7.8.1
       webpack: 5.94.0(esbuild@0.23.0)(postcss@8.4.41)
-      webpack-dev-server: 5.2.2(tslib@2.9.1)(webpack@5.94.0(esbuild@0.23.0)(postcss@8.4.41))
+      webpack-dev-server: 5.2.2(tslib@2.6.3)(webpack@5.94.0(esbuild@0.23.0)(postcss@8.4.41))
     transitivePeerDependencies:
       - chokidar
 
@@ -7314,7 +7314,7 @@ snapshots:
     dependencies:
       '@types/node': 26.6.6
 
-  '@types/jasmine@6.0.0': {}
+  '@types/jasmine@7.0.0': {}
 
   '@types/json-schema@7.0.15': {}
 
@@ -10336,7 +10336,7 @@ snapshots:
       mkdirp: 1.0.4
       yallist: 4.0.0
 
-  terser-webpack-plugin@5.6.1(esbuild@0.23.0)(postcss@8.4.41)(webpack@5.94.0(esbuild@0.23.0)(postcss@8.4.41)):
+  terser-webpack-plugin@5.6.1(esbuild@0.23.0)(postcss@8.4.41)(webpack@5.94.0(postcss@8.4.41)):
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       jest-worker: 27.5.1
@@ -10511,7 +10511,7 @@ snapshots:
     transitivePeerDependencies:
       - tslib
 
-  webpack-dev-server@5.2.2(tslib@2.9.1)(webpack@5.94.0(esbuild@0.23.0)(postcss@8.4.41)):
+  webpack-dev-server@5.2.2(tslib@2.6.3)(webpack@5.94.0(esbuild@0.23.0)(postcss@8.4.41)):
     dependencies:
       '@types/bonjour': 3.5.13
       '@types/connect-history-api-fallback': 1.5.4
@@ -10585,7 +10585,7 @@ snapshots:
       neo-async: 2.6.2
       schema-utils: 3.3.0
       tapable: 2.3.3
-      terser-webpack-plugin: 5.6.1(esbuild@0.23.0)(postcss@8.4.41)(webpack@5.94.0(esbuild@0.23.0)(postcss@8.4.41))
+      terser-webpack-plugin: 5.6.1(esbuild@0.23.0)(postcss@8.4.41)(webpack@5.94.0(postcss@8.4.41))
       watchpack: 2.4.1
       webpack-sources: 3.5.1
     transitivePeerDependencies:
