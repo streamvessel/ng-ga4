@@ -1755,10 +1755,11 @@ export class NgGa4Service implements OnDestroy {
         if (this.config.isExtension && chrome?.storage?.session) {
             try {
                 const result = await chrome.storage.session.get(['ga_session_id', 'ga_last_activity']);
-                if (result['ga_session_id'] && result['ga_last_activity']) {
+                const sessionId = result['ga_session_id'];
+                if (typeof sessionId === 'string' && sessionId && result['ga_last_activity']) {
                     const ts = this.parseIntSafe(result['ga_last_activity']);
                     if (ts > 0) {
-                        return { sessionId: result['ga_session_id'], lastActivityTimestamp: ts };
+                        return { sessionId, lastActivityTimestamp: ts };
                     }
                 }
                 return null;
