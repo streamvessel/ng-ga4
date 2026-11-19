@@ -147,6 +147,18 @@ state.
 If you reproduce this, do not generalise from a single early read of an
 attribution dimension. It yields an answer that looks conclusive and is not.
 
+## Device data
+
+`/mp/collect` never reads the `User-Agent` request header, so the library builds the
+request-level `device` object itself, from User-Agent Client Hints on Chromium and a
+built-in user-agent parser elsewhere. It also sends the raw string as `user_agent`.
+
+| What | Status | Basis |
+|---|---|---|
+| `device` (category, OS, browser, model, language, screen resolution) | Sent on every hit and used by GA4 | Documented |
+| `user_agent` | Sent on every hit, but **ignored**: GA4 ignores it when `device` is present | Documented |
+| Device brand for Android, marketing name ("Galaxy S23 Ultra") | Not sent; Android models go out as the raw token (`SM-S918B`). Whether GA4 derives them is untested | Not yet measured ([#89](https://github.com/streamvessel/ng-ga4/issues/89)) |
+
 ## Not yet built
 
 Separate from the above — these are gaps in *this library*, not in the

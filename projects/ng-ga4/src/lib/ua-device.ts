@@ -16,6 +16,8 @@ export interface UaDeviceInfo {
     operating_system_version?: string;
     browser?: string;
     browser_version?: string;
+    model?: string;
+    brand?: string;
 }
 
 interface Detected {
@@ -67,7 +69,8 @@ export function deviceFromUserAgent(ua: string, maxTouchPoints = 0): UaDeviceInf
     // OS too. Otherwise the payload claims a tablet running macOS — an OS that has never
     // shipped on one — and every desktop-mode iPad is filed under macOS. The real iPadOS
     // version is not recoverable from a spoofed Mac UA, so none is reported.
-    if (os?.name === 'macOS' && category === 'tablet') {
+    const desktopModeIPad = os?.name === 'macOS' && category === 'tablet';
+    if (desktopModeIPad) {
         os = { name: 'iOS' };
     }
 
@@ -85,7 +88,62 @@ export function deviceFromUserAgent(ua: string, maxTouchPoints = 0): UaDeviceInf
         }
     }
     info.category = category;
-    return info;
+    return Object.assign(info, detectHardware(ua, os?.name, desktopModeIPad));
+}
+
+// Shared by the Client Hints and UA-string paths so both classify alike. On Android,
+// Chrome drops `mobile` (and the UA's "Mobile" token) at a smallest screen width of
+// 600dp or more, so Android without it is a tablet. `formFactors` cannot decide on its
+// own: Chrome derives it from `mobile`, so tablets report ["Desktop"]. It only adds an
+// explicit "Tablet" (ChromeOS "Request tablet site") and "XR" (Android XR headsets,
+// which are also Android without `mobile`).
+export function deviceCategory(mobile: boolean, platform: string | undefined, formFactors: readonly unknown[] = []): string {
+    if (formFactors.includes('Tablet')) {
+        return 'tablet';
+    }
+    if (mobile) {
+        return 'mobile';
+    }
+    return platform === 'Android' && !formFactors.includes('XR') ? 'tablet' : 'desktop';
+}
+
+// "K": since Chrome 110 every Android UA says "Android 10; K" whatever the device; the
+// real model is only in Client Hints.
+const NON_MODEL_ANDROID_TOKENS = /^(?:K|wv|Mobile|Tablet|HarmonyOS|HMSCore.*|rv:.*)$/;
+// Pre-KitKat locale ("en-us"). Lower-case only, so short model names survive.
+const LOCALE_TOKEN = /^[a-z]{2}(?:[-_][a-zA-Z]{2,4})?$/;
+
+// Brand only where the UA leaves no doubt: iPhone/iPad/iPod can only be Apple, while an
+// Android prefix ("SM-", "Pixel") would be a guess. Android models are sent raw, not
+// mapped to marketing names.
+function detectHardware(ua: string, os: string | undefined, desktopModeIPad: boolean): Pick<UaDeviceInfo, 'model' | 'brand'> {
+    if (os === 'iOS') {
+        const model = desktopModeIPad ? 'iPad' : /\((iPhone|iPad|iPod)\b/.exec(ua)?.[1];
+        return model ? { model, brand: 'Apple' } : {};
+    }
+    if (os === 'Android') {
+        const model = androidModel(ua);
+        return model ? { model } : {};
+    }
+    return {};
+}
+
+function androidModel(ua: string): string | undefined {
+    // e.g. "(Linux; Android 13; SAMSUNG SM-S918B Build/TP1A.220624.014; wv)". One level
+    // of nested parentheses is allowed for models like "moto g(30)".
+    const segment = /Android[^;)]*;((?:[^()]|\([^()]*\))*)\)/.exec(ua);
+    if (!segment) {
+        return undefined;
+    }
+    for (const raw of segment[1].split(';')) {
+        // Old WebView UAs append the firmware build and Samsung Internet prefixes the
+        // maker; stripping both matches what Client Hints report for the same device.
+        const token = raw.replace(/\s+Build\/.*$/, '').replace(/^\s*SAMSUNG\s+/i, '').trim();
+        if (token && !NON_MODEL_ANDROID_TOKENS.test(token) && !LOCALE_TOKEN.test(token)) {
+            return token;
+        }
+    }
+    return undefined;
 }
 
 // Order matters: an iOS UA contains "like Mac OS X", an Android UA contains "Linux",
@@ -146,17 +204,10 @@ function detectCategory(ua: string, os: string | undefined, maxTouchPoints: numb
     if (/iPhone|iPod/.test(ua)) {
         return 'mobile';
     }
-    // Android tablets are exactly the Android UAs without the "Mobile" token.
-    if (os === 'Android') {
-        return /Mobi/.test(ua) ? 'mobile' : 'tablet';
-    }
-    if (/Mobi/.test(ua)) {
-        return 'mobile';
-    }
     // Since iPadOS 13, an iPad in desktop mode sends a Macintosh UA that is otherwise
     // indistinguishable from a real Mac. Macs report maxTouchPoints 0.
     if (os === 'macOS' && maxTouchPoints > 1) {
         return 'tablet';
     }
-    return 'desktop';
+    return deviceCategory(/Mobi/.test(ua), os);
 }

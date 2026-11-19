@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `device.model` and `device.brand`, previously always `(not set)`. Model comes
+  from Client Hints or the user agent, and Android models are sent as the raw
+  token (`SM-S918B`). Brand is sent only for Apple devices. Chrome's reduced-UA
+  placeholder `K` is never reported
+  ([#36](https://github.com/streamvessel/ng-ga4/issues/36)).
+- Every request carries the user-agent string as `user_agent`. GA4 documents it
+  as ignored when `device` is present, which is every hit, so reports are
+  unchanged ([#89](https://github.com/streamvessel/ng-ga4/issues/89)).
 - `setUserData()` sends opt-in, SHA-256-hashed email, phone and address as
   `user_data` for Google Ads enhanced conversions, only while `adUserData` is
   granted. Cleared on sign-out or a user ID switch, and when a granted `adUserData`
@@ -156,6 +164,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used to show up as `(not set)` in GA4's Pages and screens report. The router
   page view is sent one microtask after `NavigationEnd`, so it picks up the title
   the router's `TitleStrategy` sets for the new route rather than the previous one.
+- Chromium on an Android tablet reported `device.category` as `desktop`, while
+  Firefox reported `tablet`. Android with `userAgentData.mobile` false is now
+  `tablet`, as the user-agent parser already said
+  ([#37](https://github.com/streamvessel/ng-ga4/issues/37)).
 
 ## [0.2.2] - 2026-10-27
 

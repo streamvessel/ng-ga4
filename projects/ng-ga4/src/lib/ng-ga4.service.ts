@@ -7,7 +7,7 @@ import { NG_GA4_CONFIG, NgGa4Config, NgGa4CookieOptions } from './ng-ga4.config'
 import { ConsentState, Ga4ConsentPayload, NgGa4Consent } from './consent';
 import { regionFromCountry } from './country-region';
 import { countryFromTimeZone } from './tz-country';
-import { deviceFromUserAgent, UaDeviceInfo } from './ua-device';
+import { deviceCategory, deviceFromUserAgent, UaDeviceInfo } from './ua-device';
 import { EngagementTimer } from './engagement-timer';
 import { Ga4UserDataPayload, hashUserData, NgGa4UserData } from './user-data';
 import { EnhancedMeasurement } from './enhanced-measurement';
@@ -47,14 +47,12 @@ function deferred(): { promise: Promise<NgGa4Delivery>; settle: Settle } {
     return { promise, settle };
 }
 
-interface Ga4Device {
+// Defensive cap, not a Google limit.
+const MAX_USER_AGENT_LENGTH = 512;
+
+interface Ga4Device extends UaDeviceInfo {
     language?: string;
     screen_resolution?: string;
-    category?: string;
-    operating_system?: string;
-    operating_system_version?: string;
-    browser?: string;
-    browser_version?: string;
 }
 
 interface Ga4UserLocation {
@@ -112,6 +110,7 @@ export class NgGa4Service implements OnDestroy {
     // init() must not overwrite it with a value it loads afterwards.
     private userIdSetByApp = false;
     private device: Ga4Device | null = null;
+    private userAgent: string | null = null;
     private userLocation: Ga4UserLocation | null = null;
     // Calls made while init() runs. `drop` settles the caller's `delivered`
     // when the call will never be replayed (the service is destroyed first).
@@ -926,9 +925,16 @@ export class NgGa4Service implements OnDestroy {
         }
 
         const url = this.collectUrl(this.GA4_ENDPOINT);
-        // Request-level, the earliest in the request. Each event's own takes
-        // precedence, so a batch spanning time keeps each event's real time.
-        const body = { ...queued, timestamp_micros: Math.min(...queued.events.map(event => event.timestamp_micros)) };
+        // Added at send time, not kept in the batch envelope or the outbox:
+        // - timestamp_micros: the earliest in the request. Each event's own takes
+        //   precedence, so a batch spanning time keeps each event's real time.
+        // - user_agent: the same for every request. GA4 documents it as ignored
+        //   when `device` is present (#89).
+        const body = {
+            ...queued,
+            ...(this.userAgent ? { user_agent: this.userAgent } : {}),
+            timestamp_micros: Math.min(...queued.events.map(event => event.timestamp_micros))
+        };
 
         // The validation endpoint records nothing — "events sent to the validation
         // server don't show up in reports" — so it can only ever be a side channel.
@@ -1359,6 +1365,9 @@ export class NgGa4Service implements OnDestroy {
     // --- Device & location context (request-level GA4 fields) ---
 
     private async collectContext(): Promise<void> {
+        // The parser gets the whole string; only the field sent to GA4 is capped.
+        const ua = this.getUserAgentString()?.trim() || null;
+        this.userAgent = ua?.slice(0, MAX_USER_AGENT_LENGTH) ?? null;
         try {
             this.userLocation = this.collectUserLocation();
         } catch (err) {
@@ -1366,7 +1375,7 @@ export class NgGa4Service implements OnDestroy {
             this.userLocation = null;
         }
         try {
-            this.device = await this.collectDevice();
+            this.device = await this.collectDevice(ua);
         } catch (err) {
             console.warn('[ng-ga4] device collection failed', err);
             this.device = null;
@@ -1378,7 +1387,7 @@ export class NgGa4Service implements OnDestroy {
         return country ? { country_id: country, ...regionFromCountry(country) } : null;
     }
 
-    private async collectDevice(): Promise<Ga4Device | null> {
+    private async collectDevice(ua: string | null): Promise<Ga4Device | null> {
         if (typeof navigator === 'undefined') {
             return null;
         }
@@ -1393,9 +1402,10 @@ export class NgGa4Service implements OnDestroy {
 
         const uaData = this.getUserAgentData();
         if (uaData) {
-            device.category = uaData.mobile ? 'mobile' : 'desktop';
+            let formFactors: unknown;
             try {
-                const high = await uaData.getHighEntropyValues(['platform', 'platformVersion', 'fullVersionList']);
+                const high = await uaData.getHighEntropyValues(['platform', 'platformVersion', 'fullVersionList', 'model', 'formFactors']);
+                formFactors = high.formFactors;
                 if (high.platform) {
                     device.operating_system = high.platform;
                 }
@@ -1407,22 +1417,27 @@ export class NgGa4Service implements OnDestroy {
                     device.browser = browser.brand;
                     device.browser_version = browser.version;
                 }
+                // "" on desktops. No brand: Client Hints don't name the maker.
+                const model = typeof high.model === 'string' ? high.model.trim() : '';
+                if (model) {
+                    device.model = model;
+                }
             } catch {
                 // High-entropy hints unavailable (blocked, or a permissions policy denies
                 // them) — the UA-string fallback below fills what we did not get.
             }
+            device.category = deviceCategory(!!uaData.mobile, uaData.platform, Array.isArray(formFactors) ? formFactors : []);
         }
 
         // Client Hints are authoritative where present; the UA string only fills gaps.
         // That covers both browsers with no userAgentData at all (Safari, Firefox) and
         // Chromium whose high-entropy hints were refused above.
-        this.fillDeviceGapsFromUserAgent(device);
+        this.fillDeviceGapsFromUserAgent(device, ua);
 
         return Object.keys(device).length ? device : null;
     }
 
-    private fillDeviceGapsFromUserAgent(device: Ga4Device): void {
-        const ua = this.getUserAgentString();
+    private fillDeviceGapsFromUserAgent(device: Ga4Device, ua: string | null): void {
         if (!ua) {
             return;
         }

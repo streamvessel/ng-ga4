@@ -9,6 +9,7 @@ import { NG_GA4_CONFIG, NgGa4Config } from './ng-ga4.config';
 import { isGtagClientId } from './ga-cookie';
 import { CLIENT_ID_LOCK_NAME } from './client-id-lock';
 import { FakeLockManager, installLockManager } from './testing/fake-lock-manager';
+import { deviceFromUserAgent } from './ua-device';
 
 const MOCK_UUID = '12345678-1234-1234-1234-123456789abc';
 const MOCK_TIMESTAMP = 1700000000000;
@@ -2048,6 +2049,17 @@ describe('NgGa4Service', () => {
             httpMock.expectNone(() => true);
         });
 
+        it('should not read the user agent on the server', async () => {
+            reconfigureTestBed({}, 'server');
+            const uaSpy = spyOn<any>(service, 'getUserAgentString').and.callThrough();
+
+            await service.init();
+            service.trackEvent('ssr_event');
+
+            expect(uaSpy).not.toHaveBeenCalled();
+            httpMock.expectNone(() => true);
+        });
+
         it('should not subscribe to router navigation on the server', async () => {
             reconfigureTestBed({}, 'server');
             await service.init();
@@ -2884,6 +2896,21 @@ describe('NgGa4Service', () => {
             validation.flush({ validationMessages: [] });
         });
 
+        it('posts the same body to production and to validation', async () => {
+            reconfigureTestBed({ debug: true });
+
+            await service.init();
+            service.trackEvent('custom_event');
+
+            const { real, validation } = expectDebugPair();
+            expect(real.request.body.user_agent).toBe(navigator.userAgent);
+            // The validation post adds only validation_behavior on top of the real body.
+            const { validation_behavior: _behavior, ...validated } = validation.request.body;
+            expect(validated).toEqual(real.request.body);
+            real.flush('', { status: 204, statusText: 'No Content' });
+            validation.flush({ validationMessages: [] });
+        });
+
         it('should tag every event with debug_mode so it surfaces in DebugView', async () => {
             reconfigureTestBed({ debug: true });
 
@@ -3057,8 +3084,9 @@ describe('NgGa4Service', () => {
     // --- device & location enrichment ---
 
     describe('device & location enrichment', () => {
-        const fakeUaData = (overrides?: { mobile?: boolean; high?: any; reject?: boolean }) => ({
+        const fakeUaData = (overrides?: { mobile?: boolean; platform?: string; high?: any; reject?: boolean }) => ({
             mobile: overrides?.mobile ?? false,
+            platform: overrides?.platform ?? 'Windows',
             getHighEntropyValues: () => overrides?.reject
                 ? Promise.reject(new Error('blocked'))
                 : Promise.resolve(overrides?.high ?? {
@@ -3071,6 +3099,13 @@ describe('NgGa4Service', () => {
                     ]
                 })
         });
+
+        const takeBody = (): any => {
+            const req = httpMock.expectOne((r) => r.url.includes('mp/collect'));
+            const body = req.request.body;
+            req.flush('', { status: 204, statusText: 'No Content' });
+            return body;
+        };
 
         it('attaches request-level device built from userAgentData', async () => {
             spyOn<any>(service, 'getUserAgentData').and.returnValue(fakeUaData());
@@ -3115,6 +3150,8 @@ describe('NgGa4Service', () => {
 
         const SAFARI_MACOS = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15';
         const CHROME_WINDOWS = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+        const SAFARI_IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1';
+        const ANDROID_CHROME_REDUCED = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
         it('falls back to the user-agent string when userAgentData is unavailable', async () => {
             // Safari and Firefox never implement userAgentData, so this is the path
@@ -3167,6 +3204,169 @@ describe('NgGa4Service', () => {
             expect(device.browser).toBe('Chrome');
             expect(device.browser_version).toBe('120.0.1.2');
             req.flush('', { status: 204, statusText: 'No Content' });
+        });
+
+        it('reports the Client Hints model, requested in the same high-entropy call', async () => {
+            const uaData = fakeUaData({
+                mobile: true,
+                platform: 'Android',
+                high: { platform: 'Android', model: 'SM-S918B', formFactors: ['Mobile'], fullVersionList: [] }
+            });
+            const highSpy = spyOn(uaData, 'getHighEntropyValues').and.callThrough();
+            spyOn<any>(service, 'getUserAgentData').and.returnValue(uaData);
+            // The reduced UA Chrome actually sends: the real model is only in Client Hints.
+            spyOn<any>(service, 'getUserAgentString').and.returnValue(ANDROID_CHROME_REDUCED);
+
+            await service.init();
+            service.trackEvent('x');
+
+            expect(highSpy).toHaveBeenCalledTimes(1);
+            expect((highSpy.calls.mostRecent().args as unknown[])[0]).toEqual(jasmine.arrayContaining(['model', 'formFactors']));
+            const device = takeBody().device;
+            expect(device.model).toBe('SM-S918B');
+            expect(device.category).toBe('mobile');
+            expect('brand' in device).toBe(false);
+        });
+
+        it('sends no model when Client Hints report an empty one (desktops)', async () => {
+            spyOn<any>(service, 'getUserAgentData').and.returnValue(fakeUaData({ high: { platform: 'Windows', model: '' } }));
+            spyOn<any>(service, 'getUserAgentString').and.returnValue(CHROME_WINDOWS);
+
+            await service.init();
+            service.trackEvent('x');
+
+            const device = takeBody().device;
+            expect('model' in device).toBe(false);
+            expect('brand' in device).toBe(false);
+        });
+
+        it('does not report the reduced-UA "K" when high-entropy hints are blocked', async () => {
+            spyOn<any>(service, 'getUserAgentData').and.returnValue(fakeUaData({ mobile: true, reject: true }));
+            spyOn<any>(service, 'getUserAgentString').and.returnValue(ANDROID_CHROME_REDUCED);
+
+            await service.init();
+            service.trackEvent('x');
+
+            expect('model' in takeBody().device).toBe(false);
+        });
+
+        // The rules themselves are covered by deviceCategory in ua-device.spec.ts.
+        describe('category from Client Hints', () => {
+            const ANDROID_TABLET_HIGH = { platform: 'Android', model: 'SM-X710', formFactors: ['Desktop'], fullVersionList: [] };
+
+            const categoryFor = async (uaData: NonNullable<Parameters<typeof fakeUaData>[0]>): Promise<string> => {
+                spyOn<any>(service, 'getUserAgentData').and.returnValue(fakeUaData(uaData));
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(CHROME_WINDOWS);
+
+                await service.init();
+                service.trackEvent('x');
+                return takeBody().device.category;
+            };
+
+            it('agrees with the UA-string path for the same Android tablet', async () => {
+                const ua = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+                expect(deviceFromUserAgent(ua).category).toBe('tablet');
+                expect(await categoryFor({ mobile: false, platform: 'Android', high: ANDROID_TABLET_HIGH })).toBe('tablet');
+            });
+
+            // `mobile` and `platform` are low-entropy, so the tablet survives withheld hints.
+            it('reports the tablet when getHighEntropyValues rejects', async () => {
+                expect(await categoryFor({ mobile: false, platform: 'Android', reject: true })).toBe('tablet');
+            });
+
+            it('ignores a malformed formFactors value', async () => {
+                expect(await categoryFor({ mobile: true, platform: 'Android', high: { platform: 'Android', formFactors: 'Tablet' } })).toBe('mobile');
+            });
+
+            it('does not consult maxTouchPoints when Client Hints are present', async () => {
+                spyOnProperty(navigator, 'maxTouchPoints', 'get').and.returnValue(10);
+
+                expect(await categoryFor({ mobile: false, platform: 'Windows', high: { platform: 'Windows', formFactors: ['Desktop'] } })).toBe('desktop');
+            });
+        });
+
+        describe('user_agent', () => {
+            it('sends the user-agent string as a request-level field, next to device', async () => {
+                spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(SAFARI_IPHONE);
+
+                await service.init();
+                service.trackEvent('x');
+
+                const body = takeBody();
+                expect(body.user_agent).toBe(SAFARI_IPHONE);
+                expect(body.device.model).toBe('iPhone');
+                expect(body.device.brand).toBe('Apple');
+                expect(body.events[0].params.user_agent).toBeUndefined();
+            });
+
+            // Only reachable by forcing it, and the one case where GA4 would use user_agent.
+            it('still sends user_agent when device collection fails', async () => {
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(CHROME_WINDOWS);
+                spyOn<any>(service, 'collectDevice').and.returnValue(Promise.reject(new Error('boom')));
+                spyOn(console, 'warn');
+
+                await service.init();
+                service.trackEvent('x');
+
+                const body = takeBody();
+                expect('device' in body).toBe(false);
+                expect(body.user_agent).toBe(CHROME_WINDOWS);
+            });
+
+            for (const [label, value] of [['empty', ''], ['whitespace-only', '   '], ['missing', undefined]] as const) {
+                it(`omits user_agent when the string is ${label}`, async () => {
+                    spyOn<any>(service, 'getUserAgentString').and.returnValue(value);
+
+                    await service.init();
+                    service.trackEvent('x');
+
+                    expect('user_agent' in takeBody()).toBe(false);
+                });
+            }
+
+            it('trims surrounding whitespace', async () => {
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(`  ${CHROME_WINDOWS}\n`);
+
+                await service.init();
+                service.trackEvent('x');
+
+                expect(takeBody().user_agent).toBe(CHROME_WINDOWS);
+            });
+
+            it('caps the sent string at 512 characters but parses the whole one', async () => {
+                // In-app browsers append long app tokens; the browser token can sit past 512.
+                const ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' + 'x'.repeat(600) + ' Version/17.4 Safari/605.1.15';
+                spyOn<any>(service, 'getUserAgentData').and.returnValue(undefined);
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(ua);
+
+                await service.init();
+                service.trackEvent('x');
+
+                const body = takeBody();
+                expect(body.user_agent).toBe(ua.slice(0, 512));
+                expect(body.device.browser).toBe('Safari');
+            });
+
+            it('rides on events queued while init() is still collecting context', async () => {
+                let releaseHints!: () => void;
+                const hints = new Promise<any>((resolve) => {
+                    releaseHints = () => resolve({ platform: 'Windows', fullVersionList: [] });
+                });
+                spyOn<any>(service, 'getUserAgentData').and.returnValue({ mobile: false, platform: 'Windows', getHighEntropyValues: () => hints });
+                spyOn<any>(service, 'getUserAgentString').and.returnValue(CHROME_WINDOWS);
+
+                const initPromise = service.init();
+                service.trackEvent('early');
+                httpMock.expectNone(() => true);
+
+                releaseHints();
+                await initPromise;
+
+                const body = takeBody();
+                expect(body.events[0].name).toBe('early');
+                expect(body.user_agent).toBe(CHROME_WINDOWS);
+            });
         });
 
         it('derives user_location from the browser time zone', async () => {
@@ -4711,10 +4911,11 @@ describe('NgGa4Service', () => {
             expect(await result.delivered).toBe('stored');
             await service.flushStorage();
             const [stored] = storedOutbox();
-            // Everything but the request-level time, which is derived from the
-            // events again when the request is replayed.
-            const { timestamp_micros, ...sent } = JSON.parse(JSON.stringify(req.request.body));
+            // Everything but the request-level time and user_agent, which are both
+            // attached again when the request is replayed.
+            const { timestamp_micros, user_agent, ...sent } = JSON.parse(JSON.stringify(req.request.body));
             expect(timestamp_micros).toBe((MOCK_TIMESTAMP + 1000) * 1000);
+            expect(user_agent).toBe(navigator.userAgent);
             expect(stored).toEqual(sent);
             expect(stored.events[0].timestamp_micros).toBe((MOCK_TIMESTAMP + 1000) * 1000);
         });
@@ -4908,6 +5109,7 @@ describe('NgGa4Service', () => {
             expect(req.request.body.client_id).toBe('earlier-cid');
             expect(req.request.body.events[0].name).toBe('earlier');
             expect(req.request.body.events[0].timestamp_micros).toBe((MOCK_TIMESTAMP - 5 * HOUR_MS) * 1000);
+            expect(req.request.body.user_agent).toBe(navigator.userAgent);
             expect(mockLocalStorage['ga_outbox']).toBeUndefined();
             req.flush('', ok);
         });
