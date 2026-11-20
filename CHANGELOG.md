@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-20
+
 ### Added
 
 - `device.model` and `device.brand`, previously always `(not set)`. Model comes
@@ -53,7 +55,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `country_id`, looked up from the country the time zone resolves to. GA4's Continent
   and Subcontinent dimensions used to read `(not set)`
   ([#22](https://github.com/streamvessel/ng-ga4/issues/22)).
-
 - Every event now carries `timestamp_micros`, the time it was tracked, and each
   request carries the earliest of its events'. GA4 used to stamp events with
   their arrival time, which is wrong for anything sent later than it happened —
@@ -389,7 +390,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `beacon` and `xhr` transports; debug mode against the GA4 validation endpoint.
 - NgModule (`NgGa4Module.forRoot`) and standalone (`provideNgGa4`) APIs.
 
-[Unreleased]: https://github.com/streamvessel/ng-ga4/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/streamvessel/ng-ga4/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/streamvessel/ng-ga4/releases/tag/v0.3.0
 [0.2.2]: https://github.com/streamvessel/ng-ga4/releases/tag/v0.2.2
 [0.2.1]: https://github.com/streamvessel/ng-ga4/releases/tag/v0.2.1
 [0.2.0]: https://github.com/streamvessel/ng-ga4/releases/tag/v0.2.0
